@@ -1,0 +1,8 @@
+# .gitignore
+
+# Ignore environment variables file
+.env
+
+drafts.db
+
+responsible_person.db

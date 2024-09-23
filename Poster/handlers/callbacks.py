@@ -65,6 +65,15 @@ async def save_draft(query, context: ContextTypes.DEFAULT_TYPE) -> None:
     context.user_data.clear()
 
 async def send_for_approval(query, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not REVIEW_CHAT_ID:
+        await query.message.reply_text(
+            "Не настроен REVIEW_CHAT_ID. Пост не отправлен на согласование.",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("Главное меню", callback_data='main_menu')]
+            ])
+        )
+        return
+
     session: Session = SessionLocal()
     try:
         post_data = context.user_data

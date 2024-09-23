@@ -1,6 +1,6 @@
 # handlers/post_creation.py
 
-from telegram import Update, InlineKeyboardMarkup, InlineKeyboardButton, ReplyKeyboardRemove
+from telegram import Update, InlineKeyboardMarkup, InlineKeyboardButton, ReplyKeyboardRemove, ReplyKeyboardMarkup
 from telegram.ext import (
     ContextTypes,
     ConversationHandler,
@@ -160,12 +160,12 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
 async def review_post(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     post_data = context.user_data
     post = (
-        f"📢 *{post_data.get('title')}*\n\n"
-        f"📅 *Дата*: {post_data.get('date')}\n"
-        f"⏰ *Время*: {post_data.get('time_start')} - {post_data.get('time_end')}\n"
-        f"📍 *Место*: [{post_data.get('place_name')}]({post_data.get('place_url')})\n\n"
-        f"{post_data.get('text')}\n\n"
-        f"📞 *Контакт*: {post_data.get('contact')}"
+        f"📢 *{post_data.get('title', 'Без заголовка')}*\n\n"
+        f"📅 *Дата*: {post_data.get('date', 'Не указана')}\n"
+        f"⏰ *Время*: {post_data.get('time_start', 'Не указано')} - {post_data.get('time_end', 'Не указано')}\n"
+        f"📍 *Место*: [{post_data.get('place_name', 'Не указано')}]({post_data.get('place_url', '')})\n\n"
+        f"{post_data.get('text', 'Без текста')}\n\n"
+        f"📞 *Контакт*: {post_data.get('contact', 'Не указано')}"
     )
     
     if post_data.get('image'):
@@ -212,7 +212,9 @@ async def save_draft(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     )
     await query.message.reply_text(
         "Пост сохранён в черновики.",
-        reply_markup=ReplyKeyboardMarkup([['Главное меню']], resize_keyboard=True)
+        reply_markup=InlineKeyboardMarkup([
+            [InlineKeyboardButton("Главное меню", callback_data='main_menu')]
+        ])
     )
     context.user_data.clear()
     return ConversationHandler.END
@@ -221,28 +223,37 @@ async def send_for_approval(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     query = update.callback_query
     await query.answer()
     
+    if not REVIEW_CHAT_ID:
+        await query.message.reply_text(
+            "Не настроен REVIEW_CHAT_ID. Пост не отправлен на согласование.",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("Главное меню", callback_data='main_menu')]
+            ])
+        )
+        return ConversationHandler.END
+
     session: Session = context.bot_data['db_session']
     
     post_data = context.user_data
     post = (
-        f"📢 *{post_data.get('title')}*\n\n"
-        f"📅 *Дата*: {post_data.get('date')}\n"
-        f"⏰ *Время*: {post_data.get('time_start')} - {post_data.get('time_end')}\n"
-        f"📍 *Место*: [{post_data.get('place_name')}]({post_data.get('place_url')})\n\n"
-        f"{post_data.get('text')}\n\n"
-        f"📞 *Контакт*: {post_data.get('contact')}"
+        f"📢 *{post_data.get('title', 'Без заголовка')}*\n\n"
+        f"📅 *Дата*: {post_data.get('date', 'Не указана')}\n"
+        f"⏰ *Время*: {post_data.get('time_start', 'Не указано')} - {post_data.get('time_end', 'Не указано')}\n"
+        f"📍 *Место*: [{post_data.get('place_name', 'Не указано')}]({post_data.get('place_url', '')})\n\n"
+        f"{post_data.get('text', 'Без текста')}\n\n"
+        f"📞 *Контакт*: {post_data.get('contact', 'Не указано')}"
     )
     
     # Отправка в общий чат для согласования
     if post_data.get('image'):
-        sent_message = await context.bot.send_photo(
+        await context.bot.send_photo(
             chat_id=REVIEW_CHAT_ID,
             photo=post_data['image'],
             caption=post,
             parse_mode='MarkdownV2'
         )
     else:
-        sent_message = await context.bot.send_message(
+        await context.bot.send_message(
             chat_id=REVIEW_CHAT_ID,
             text=post,
             parse_mode='MarkdownV2'
@@ -274,7 +285,9 @@ async def send_for_approval(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     )
     await query.message.reply_text(
         "Пост отправлен на согласование.",
-        reply_markup=ReplyKeyboardMarkup([['Главное меню']], resize_keyboard=True)
+        reply_markup=InlineKeyboardMarkup([
+            [InlineKeyboardButton("Главное меню", callback_data='main_menu')]
+        ])
     )
     context.user_data.clear()
     return ConversationHandler.END

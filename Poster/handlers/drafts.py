@@ -38,17 +38,18 @@ def build_drafts_message(drafts: list) -> (str, InlineKeyboardMarkup):
     return message_text, reply_markup
 
 async def view_drafts(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    message = update.message if update.message else update.callback_query.message
     """
     Отправляет пользователю список его черновиков с кнопками для удаления.
     """
     user_id = update.effective_user.id
-    session: Session = context.bot_data['db_session']
+    session: Session = SessionLocal()
     
     drafts = session.query(Draft).filter(Draft.user_id == user_id).all()
     
     message_text, reply_markup = build_drafts_message(drafts)
     
-    await update.message.reply_text(
+    await message.reply_text(
         message_text,
         parse_mode='HTML',
         reply_markup=reply_markup
