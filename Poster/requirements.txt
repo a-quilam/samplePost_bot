@@ -1,0 +1,14 @@
+# Telegram Bot API Library
+python-telegram-bot==20.3
+
+# SQLAlchemy ORM for Database Management
+SQLAlchemy==1.4.46
+
+# Library for Loading Environment Variables from .env Files
+python-dotenv==1.0.0
+
+# Optional: Asynchronous File Handling (if needed)
+aiofiles==23.1.0
+
+# Optional: Image Processing (if required)
+Pillow==9.5.0
