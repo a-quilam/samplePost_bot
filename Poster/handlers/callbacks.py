@@ -1,173 +1,27 @@
 # handlers/callbacks.py
+"""
+Обработчики CallbackQuery, которые НЕ входят в ConversationHandler создания поста:
+- Назначение ответственного в чате согласования
+- Возврат в главное меню из inline-кнопок
+"""
 
-from telegram import ReplyKeyboardMarkup, Update, InlineKeyboardMarkup, InlineKeyboardButton, KeyboardButton
+from telegram import ReplyKeyboardMarkup, Update, KeyboardButton
 from telegram.ext import (
     ContextTypes,
     CallbackQueryHandler,
 )
 from sqlalchemy.orm import Session
 
-from config import REVIEW_CHAT_ID
 from database import SessionLocal
-from models import Draft, ResponsiblePerson
-from utils.formatter import format_text
-from utils.validators import validate_date, validate_time, validate_url
+from models import ResponsiblePerson
+from utils.formatter import escape_markdown
 
-# Удален неправильный импорт
-# from handlers.main_menu import main_menu_handler
-
-# Пример обработчика CallbackQuery
-async def handle_post_action(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    query = update.callback_query
-    await query.answer()
-    action = query.data
-
-    if action == 'save_draft':
-        await save_draft(query, context)
-    elif action == 'send_for_approval':
-        await send_for_approval(query, context)
-    elif action == 'edit_post':
-        await edit_post(query, context)
-    else:
-        await query.edit_message_text("Неизвестное действие.", reply_markup=None)
-
-async def save_draft(query, context: ContextTypes.DEFAULT_TYPE) -> None:
-    session: Session = SessionLocal()
-    
-    try:
-        draft = Draft(
-            user_id=query.from_user.id,
-            title=context.user_data.get('title'),
-            date=context.user_data.get('date'),
-            time_start=context.user_data.get('time_start'),
-            time_end=context.user_data.get('time_end'),
-            place_name=context.user_data.get('place_name'),
-            place_url=context.user_data.get('place_url'),
-            text=context.user_data.get('text'),
-            contact=context.user_data.get('contact'),
-            image=context.user_data.get('image')
-        )
-        session.add(draft)
-        session.commit()
-    except Exception as e:
-        await query.message.reply_text(f"Ошибка при сохранении черновика: {e}")
-        session.rollback()
-    finally:
-        session.close()
-
-    await query.edit_message_caption(
-        caption="Пост сохранён в черновики.",
-        parse_mode='MarkdownV2',
-        reply_markup=None
-    )
-    await query.message.reply_text(
-        "Пост сохранён в черновики.",
-        reply_markup=InlineKeyboardMarkup([
-            [InlineKeyboardButton("Главное меню", callback_data='main_menu')]
-        ])
-    )
-    context.user_data.clear()
-
-async def send_for_approval(query, context: ContextTypes.DEFAULT_TYPE) -> None:
-    await query.answer()
-
-    if not REVIEW_CHAT_ID:
-        await query.message.reply_text(
-            "Не настроен REVIEW_CHAT_ID. Пост не отправлен на согласование.",
-            reply_markup=InlineKeyboardMarkup([
-                [InlineKeyboardButton("Главное меню", callback_data='main_menu')]
-            ])
-        )
-        return
-
-    session: Session = SessionLocal()
-    
-    try:
-        post_data = context.user_data
-        post = (
-            f"📢 *{post_data.get('title', 'Без заголовка')}*\n\n"
-            f"📅 *Дата*: {post_data.get('date', 'Не указана')}\n"
-            f"⏰ *Время*: {post_data.get('time_start', 'Не указано')} - {post_data.get('time_end', 'Не указано')}\n"
-            f"📍 *Место*: [{post_data.get('place_name', 'Не указано')}]({post_data.get('place_url', '')})\n\n"
-            f"{post_data.get('text', 'Без текста')}\n\n"
-            f"📞 *Контакт*: {post_data.get('contact', 'Не указано')}"
-        )
-
-        if post_data.get('image'):
-            await context.bot.send_photo(
-                chat_id=REVIEW_CHAT_ID,
-                photo=post_data['image'],
-                caption=post,
-                parse_mode='MarkdownV2'
-            )
-        else:
-            await context.bot.send_message(
-                chat_id=REVIEW_CHAT_ID,
-                text=post,
-                parse_mode='MarkdownV2'
-            )
-
-        responsible_persons = session.query(ResponsiblePerson).all()
-
-        if responsible_persons:
-            keyboard = [
-                [InlineKeyboardButton(person.name, callback_data=f'responsible_{person.telegram_id}')]
-                for person in responsible_persons
-            ]
-            reply_markup = InlineKeyboardMarkup(keyboard)
-            await context.bot.send_message(
-                chat_id=REVIEW_CHAT_ID,
-                text="Выберите ответственного за этот пост:",
-                reply_markup=reply_markup
-            )
-        else:
-            await context.bot.send_message(
-                chat_id=REVIEW_CHAT_ID,
-                text="Нет ответственных лиц для назначения."
-            )
-    except Exception as e:
-        await query.message.reply_text(f"Ошибка при отправке на согласование: {e}")
-        session.rollback()
-    finally:
-        session.close()
-
-    await query.edit_message_caption(
-        caption="Пост отправлен на согласование.",
-        parse_mode='MarkdownV2',
-        reply_markup=None
-    )
-    await query.message.reply_text(
-        "Пост отправлен на согласование.",
-        reply_markup=InlineKeyboardMarkup([
-            [InlineKeyboardButton("Главное меню", callback_data='main_menu')]
-        ])
-    )
-    context.user_data.clear()
-
-async def edit_post(query, context: ContextTypes.DEFAULT_TYPE) -> None:
-    await query.answer()
-
-    keyboard = [
-        [InlineKeyboardButton("Заголовок", callback_data='edit_title')],
-        [InlineKeyboardButton("Дата", callback_data='edit_date')],
-        [InlineKeyboardButton("Время начала", callback_data='edit_time_start')],
-        [InlineKeyboardButton("Время конца", callback_data='edit_time_end')],
-        [InlineKeyboardButton("Место", callback_data='edit_place')],
-        [InlineKeyboardButton("Текст", callback_data='edit_text')],
-        [InlineKeyboardButton("Контакт", callback_data='edit_contact')],
-        [InlineKeyboardButton("Картинка", callback_data='edit_image')],
-        [InlineKeyboardButton("Отмена", callback_data='cancel_edit')]
-    ]
-    reply_markup = InlineKeyboardMarkup(keyboard)
-
-    await query.edit_message_caption(
-        caption="Редактирование поста. Выберите поле для изменения:",
-        parse_mode='MarkdownV2',
-        reply_markup=reply_markup
-    )
-
-# Дополнительные функции для обработки редактирования и главного меню
+# Дополнительные функции для обработки назначения ответственного и главного меню
 async def handle_responsible_selection(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """
+    Обрабатывает выбор ответственного лица в чате согласования.
+    Callback data: responsible_<telegram_id>
+    """
     query = update.callback_query
     await query.answer()
     data = query.data
@@ -186,12 +40,17 @@ async def handle_responsible_selection(update: Update, context: ContextTypes.DEF
         try:
             person = session.query(ResponsiblePerson).filter_by(telegram_id=telegram_id).first()
             if person:
+                # Экранируем только пользовательский ввод (название поста), нашу разметку не трогаем
+                title = context.user_data.get('title', 'Без заголовка')
+                safe_title = escape_markdown(title)
                 await context.bot.send_message(
                     chat_id=telegram_id,
-                    text=f"Вам назначен ответственный за новый пост:\n\n{format_text(context.user_data.get('title', 'Без заголовка'))}"
+                    text=f"Вам назначен ответственный за новый пост:\n\n{safe_title}",
+                    parse_mode='MarkdownV2'
                 )
+                safe_name = escape_markdown(person.name)
                 await query.edit_message_text(
-                    text=f"Ответственный назначен: {person.name}",
+                    text=f"Ответственный назначен: {safe_name}",
                     parse_mode='MarkdownV2'
                 )
             else:
@@ -209,6 +68,10 @@ async def handle_responsible_selection(update: Update, context: ContextTypes.DEF
             session.close()
 
 async def handle_main_menu_selection(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """
+    Обрабатывает нажатие кнопки "Главное меню" в inline-клавиатуре.
+    Заменяет inline-клавиатуру на Reply-клавиатуру главного меню.
+    """
     query = update.callback_query
     await query.answer()
     data = query.data
@@ -228,10 +91,9 @@ async def handle_main_menu_selection(update: Update, context: ContextTypes.DEFAU
 
 def callbacks_handlers() -> list:
     """
-    Возвращает список обработчиков для CallbackQuery.
+    Возвращает список обработчиков для CallbackQuery, не входящих в ConversationHandler.
     """
     return [
-        CallbackQueryHandler(handle_post_action, pattern='^(save_draft|send_for_approval|edit_post)$'),
-        CallbackQueryHandler(handle_responsible_selection, pattern='^responsible_\\d+$'),
+        CallbackQueryHandler(handle_responsible_selection, pattern=r'^responsible_\d+$'),
         CallbackQueryHandler(handle_main_menu_selection, pattern='^main_menu$'),
     ]

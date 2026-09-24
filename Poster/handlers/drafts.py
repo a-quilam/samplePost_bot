@@ -1,11 +1,16 @@
 # handlers/drafts.py
 
+from html import escape as html_escape
+
 from telegram import Update, InlineKeyboardMarkup, InlineKeyboardButton
 from telegram.ext import CallbackQueryHandler, ContextTypes
 from sqlalchemy.orm import Session
 from database import SessionLocal
 from models import Draft
-from utils.formatter import format_text
+
+def _h(value) -> str:
+    """HTML-экранирование значения с защитой от None (поля в БД nullable)."""
+    return html_escape(str(value)) if value is not None else '—'
 
 def build_drafts_message(drafts: list) -> (str, InlineKeyboardMarkup):
     if not drafts:
@@ -13,7 +18,13 @@ def build_drafts_message(drafts: list) -> (str, InlineKeyboardMarkup):
     message_text = "📄 <b>Ваши черновики:</b>\n\n"
     keyboard = []
     for draft in drafts:
-        message_text += f"📝 <b>Черновик {draft.id}</b>\n📢 {format_text(draft.title)}\n📅 {format_text(draft.date)}\n⏰ {format_text(draft.time_start)} - {format_text(draft.time_end)}\n📍 {format_text(draft.place_name)}\n\n"
+        message_text += (
+            f"📝 <b>Черновик {draft.id}</b>\n"
+            f"📢 {_h(draft.title)}\n"
+            f"📅 {_h(draft.date)}\n"
+            f"⏰ {_h(draft.time_start)} - {_h(draft.time_end)}\n"
+            f"📍 {_h(draft.place_name)}\n\n"
+        )
         keyboard.append([InlineKeyboardButton(f"❌ Удалить черновик {draft.id}", callback_data=f'delete_{draft.id}')])
     keyboard.append([InlineKeyboardButton("↩️ Главное меню", callback_data='main_menu')])
     return message_text, InlineKeyboardMarkup(keyboard)
@@ -44,7 +55,8 @@ async def delete_draft(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     await view_drafts(update, context)
 
 def drafts_handlers() -> list:
+    # Callback 'main_menu' обрабатывается в handlers/callbacks.py (handle_main_menu_selection);
+    # здесь он не регистрируется, чтобы избежать конфликта двух обработчиков.
     return [
         CallbackQueryHandler(delete_draft, pattern=r'^delete_\d+$'),
-        CallbackQueryHandler(view_drafts, pattern='^main_menu$'),
     ]

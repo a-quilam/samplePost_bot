@@ -1,0 +1,13 @@
+# Зависимости Telegram-бота Poster
+
+# python-telegram-bot v21+ (асинхронный API).
+# ВАЖНО: v20.8 не запускается на Python 3.13+ (Updater падает с AttributeError),
+# поэтому минимальная версия — 21.0.
+# Extra [job-queue] нужен для application.job_queue (handlers/jobs.py) — ставит APScheduler.
+python-telegram-bot[job-queue]>=21,<23
+
+# Загрузка переменных окружения из .env (config.py)
+python-dotenv>=1.0,<2
+
+# ORM и работа с SQLite (database.py, models.py)
+SQLAlchemy>=2.0,<3
