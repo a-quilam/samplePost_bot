@@ -82,6 +82,33 @@ def _approved_keyboard(draft_id: int) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(keyboard)
 
 
+async def notify_responsible(bot, telegram_id: int, draft, draft_id: int) -> bool:
+    """
+    Отправляет ответственному пост с кнопками действий.
+
+    Возвращает False, если доставка не удалась — типичная причина: пользователь
+    не запускал бота (Telegram вернёт 403). Назначение к этому моменту УЖЕ
+    записано в БД, поэтому сбой уведомления не должен выглядеть как сбой
+    назначения.
+    """
+    try:
+        await _send_post(
+            bot,
+            chat_id=telegram_id,
+            draft=draft,
+            heading="📌 *Вам назначен пост:*",
+            reply_markup=_responsible_keyboard(draft_id),
+        )
+        return True
+    except Exception:
+        logger.warning(
+            f"Пост #{draft_id}: уведомление ответственному {telegram_id} "
+            "не доставлено (пользователь запускал бота?).",
+            exc_info=True,
+        )
+        return False
+
+
 async def _send_post(bot, chat_id: int, draft, heading: str, reply_markup=None) -> None:
     """
     Отправляет пост из БД ответственному/в чат: единый формат send_post
@@ -179,22 +206,31 @@ async def handle_responsible_selection(
         draft = get_draft(session, draft_id)
         safe_name = escape_markdown(person.name)
 
-        await _answer_safely(query, "Ответственный назначен ✓")
+        notified = await notify_responsible(context.bot, telegram_id, draft, draft_id)
 
-        await _send_post(
-            context.bot,
-            chat_id=telegram_id,
-            draft=draft,
-            heading="📌 *Вам назначен пост:*",
-            reply_markup=_responsible_keyboard(draft_id),
-        )
+        # Клавиатуру выбора снимаем ВСЕГДА: назначение уже записано,
+        # даже если уведомление ответственному не доставилось
+        try:
+            await query.edit_message_text(
+                f"Ответственный назначен: {safe_name}",
+                parse_mode="MarkdownV2",
+                reply_markup=InlineKeyboardMarkup([]),
+            )
+        except Exception:
+            logger.warning(
+                f"Пост #{draft_id}: не удалось снять клавиатуру выбора.",
+                exc_info=True,
+            )
 
-        # Снимаем клавиатуру выбора (пустая inline-клавиатура удаляет кнопки)
-        await query.edit_message_text(
-            f"Ответственный назначен: {safe_name}",
-            parse_mode="MarkdownV2",
-            reply_markup=InlineKeyboardMarkup([]),
-        )
+        if notified:
+            await _answer_safely(query, "Ответственный назначен ✓")
+        else:
+            await _answer_safely(
+                query,
+                "Ответственный назначен, но уведомление ему не доставилось: "
+                "пользователь должен запустить бота.",
+                show_alert=True,
+            )
         logger.info(f"Пост #{draft_id}: назначен ответственный {telegram_id}.")
     except Exception as e:
         session.rollback()

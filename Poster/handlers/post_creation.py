@@ -522,6 +522,73 @@ def build_post_summary(post_data: dict, *, heading: str) -> str:
     return "\n".join(lines)
 
 
+# Максимальная длина одного сообщения в Telegram — 4096 символов.
+# Экранирование MarkdownV2 удлиняет текст (каждый спецсимвол → 2 символа),
+# поэтому итоговый текст отправляем частями с запасом до лимита.
+MESSAGE_TEXT_LIMIT = 4000
+
+
+def _trailing_backslashes(s: str) -> int:
+    """Сколько подряд идущих '\\' в конце строки."""
+    count = 0
+    for char in reversed(s):
+        if char != "\\":
+            break
+        count += 1
+    return count
+
+
+def _split_line(line: str, limit: int) -> list[str]:
+    """
+    Жёсткий сплит одной строки на части не длиннее limit.
+
+    Граница не должна разрывать пару экранирования MarkdownV2 ('\\x'):
+    иначе первая часть кончится «висячим» '\\' и Telegram вернёт ошибку
+    разбора разметки. Нечётное число '\\' перед границей → откат на 1 символ.
+    """
+    if len(line) <= limit:
+        return [line]
+    pieces: list[str] = []
+    rest = line
+    while len(rest) > limit:
+        cut = limit
+        if _trailing_backslashes(rest[:cut]) % 2 == 1:
+            cut -= 1
+        if cut <= 0:  # защита от вырожденного limit <= 1
+            cut = limit
+        pieces.append(rest[:cut])
+        rest = rest[cut:]
+    if rest:
+        pieces.append(rest)
+    return pieces
+
+
+def split_long_text(text: str, limit: int = MESSAGE_TEXT_LIMIT) -> list[str]:
+    """
+    Разбивает текст длиннее limit на части для отправки сообщениями.
+
+    Сначала — по переводам строк (границы частей читаются естественно);
+    слишком длинная строка рвётся жёстко через _split_line. На границе
+    частей теряется только один перевод строки (сообщения и так отдельные).
+    """
+    if len(text) <= limit:
+        return [text]
+    chunks: list[str] = []
+    current = ""
+    for line in text.split("\n"):
+        for piece in _split_line(line, limit):
+            candidate = f"{current}\n{piece}" if current else piece
+            if len(candidate) > limit:
+                if current:
+                    chunks.append(current)
+                current = piece
+            else:
+                current = candidate
+    if current:
+        chunks.append(current)
+    return chunks
+
+
 async def send_post(
     bot,
     chat_id,
@@ -539,24 +606,32 @@ async def send_post(
     Используется в превью, чате согласования, уведомлении ответственного
     и публикации — формат сообщения везде одинаковый, без дублирования
     логики форматирования и без повторного экранирования.
+
+    Текст длиннее MESSAGE_TEXT_LIMIT разбивается на несколько сообщений
+    (лимит Telegram — 4096); кнопки прикрепляются к первому сообщению.
     """
     text = build_post_summary(post_data, heading=heading)
     if extra_lines:
         text += extra_lines
 
     file_ids = [p for p in (photos or []) if p]
+    chunks = split_long_text(text)
+
+    async def send_text_chunks() -> None:
+        for index, chunk in enumerate(chunks):
+            await bot.send_message(
+                chat_id=chat_id,
+                text=chunk,
+                parse_mode="MarkdownV2",
+                reply_markup=reply_markup if index == 0 else None,
+            )
 
     if not file_ids:
-        await bot.send_message(
-            chat_id=chat_id,
-            text=text,
-            parse_mode="MarkdownV2",
-            reply_markup=reply_markup,
-        )
+        await send_text_chunks()
         return
 
     if len(file_ids) == 1:
-        # Лимит подписи к фото — 1024 символа: при переполнении отправляем раздельно
+        # Лимит подписи к фото — 1024 символа: при переполнении фото без подписи
         if len(text) <= 1000:
             await bot.send_photo(
                 chat_id=chat_id,
@@ -565,20 +640,16 @@ async def send_post(
                 parse_mode="MarkdownV2",
                 reply_markup=reply_markup,
             )
-        else:
-            await bot.send_photo(chat_id=chat_id, photo=file_ids[0])
-            await bot.send_message(
-                chat_id=chat_id,
-                text=text,
-                parse_mode="MarkdownV2",
-                reply_markup=reply_markup,
-            )
+            return
+        await bot.send_photo(chat_id=chat_id, photo=file_ids[0])
+        await send_text_chunks()
         return
 
     # Медиа-группа: подпись разрешена только у первого снимка
+    with_caption = len(text) <= 1000
     media = []
     for index, file_id in enumerate(file_ids):
-        if index == 0 and len(text) <= 1000:
+        if index == 0 and with_caption:
             media.append(
                 InputMediaPhoto(media=file_id, caption=text, parse_mode="MarkdownV2")
             )
@@ -586,8 +657,9 @@ async def send_post(
             media.append(InputMediaPhoto(media=file_id))
     await bot.send_media_group(chat_id=chat_id, media=media)
 
-    if len(text) > 1000:
-        await bot.send_message(chat_id=chat_id, text=text, parse_mode="MarkdownV2")
+    if not with_caption:
+        for chunk in chunks:
+            await bot.send_message(chat_id=chat_id, text=chunk, parse_mode="MarkdownV2")
     if reply_markup is not None:
         # sendMediaGroup не поддерживает кнопки — клавиатура отдельным сообщением
         await bot.send_message(
@@ -651,13 +723,41 @@ async def save_draft(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         session.close()
 
 
+def is_post_empty(post_data: dict) -> bool:
+    """
+    Пост пуст, если нет ни одного содержательного поля и нет фотографий.
+
+    Значения-заглушки «Не указано» (пропущенные шаги) считаются пустыми —
+    такой пост бессмысленно отправлять на согласование.
+    """
+    empty_values = (None, "", "Не указано")
+    for key in DRAFT_FIELD_KEYS:
+        if key == "image":
+            continue  # фото проверяется отдельно (image + photos)
+        if post_data.get(key) not in empty_values:
+            return False
+    return not post_data.get("image") and not post_data.get("photos")
+
+
 async def send_for_approval(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """
     Отправляет пост на согласование: сохраняет (или обновляет) черновик
     и создаёт цикл согласования. Повторная отправка отклонённого поста
     начинает НОВЫЙ цикл; уже согласованный/назначенный — не дублируется.
+
+    Ошибки разделены: сбой БД («не удалось сохранить») и сбой отправки
+    в чат согласования («черновик сохранён, но отправить не удалось») —
+    пользователь должен знать, что его пост не потерян.
     """
     logger.info("Отправка поста на согласование.")
+    user_data = ctx.data(context)
+
+    if is_post_empty(_post_fields(user_data)):
+        await ctx.message(update).reply_text(
+            "Пост пуст: добавьте хотя бы заголовок, текст или изображение.",
+            reply_markup=ReplyKeyboardRemove(),
+        )
+        return
 
     if not REVIEW_CHAT_ID:
         await ctx.message(update).reply_text(
@@ -668,16 +768,15 @@ async def send_for_approval(update: Update, context: ContextTypes.DEFAULT_TYPE) 
 
     session: Session = SessionLocal()
     try:
-        # Обновляем открытый черновик либо создаём новый (без лишних копий)
+        # --- Работа с БД: черновик + цикл согласования + список ответственных
         draft = _find_own_draft(
-            session, ctx.data(context).get("editing_draft_id"), ctx.user(update).id
+            session, user_data.get("editing_draft_id"), ctx.user(update).id
         )
         if draft is None:
             draft = Draft(user_id=ctx.user(update).id)
             session.add(draft)
-        _apply_fields(draft, ctx.data(context))
+        _apply_fields(draft, user_data)
         session.commit()
-        logger.info(f"Пост сохранён (черновик {draft.id}) и отправлен на согласование.")
 
         # Один активный цикл согласования на пост
         approval = get_approval(session, draft.id)
@@ -691,55 +790,82 @@ async def send_for_approval(update: Update, context: ContextTypes.DEFAULT_TYPE) 
             # Отклонён: правки внесены — начинаем новый цикл согласования
             reset_declined(session, draft.id)
 
-        # Отправка сообщения в чат согласования (уникальная логика из callbacks.py:
-        # отправка фото и клавиатура выбора ответственного).
-        # Формат — общий send_post (медиа-группа поддерживается).
-        # Автор поста — из сохранённой записи draft.user_id
+        responsible_persons = session.query(ResponsiblePerson).all()
+        keyboard = (
+            InlineKeyboardMarkup(
+                [
+                    [
+                        InlineKeyboardButton(
+                            person.name,
+                            callback_data=f"responsible_{draft.id}_{person.telegram_id}",
+                        )
+                    ]
+                    for person in responsible_persons
+                ]
+            )
+            if responsible_persons
+            else None
+        )
+
+        # Всё, что нужно для отправки, фиксируем ДО закрытия сессии:
+        # после close() объекты отсоединены и их атрибуты недоступны.
+        draft_id = draft.id
+        post_data = draft_to_post_data(draft)
+        photos = get_draft_photos(draft)
+        author_id = draft.user_id
+    except Exception as e:
+        session.rollback()
+        logger.error(f"Ошибка при сохранении поста на согласование: {e}")
+        await ctx.message(update).reply_text(
+            "Произошла ошибка при сохранении поста.",
+            reply_markup=ReplyKeyboardRemove(),
+        )
+        return
+    finally:
+        session.close()
+
+    logger.info(f"Черновик {draft_id} сохранён, отправляем в чат согласования.")
+
+    # --- Отправка в чат согласования: БД больше не нужна, ошибки — отдельно
+    try:
         await send_post(
             context.bot,
             REVIEW_CHAT_ID,
-            draft_to_post_data(draft),
-            get_draft_photos(draft),
+            post_data,
+            photos,
             heading="📋 *Новый пост для согласования:*",
-            extra_lines=f"*Автор поста:* {draft.user_id}\n",
+            extra_lines=f"*Автор поста:* {author_id}\n",
         )
 
         # Клавиатура выбора ответственного: в callback_data передаём id поста,
         # чтобы ответственный и данные поста определялись из БД, а не из
         # ctx.data(context) нажавшего администратора
-        responsible_persons = session.query(ResponsiblePerson).all()
-        if responsible_persons:
-            keyboard = [
-                [
-                    InlineKeyboardButton(
-                        person.name,
-                        callback_data=f"responsible_{draft.id}_{person.telegram_id}",
-                    )
-                ]
-                for person in responsible_persons
-            ]
+        if keyboard is not None:
             await context.bot.send_message(
                 chat_id=REVIEW_CHAT_ID,
                 text="Выберите ответственного за этот пост:",
-                reply_markup=InlineKeyboardMarkup(keyboard),
+                reply_markup=keyboard,
             )
         else:
             await context.bot.send_message(
                 chat_id=REVIEW_CHAT_ID, text="Нет ответственных лиц для назначения."
             )
-
-        await ctx.message(update).reply_text(
-            "Пост отправлен на согласование.", reply_markup=ReplyKeyboardRemove()
-        )
     except Exception as e:
-        session.rollback()
+        logger.error(
+            f"Черновик {draft_id} сохранён, но отправка в чат согласования "
+            f"не удалась: {e}"
+        )
         await ctx.message(update).reply_text(
-            "Произошла ошибка при отправке поста на согласование.",
+            f"Черновик сохранён (№{draft_id}), но отправить пост в чат "
+            "согласования не удалось. Проверьте, что бот добавлен в чат "
+            "и REVIEW_CHAT_ID указан верно.",
             reply_markup=ReplyKeyboardRemove(),
         )
-        logger.error(f"Ошибка при отправке поста на согласование: {e}")
-    finally:
-        session.close()
+        return
+
+    await ctx.message(update).reply_text(
+        "Пост отправлен на согласование.", reply_markup=ReplyKeyboardRemove()
+    )
 
 
 async def edit_post(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
