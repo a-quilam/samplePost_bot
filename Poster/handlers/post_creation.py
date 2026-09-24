@@ -21,7 +21,7 @@ from telegram.ext import (
 
 from database import SessionLocal
 from handlers.drafts import view_drafts
-from handlers.main_menu import main_menu_keyboard
+from handlers.main_menu import help_command, main_menu_keyboard, start
 from models import Draft, get_draft_photos, photos_to_json
 from utils import tg_context as ctx
 from utils.formatter import escape_markdown, format_text
@@ -121,7 +121,9 @@ def get_post_actions_keyboard():
     keyboard = [
         [InlineKeyboardButton("✏️ Редактировать", callback_data="edit_post")],
         [InlineKeyboardButton("📄 Сохранить в черновики", callback_data="save_draft")],
-        [InlineKeyboardButton("✅ Готово", callback_data="finish")],
+        # Подпись объясняет результат: после нажатия бот пришлёт готовый
+        # пост именно в этот чат (сам текст поста от кнопки не зависит)
+        [InlineKeyboardButton("✅ Готово — получить пост", callback_data="finish")],
     ]
     return InlineKeyboardMarkup(keyboard)
 
@@ -913,6 +915,26 @@ async def handle_edit(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int
         return ConversationHandler.END
 
 
+async def handle_stale_preview_action(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> int:
+    """
+    Кнопки превью, нажатые во время редактирования поля: «✅ Готово —
+    получить пост», «📄 Сохранить в черновики» и повторное «✏️ Редактировать».
+
+    Ничего не сохраняем и не отправляем: бот отвечает короткой подсказкой,
+    состояние EDIT_FIELD сохраняется. Раньше «Редактировать» здесь попадал
+    в обработчик выбора поля («Неизвестное поле» + завершение диалога),
+    а «Готово»/«Сохранить в черновики» молча игнорировались.
+    """
+    query = ctx.query(update)
+    await query.answer("Сначала завершите редактирование поля")
+    logger.info(
+        f"Кнопка превью '{query.data}' во время редактирования поля — подсказка."
+    )
+    return EDIT_FIELD
+
+
 async def process_edit(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     """
     Обрабатывает ввод пользователя при редактировании поля.
@@ -1031,14 +1053,41 @@ async def cancel_creation(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     return ConversationHandler.END
 
 
+async def start_during_creation(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> int:
+    """
+    Команда /start ВНУТРИ диалога: незавершённый пост сохраняется, диалог
+    завершается — дальше работает обычный /start. Пользователь явно выходит
+    из создания, а не получает приветствие «поверх» активного диалога.
+    """
+    await _save_wip_before_exit(update, context)
+    await start(update, context)
+    return ConversationHandler.END
+
+
+async def help_during_creation(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> int:
+    """
+    Команда /help ВНУТРИ диалога: незавершённый пост сохраняется, показывается
+    справка и диалог завершается — следующее сообщение пользователя не может
+    неожиданно записаться в поле поста.
+    """
+    await _save_wip_before_exit(update, context)
+    await help_command(update, context)
+    return ConversationHandler.END
+
+
 async def view_drafts_and_exit(
     update: Update, context: ContextTypes.DEFAULT_TYPE
 ) -> int:
     """
-    Reply-кнопка «📝 Черновики» ВНУТРИ диалога: незавершённый пост сохраняется,
-    показывается список черновиков и диалог завершается — состояние не должно
-    «висеть» после перехода в другой раздел (иначе следующий текст пользователя
-    уходил бы на шаг диалога, который пользователь уже покинул).
+    Reply-кнопка «📝 Черновики» и команда /drafts ВНУТРИ диалога:
+    незавершённый пост сохраняется, показывается список черновиков и диалог
+    завершается — состояние не должно «висеть» после перехода в другой
+    раздел (иначе следующий текст пользователя уходил бы на шаг диалога,
+    который пользователь уже покинул).
     """
     await _save_wip_before_exit(update, context)
     await view_drafts(update, context)
@@ -1085,6 +1134,12 @@ def post_creation_handlers() -> list[BaseHandler]:
                     MessageHandler(
                         filters.Regex("^📝 Черновики$"), view_drafts_and_exit
                     ),
+                    # Кнопки превью, нажатые во время выбора поля. ВАЖНО стоять
+                    # ДО handle_edit: его паттерн ^edit_.*$ ловит и «Редактировать»
+                    CallbackQueryHandler(
+                        handle_stale_preview_action,
+                        pattern="^(edit_post|finish|save_draft)$",
+                    ),
                     CallbackQueryHandler(
                         handle_edit, pattern="^edit_.*$|^cancel_edit$"
                     ),
@@ -1094,7 +1149,16 @@ def post_creation_handlers() -> list[BaseHandler]:
                     MessageHandler(filters.TEXT & ~filters.COMMAND, process_edit),
                 ],
             },
-            fallbacks=[CommandHandler("cancel", cancel_creation)],
+            # Команды во время активного диалога завершают его (с сохранением
+            # незавершённого поста): иначе команда обслуживалась бы глобально,
+            # диалог оставался бы активным, и следующий текст пользователя
+            # неожиданно уходил бы в поле поста
+            fallbacks=[
+                CommandHandler("cancel", cancel_creation),
+                CommandHandler("start", start_during_creation),
+                CommandHandler("help", help_during_creation),
+                CommandHandler("drafts", view_drafts_and_exit),
+            ],
             allow_reentry=True,
         )
     ]

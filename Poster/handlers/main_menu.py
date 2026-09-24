@@ -39,9 +39,10 @@ def main_menu_handlers() -> list[BaseHandler]:
     как entry_point ConversationHandler в handlers/post_creation.py,
     иначе состояние диалога создания поста не отслеживается.
 
-    /drafts дублирует reply-кнопку «📝 Черновики» (в отличие от кнопки,
-    команда не завершает активный диалог — PTB не позволяет завершить
-    чужой ConversationHandler извне).
+    /drafts дублирует reply-кнопку «📝 Черновики»: когда диалога нет — список
+    показывает этот хендлер; во время активного диалога команду обслуживают
+    fallback'ы ConversationHandler (незавершённый пост сохраняется, диалог
+    завершается — см. handlers/post_creation.py).
     """
     handlers = [
         CommandHandler("start", start),

@@ -13,7 +13,11 @@
 - редактирование: русские названия полей в меню и промпте;
 - черновики: незавершённый пост сохраняется при выходах, открытие
   другого черновика не теряет правки, обновление без копий;
-- фото: подсказка вне шага изображения, защита поля от фото.
+- фото: подсказка вне шага изображения, защита поля от фото;
+- неактуальные кнопки превью в режиме редактирования: короткая
+  подсказка вместо тишины/ошибки, состояние правки сохраняется;
+- команды /start, /help, /drafts во время создания сохраняют
+  незавершённый пост и завершают диалог.
 
 Запуск из каталога Poster:
     python -m unittest discover -s tests -v
@@ -23,6 +27,7 @@
 
 import asyncio
 import unittest
+from datetime import datetime
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
@@ -35,6 +40,15 @@ POSTER_DIR = Path(__file__).resolve().parent.parent
 # Импорт обработчиков требует config (.env с токеном) и telegram —
 # при недоступности соответствующие тесты пропускаются, а не падают.
 try:
+    from telegram import (
+        Bot,
+        CallbackQuery,
+        Chat,
+        Message,
+        MessageEntity,
+        Update,
+        User,
+    )
     from telegram.ext import CallbackQueryHandler, ConversationHandler
 
     import bot as bot_module
@@ -46,17 +60,28 @@ try:
         POST_STEPS,
         cancel_creation,
         finish_post,
+        get_post_actions_keyboard,
         handle_callback_query,
         handle_edit,
         handle_message,
         handle_photo,
+        handle_stale_preview_action,
+        help_during_creation,
         process_edit,
+        start_during_creation,
         start_edit_draft,
         start_post_creation,
         view_drafts_and_exit,
     )
     from models import Draft
     from utils.formatter import escape_markdown
+
+    # Bot нужен только для check_update CommandHandler (сравнивает имя бота);
+    # сеть не используется — username подставляется вместо getMe
+    ROUTING_TEST_BOT = Bot("123456:TEST-TOKEN")
+    ROUTING_TEST_BOT._bot_user = User(
+        id=1, is_bot=True, first_name="Тест", username="routing_test"
+    )
 
     HANDLERS_IMPORT_ERROR = None
 except Exception as e:  # noqa: BLE001 — причина попадает в сообщение пропуска
@@ -115,6 +140,74 @@ def make_callback_update(data):
         effective_user=SimpleNamespace(id=7),
         effective_chat=SimpleNamespace(id=777),
     )
+
+
+def make_text_update(text):
+    """
+    Настоящий Update с сообщением (у команд — bot_command-entity).
+
+    Нужен для проверки фильтров ConversationHandler: filters.COMMAND решает
+    по entities, поэтому заглушке из SimpleNamespace их не подставить.
+    """
+    entities = []
+    if text.startswith("/"):
+        entities = [
+            MessageEntity(type=MessageEntity.BOT_COMMAND, offset=0, length=len(text))
+        ]
+    message = Message(
+        message_id=1,
+        date=datetime(2026, 1, 1),
+        chat=Chat(id=777, type="private"),
+        from_user=User(id=7, first_name="Тест", is_bot=False),
+        text=text,
+        entities=entities,
+    )
+    message.set_bot(ROUTING_TEST_BOT)
+    return Update(update_id=1, message=message)
+
+
+def make_callback_route_update(data):
+    """Настоящий Update с CallbackQuery — для проверки паттернов диалога."""
+    user = User(id=7, first_name="Тест", is_bot=False)
+    message = Message(
+        message_id=2,
+        date=datetime(2026, 1, 1),
+        chat=Chat(id=777, type="private"),
+        from_user=user,
+    )
+    message.set_bot(ROUTING_TEST_BOT)
+    return Update(
+        update_id=2,
+        callback_query=CallbackQuery(
+            id="1",
+            chat_instance="c",
+            from_user=user,
+            message=message,
+            data=data,
+        ),
+    )
+
+
+def resolve_dialog_handler(conv, state, update, chat_id=777, user_id=7):
+    """
+    Хендлер ConversationHandler, обслуживающий update в заданном состоянии.
+
+    Состояние задаётся напрямую во внутреннем хранилище PTB (ключ
+    (chat, user)): публичного способа «поставить активный диалог в
+    состояние» без реального бота нет.
+    """
+    key = (chat_id, user_id)
+    conv._conversations[key] = state
+    try:
+        result = conv.check_update(update)
+    finally:
+        conv._conversations.pop(key, None)
+    if not result:
+        return None
+    if isinstance(result, tuple):
+        # PTB 22.x возвращает (state, key, handler, check_result) — берём хендлер
+        return next((item for item in result if hasattr(item, "callback")), None)
+    return result
 
 
 # Все 8 текстовых полей по порядку шагов (9-й шаг — изображение)
@@ -529,6 +622,208 @@ class PhotoGuardTests(unittest.TestCase):
         self.assertEqual(user_data["title"], "Концерт", "поле не должно стираться")
         reply = update.effective_message.reply_text.await_args.args[0]
         self.assertIn("Изображение", reply)
+
+
+class _InMemoryDbMixin:
+    """Патчит SessionLocal на БД в памяти: post_bot.db тестами не трогается."""
+
+    def setUp(self):
+        import handlers.drafts as drafts_module
+        import handlers.post_creation as post_creation_module
+
+        self.post_creation_module = post_creation_module
+        self.drafts_module = drafts_module
+        self._orig_session_local = (
+            post_creation_module.SessionLocal,
+            drafts_module.SessionLocal,
+        )
+        self.session_factory, self.engine = make_session_factory()
+        post_creation_module.SessionLocal = self.session_factory
+        drafts_module.SessionLocal = self.session_factory
+
+    def tearDown(self):
+        self.post_creation_module.SessionLocal = self._orig_session_local[0]
+        self.drafts_module.SessionLocal = self._orig_session_local[1]
+        self.engine.dispose()
+
+    def _all_drafts(self):
+        session = self.session_factory()
+        try:
+            return session.query(Draft).order_by(Draft.id).all()
+        finally:
+            session.close()
+
+
+@unittest.skipIf(
+    HANDLERS_IMPORT_ERROR is not None,
+    f"импорт обработчиков недоступен: {HANDLERS_IMPORT_ERROR}",
+)
+class StalePreviewActionTests(_InMemoryDbMixin, unittest.TestCase):
+    """Кнопки превью во время EDIT_FIELD: подсказка, состояние сохраняется."""
+
+    @staticmethod
+    def _in_edit_field():
+        user_data = {
+            "current_step": len(POST_STEPS),
+            "edit_field": "title",
+            "title": "Концерт",
+        }
+        return user_data, SimpleNamespace(user_data=user_data, bot=RecordingBot())
+
+    def test_repeat_edit_press_keeps_dialog_and_state(self):
+        user_data, context = self._in_edit_field()
+        update = make_callback_update("edit_post")
+
+        result = asyncio.run(handle_stale_preview_action(update, context))
+
+        # диалог НЕ завершается, текущее редактирование не сбрасывается
+        self.assertEqual(result, EDIT_FIELD)
+        self.assertEqual(user_data["edit_field"], "title")
+        self.assertEqual(user_data["title"], "Концерт")
+        query = update.callback_query
+        query.answer.assert_awaited()
+        self.assertIn(
+            "Сначала завершите редактирование поля",
+            query.answer.await_args.args[0],
+        )
+        # «Неизвестное поле для редактирования.» больше не отправляется
+        query.edit_message_text.assert_not_awaited()
+
+    def test_finish_and_save_draft_get_hint_instead_of_silence(self):
+        for data in ("finish", "save_draft"):
+            with self.subTest(data=data):
+                user_data, context = self._in_edit_field()
+                update = make_callback_update(data)
+
+                result = asyncio.run(handle_stale_preview_action(update, context))
+
+                self.assertEqual(result, EDIT_FIELD)
+                self.assertIn(
+                    "Сначала завершите редактирование поля",
+                    update.callback_query.answer.await_args.args[0],
+                )
+                # ни отправки поста, ни сохранения — и данные целы
+                self.assertEqual(context.bot.calls, [])
+                self.assertEqual(user_data["title"], "Концерт")
+        self.assertEqual(self._all_drafts(), [], "черновик не должен создаваться")
+
+    def test_stale_buttons_routed_to_hint_handler(self):
+        application = bot_module.build_application()
+        conv = next(
+            h for h in application.handlers[0] if isinstance(h, ConversationHandler)
+        )
+        for data in ("edit_post", "finish", "save_draft"):
+            with self.subTest(data=data):
+                handler = resolve_dialog_handler(
+                    conv, EDIT_FIELD, make_callback_route_update(data)
+                )
+                self.assertIsNotNone(handler, f"'{data}' должен обслуживаться")
+                self.assertEqual(
+                    handler.callback.__name__,
+                    "handle_stale_preview_action",
+                    f"'{data}' не должен уходить в handle_edit или молчать",
+                )
+
+    def test_finish_button_label_explains_result(self):
+        buttons = [
+            button
+            for row in get_post_actions_keyboard().inline_keyboard
+            for button in row
+        ]
+        finish = next(button for button in buttons if button.callback_data == "finish")
+        self.assertIn("Готово", finish.text)
+        self.assertIn("получить пост", finish.text)
+
+
+@unittest.skipIf(
+    HANDLERS_IMPORT_ERROR is not None,
+    f"импорт обработчиков недоступен: {HANDLERS_IMPORT_ERROR}",
+)
+class CommandDuringCreationTests(_InMemoryDbMixin, unittest.TestCase):
+    """/start, /help, /drafts во время диалога: сохранение WIP + завершение."""
+
+    @staticmethod
+    def _replies(update):
+        return [
+            call.args[0] for call in update.effective_message.reply_text.await_args_list
+        ]
+
+    @staticmethod
+    def _conversation():
+        application = bot_module.build_application()
+        return next(
+            h for h in application.handlers[0] if isinstance(h, ConversationHandler)
+        )
+
+    def test_start_during_creation_saves_and_exits(self):
+        user_data = {"current_step": 2, "title": "Начатый пост"}
+        context = SimpleNamespace(user_data=user_data, bot=RecordingBot())
+        update = make_message_update("/start")
+
+        result = asyncio.run(start_during_creation(update, context))
+
+        self.assertEqual(result, ConversationHandler.END)
+        drafts = self._all_drafts()
+        self.assertEqual(len(drafts), 1, "незавершённый пост должен сохраниться")
+        self.assertEqual(drafts[0].title, "Начатый пост")
+        self.assertNotIn("title", user_data)
+        self.assertTrue(
+            any("Здравствуйте" in text for text in self._replies(update)),
+            "пользователь должен увидеть главное меню",
+        )
+
+    def test_help_during_edit_saves_and_exits(self):
+        user_data = {
+            "current_step": len(POST_STEPS),
+            "edit_field": "date",
+            "date": "25.12.2026",
+        }
+        context = SimpleNamespace(user_data=user_data, bot=RecordingBot())
+        update = make_message_update("/help")
+
+        result = asyncio.run(help_during_creation(update, context))
+
+        self.assertEqual(result, ConversationHandler.END)
+        drafts = self._all_drafts()
+        self.assertEqual(len(drafts), 1)
+        self.assertEqual(drafts[0].date, "25.12.2026")
+        # состояние правки не «висит» после выхода
+        self.assertNotIn("edit_field", user_data)
+        self.assertNotIn("date", user_data)
+        self.assertTrue(
+            any("Команды:" in text for text in self._replies(update)),
+            "должна показаться справка",
+        )
+
+    def test_commands_route_to_exit_fallbacks(self):
+        conv = self._conversation()
+        expected = {
+            "/start": "start_during_creation",
+            "/help": "help_during_creation",
+            "/drafts": "view_drafts_and_exit",
+            "/cancel": "cancel_creation",
+            # повторный /create_post перезапускает диалог (entry-точка)
+            "/create_post": "start_post_creation",
+        }
+        for state in (POST_CREATION, EDIT_FIELD):
+            for command, handler_name in expected.items():
+                with self.subTest(state=state, command=command):
+                    handler = resolve_dialog_handler(
+                        conv, state, make_text_update(command)
+                    )
+                    self.assertIsNotNone(handler, "команда должна обслуживаться")
+                    # и НЕ уходит в handle_message/process_edit — текстом поля
+                    self.assertEqual(handler.callback.__name__, handler_name)
+
+    def test_commands_without_dialog_go_to_global_handlers(self):
+        conv = self._conversation()
+        for command in ("/start", "/help", "/drafts", "/cancel"):
+            with self.subTest(command=command):
+                # fallback'и работают только при активном диалоге — иначе
+                # /start отвечал бы дважды (глобальный хендлер тоже зарегистрирован)
+                self.assertFalse(conv.check_update(make_text_update(command)))
+        # /create_post вне диалога — обычная entry-точка
+        self.assertTrue(conv.check_update(make_text_update("/create_post")))
 
 
 @unittest.skipIf(
