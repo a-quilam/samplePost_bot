@@ -608,12 +608,22 @@ class HandlerOrderTests(unittest.TestCase):
                 if isinstance(h, MessageHandler) and h.check_update(update)
             ]
             self.assertTrue(matched, f"кнопка «Черновики» не обрабатывается в {state}")
-            # Первым должен сработать обработчик, завершающий диалог,
-            # а не generic TEXT-хендлер (иначе текст кнопки запишется в поле)
-            self.assertEqual(
-                getattr(matched[0].callback, "__name__", ""),
-                "view_drafts_and_exit",
-                f"в состоянии {state} «Черновики» перехватывает {matched[0].callback}",
+            # Первым должен идти УЗКИЙ обработчик кнопки (заканчивает диалог),
+            # а не generic TEXT — иначе текст кнопки запишется в поле поста.
+            # Проверяем поведением: первый сработавший обработчик не должен
+            # принимать произвольный текст.
+            probe = Update(
+                update_id=2,
+                message=Message(
+                    message_id=2,
+                    date=datetime(2026, 1, 1),
+                    chat=Chat(id=555, type="private"),
+                    text="просто текст",
+                ),
+            )
+            self.assertFalse(
+                matched[0].check_update(probe),
+                f"в состоянии {state} generic TEXT-хендлер идёт перед кнопкой",
             )
 
 
@@ -712,10 +722,10 @@ class DraftsPaginationTests(unittest.TestCase):
         self.assertIn("draftpage_0", datas)  # назад — на первую страницу
         self.assertNotIn("draftpage_20", datas)  # вперёд за конец списка не нужно
 
-    def test_build_without_total_has_no_navigation(self):
-        # Обратная совместимость: вызов без total — страница единственная
+    def test_no_navigation_when_all_drafts_shown(self):
+        # Вся выборка помещается на одну страницу — листание не нужно
         drafts = [self._make_draft(1), self._make_draft(2)]
-        text, markup = build_drafts_message(drafts)
+        text, markup = build_drafts_message(drafts, total=2)
         datas = [b.callback_data for row in markup.inline_keyboard for b in row]
         self.assertFalse(any(d.startswith("draftpage_") for d in datas))
         self.assertNotIn("листайте", text)

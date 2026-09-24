@@ -27,14 +27,11 @@ async def handle_main_menu_selection(
     """
     query = ctx.query(update)
     await query.answer()
-
-    if query.data == "main_menu":
-        await query.edit_message_text("Здравствуйте! 👋")
-        await ctx.message(update).reply_text(
-            "Выберите действие:", reply_markup=main_menu_keyboard()
-        )
-    else:
-        await query.edit_message_text("Неизвестное действие.")
+    # Паттерн регистрации — ^main_menu$: другого значения data здесь не бывает
+    await query.edit_message_text("Здравствуйте! 👋")
+    await ctx.message(update).reply_text(
+        "Выберите действие:", reply_markup=main_menu_keyboard()
+    )
 
 
 def callbacks_handlers() -> list[BaseHandler]:

@@ -280,12 +280,12 @@ class DraftsKeyboardTests(unittest.TestCase):
         )
 
     def test_empty_list(self):
-        text, markup = build_drafts_message([])
+        text, markup = build_drafts_message([], total=0)
         self.assertIn("нет черновиков", text)
         self.assertIsNone(markup)
 
     def test_buttons_for_each_draft(self):
-        text, markup = build_drafts_message([self._draft(1), self._draft(2)])
+        text, markup = build_drafts_message([self._draft(1), self._draft(2)], total=2)
         datas = [
             button.callback_data for row in markup.inline_keyboard for button in row
         ]

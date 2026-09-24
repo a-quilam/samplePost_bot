@@ -6,6 +6,7 @@ from telegram import (
     InlineKeyboardButton,
     InlineKeyboardMarkup,
     InputMediaPhoto,
+    Message,
     Update,
 )
 from telegram.ext import (
@@ -36,96 +37,72 @@ POST_CREATION, EDIT_FIELD = range(2)
 # пользователь в превью, дословно совпадает с финальной отправкой по «Готово».
 POST_HEADING = "📢 *Новый пост:*"
 
-# Поля черновика (совпадают с колонками модели Draft, кроме служебных)
-DRAFT_FIELD_KEYS = [
-    "title",
-    "date",
-    "time_start",
-    "time_end",
-    "place_name",
-    "place_url",
-    "text",
-    "contact",
-    "image",
-]
-
 # Определение шагов создания поста
 # list[dict[str, Any]] — явная аннотация: без неё mypy сводит разнотипные
-# словари к object и «step['key']» становится ошибкой типов
+# словари к object и «step['key']» становится ошибкой типов.
+# POST_STEPS — единый источник метаданных полей: русская метка (label),
+# промпт шага и валидатор берутся отсюда и визардом, и редактором, и сводкой
+# поста; текстовые поля форматируются единообразно — через format_text.
 POST_STEPS: list[dict[str, Any]] = [
     {
         "key": "title",
         "label": "Заголовок",
         "prompt": "Введите заголовок поста или нажмите 'Пропустить':",
         "validator": None,
-        "formatter": format_text,
-        "optional": True,
     },
     {
         "key": "date",
         "label": "Дата",
         "prompt": "Введите дату события (ДД.ММ.ГГГГ) или нажмите 'Пропустить':",
         "validator": validate_date,
-        "formatter": format_text,
-        "optional": True,
     },
     {
         "key": "time_start",
         "label": "Время начала",
         "prompt": "Введите время начала (ЧЧ:ММ) или нажмите 'Пропустить':",
         "validator": validate_time,
-        "formatter": format_text,
-        "optional": True,
     },
     {
         "key": "time_end",
         "label": "Время окончания",
         "prompt": "Введите время окончания (ЧЧ:ММ) или нажмите 'Пропустить':",
         "validator": validate_time,
-        "formatter": format_text,
-        "optional": True,
     },
     {
         "key": "place_name",
         "label": "Место",
         "prompt": "Введите место проведения или нажмите 'Пропустить':",
         "validator": None,
-        "formatter": format_text,
-        "optional": True,
     },
     {
         "key": "text",
         "label": "Текст",
         "prompt": "Введите текст поста или нажмите 'Пропустить':",
         "validator": None,
-        "formatter": format_text,
-        "optional": True,
     },
     {
         "key": "contact",
         "label": "Контакты",
         "prompt": "Введите контактную информацию или нажмите 'Пропустить':",
         "validator": None,
-        "formatter": format_text,
-        "optional": True,
     },
     {
         "key": "place_url",
         "label": "URL места",
         "prompt": "Введите URL места проведения или нажмите 'Пропустить':",
         "validator": validate_url,
-        "formatter": format_text,
-        "optional": True,
     },
     {
         "key": "image",
         "label": "Изображение",
         "prompt": "Отправьте изображение или нажмите 'Пропустить':",
         "validator": None,
-        "formatter": None,
-        "optional": True,
     },
 ]
+
+# Поля черновика выводятся из POST_STEPS: состав совпадает с колонками
+# модели Draft (кроме служебных), порядок здесь не важен.
+DRAFT_FIELD_KEYS = [step["key"] for step in POST_STEPS]
 
 
 def get_skip_keyboard():
@@ -166,6 +143,43 @@ def _clear_post_data(user_data: dict) -> None:
         "edit_field",
     ]:
         user_data.pop(key, None)
+
+
+def _apply_skip(user_data: dict, key: str) -> None:
+    """
+    Пропуск шага или правки: поле становится пустым (None), изображение —
+    без фото. Общая точка для визарда и режима редактирования.
+    """
+    if key == "image":
+        user_data["image"] = None
+        user_data["photos"] = []
+        user_data.pop("pending_media", None)
+    else:
+        user_data[key] = None
+
+
+def _store_photo(user_data: dict, message: Message) -> str:
+    """
+    Сохраняет фотографию в user_data (одиночное фото или альбом).
+    Возвращает состояние записи:
+      "continued" — фото добавлено в уже начатый альбом (молча),
+      "started"   — начат новый альбом (нужна кнопка «✅ Фото готово»),
+      "single"    — одиночное фото (готово к превью).
+    """
+    file_id = message.photo[-1].file_id
+    media_group_id = message.media_group_id
+    if media_group_id and user_data.get("pending_media") == media_group_id:
+        user_data.setdefault("photos", []).append(file_id)
+        return "continued"
+    if media_group_id:
+        user_data["pending_media"] = media_group_id
+        user_data["photos"] = [file_id]
+        user_data["image"] = file_id
+        return "started"
+    user_data["photos"] = [file_id]
+    user_data["image"] = file_id
+    user_data.pop("pending_media", None)
+    return "single"
 
 
 def _current_photos(user_data: dict) -> list:
@@ -362,17 +376,11 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
     logger.info(f"Получено сообщение для шага '{step['key']}': {text}")
 
-    if step["optional"] and text.lower() == "пропустить":
-        if step["key"] == "image":
-            ctx.data(context)["image"] = None
-            ctx.data(context)["photos"] = []
-            ctx.data(context).pop("pending_media", None)
-            logger.info("Пользователь пропустил добавление изображения.")
-        else:
-            # Пропуск — пустое поле (None), а не строка-заглушка:
-            # «Не указано» не должно попадать ни в сводку, ни в БД
-            ctx.data(context)[step["key"]] = None
-            logger.info(f"Пользователь пропустил поле '{step['key']}'.")
+    if text.lower() == "пропустить":
+        # Пропуск — пустое поле (None), а не строка-заглушка:
+        # «Не указано» не должно попадать ни в сводку, ни в БД
+        _apply_skip(ctx.data(context), step["key"])
+        logger.info(f"Пользователь пропустил поле '{step['key']}'.")
     else:
         if step["validator"] and not step["validator"](text):
             await ctx.message(update).reply_text(
@@ -384,10 +392,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
         if step["key"] == "image":
             if ctx.message(update).photo:
-                file_id = ctx.message(update).photo[-1].file_id
-                ctx.data(context)["photos"] = [file_id]
-                ctx.data(context)["image"] = file_id
-                ctx.data(context).pop("pending_media", None)
+                _store_photo(ctx.data(context), ctx.message(update))
                 await ctx.message(update).reply_text("Картинка добавлена.")
                 logger.info("Пользователь добавил изображение.")
                 ctx.data(context)["current_step"] += 1
@@ -402,8 +407,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
                 logger.warning("Пользователь не отправил изображение.")
                 return POST_CREATION
         else:
-            formatter = step["formatter"] if step["formatter"] else (lambda x: x)
-            ctx.data(context)[step["key"]] = formatter(text)
+            ctx.data(context)[step["key"]] = format_text(text)
             logger.info(
                 f"Пользователь ввел '{step['key']}': {ctx.data(context)[step['key']]}"
             )
@@ -423,14 +427,8 @@ async def handle_skip(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int
         return POST_CREATION
 
     step = POST_STEPS[step_index]
-    if step["key"] == "image":
-        ctx.data(context)["image"] = None
-        ctx.data(context)["photos"] = []
-        ctx.data(context).pop("pending_media", None)
-        logger.info("Пользователь пропустил добавление изображения.")
-    else:
-        ctx.data(context)[step["key"]] = None
-        logger.info(f"Пользователь пропустил поле '{step['key']}'.")
+    _apply_skip(ctx.data(context), step["key"])
+    logger.info(f"Пользователь пропустил поле '{step['key']}'.")
 
     ctx.data(context)["current_step"] += 1
     await prompt_step(update, context)
@@ -445,14 +443,13 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> in
     Медиа-группа (альбом) приходит отдельными сообщениями с одним
     media_group_id: первое показывает кнопку «✅ Фото готово», остальные
     молча добавляются в список. Шаг завершается кнопкой — без таймеров
-    и гонок с кнопками «В черновик»/«Отправить».
+    и гонок с кнопками «Сохранить в черновики»/«Готово».
     """
     message = ctx.message(update)
     if not message.photo:
         return POST_CREATION
 
     user_data = ctx.data(context)
-    file_id = message.photo[-1].file_id
     media_group_id = message.media_group_id
     step_index = user_data.get("current_step", 0)
     at_image_step = (
@@ -462,51 +459,48 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> in
     # Продолжение уже начатой медиа-группы (в т.ч. запоздавшие фотографии) —
     # добавляем молча, не спамим подтверждениями на каждое фото.
     if media_group_id and user_data.get("pending_media") == media_group_id:
-        user_data.setdefault("photos", []).append(file_id)
+        user_data.setdefault("photos", []).append(message.photo[-1].file_id)
         return POST_CREATION
 
-    # Первая фотография нового альбома — начинаем сбор
-    if media_group_id and at_image_step:
-        user_data["pending_media"] = media_group_id
-        user_data["photos"] = [file_id]
-        user_data["image"] = file_id
+    if not at_image_step:
+        # Фото вне шага изображения: НЕ теряем молча — объясняем, где менять
+        # фото. Альбом отвечаем ОДНИМ сообщением: без дедупликации каждое
+        # фото альбома породило бы свой промпт (спам в чат).
+        if media_group_id:
+            if user_data.get("last_rejected_media") == media_group_id:
+                return POST_CREATION
+            user_data["last_rejected_media"] = media_group_id
+        if step_index < len(POST_STEPS):
+            step = POST_STEPS[step_index]
+            await message.reply_text(
+                f"Фото можно добавить на шаге «Изображение». "
+                f"Сейчас — шаг {step_index + 1} из {len(POST_STEPS)} "
+                f"({step['label']}): {step['prompt']}",
+                reply_markup=get_skip_keyboard(),
+            )
+        else:
+            # На экране превью — путь к замене фото понятен
+            await message.reply_text(
+                "Изображение можно заменить через «✏️ Редактировать» "
+                "→ «Изображение»."
+            )
+        return POST_CREATION
+
+    state = _store_photo(user_data, message)
+    if state == "started":
         await message.reply_text(
-            "📷 Получаю фотографии альбома. Отправьте остальные, затем нажмите «✅ Фото готово».",
+            "📷 Получаю фотографии альбома. Отправьте остальные, "
+            "затем нажмите «✅ Фото готово».",
             reply_markup=get_media_done_keyboard(),
         )
         logger.info(f"Начат сбор медиа-группы {media_group_id}.")
         return POST_CREATION
-
-    # Одиночная фотография — как раньше: сразу к превью
-    if at_image_step:
-        user_data["photos"] = [file_id]
-        user_data["image"] = file_id
-        user_data.pop("pending_media", None)
+    if state == "single":
+        # Одиночная фотография — как раньше: сразу к превью
         user_data["current_step"] += 1
         await message.reply_text("Картинка добавлена.")
         await review_post(update, context)
-        return POST_CREATION
-
-    # Фото вне шага изображения: НЕ теряем молча — объясняем, где менять фото.
-    # Альбом отвечаем ОДНИМ сообщением: без дедупликации каждое фото
-    # альбома породило бы свой промпт (спам в чат).
-    if media_group_id:
-        if user_data.get("last_rejected_media") == media_group_id:
-            return POST_CREATION
-        user_data["last_rejected_media"] = media_group_id
-    if step_index < len(POST_STEPS):
-        step = POST_STEPS[step_index]
-        await message.reply_text(
-            f"Фото можно добавить на шаге «Изображение». "
-            f"Сейчас — шаг {step_index + 1} из {len(POST_STEPS)} ({step['label']}): "
-            f"{step['prompt']}",
-            reply_markup=get_skip_keyboard(),
-        )
-    else:
-        # На экране превью — путь к замене фото понятен
-        await message.reply_text(
-            "Изображение можно заменить через «✏️ Редактировать» → «Изображение»."
-        )
+    # "continued" — запоздавшее фото альбома уже добавлено в список
     return POST_CREATION
 
 
@@ -925,52 +919,39 @@ async def process_edit(update: Update, context: ContextTypes.DEFAULT_TYPE) -> in
     После успешного изменения показывает актуальное превью поста
     (устаревший обзор не должен висеть после правок).
     """
-    field = str(ctx.data(context).get("edit_field") or "")
-    text = ctx.message(update).text or ""
+    user_data = ctx.data(context)
+    message = ctx.message(update)
+    field = str(user_data.get("edit_field") or "")
+    text = message.text or ""
 
     logger.info(f"Пользователь редактирует поле '{field}' с вводом: {text}")
 
-    if not field:
-        # Состояние EDIT_FIELD без выбранного поля (не должно случаться):
-        # не пишем мусор в user_data, а возвращаем пользователя к превью
+    step = next((s for s in POST_STEPS if s["key"] == field), None)
+    if not field or step is None:
+        # Состояние EDIT_FIELD без выбранного/неизвестного поля (не должно
+        # случаться): не пишем мусор в user_data, а возвращаем к превью
         logger.warning("Редактирование без выбранного поля — возврат к превью.")
         await review_post(update, context)
         return POST_CREATION
 
-    if ctx.message(update).photo and field != "image":
+    if message.photo and field != "image":
         # Фото прислали, пока редактировали другое поле: значение НЕ трогаем
         # (иначе поле стёрлось бы пустой строкой) — объясняем порядок действий
-        await ctx.message(update).reply_text(
+        await message.reply_text(
             "Здесь ожидается текст. Изображение меняется в поле «Изображение».",
             reply_markup=get_skip_keyboard(),
         )
         return EDIT_FIELD
 
     if text.lower() == "пропустить":
-        if field == "image":
-            ctx.data(context)["image"] = None
-            ctx.data(context)["photos"] = []
-            ctx.data(context).pop("pending_media", None)
-            logger.info(
-                "Пользователь пропустил добавление изображения при редактировании."
-            )
-        elif field:
-            ctx.data(context)[field] = None
-            logger.info(f"Пользователь пропустил обновление поля '{field}'.")
+        _apply_skip(user_data, field)
+        logger.info(f"Пользователь пропустил обновление поля '{field}'.")
         await review_post(update, context)
         # Возвращаемся в POST_CREATION: кнопки действий должны остаться рабочими
         return POST_CREATION
 
-    # Валидация и форматирование
-    validators = {
-        "date": validate_date,
-        "time_start": validate_time,
-        "time_end": validate_time,
-        "place_url": validate_url,
-    }
-
-    if field in validators and not validators[field](text):
-        await ctx.message(update).reply_text(
+    if step["validator"] and not step["validator"](text):
+        await message.reply_text(
             "Некорректный формат. Пожалуйста, введите корректные данные или нажмите 'Пропустить'.",
             reply_markup=get_skip_keyboard(),
         )
@@ -978,56 +959,31 @@ async def process_edit(update: Update, context: ContextTypes.DEFAULT_TYPE) -> in
         return EDIT_FIELD
 
     if field == "image":
-        if ctx.message(update).photo:
-            file_id = ctx.message(update).photo[-1].file_id
-            media_group_id = ctx.message(update).media_group_id
-
-            # Продолжение начатого альбома — добавляем молча
-            if (
-                media_group_id
-                and ctx.data(context).get("pending_media") == media_group_id
-            ):
-                ctx.data(context).setdefault("photos", []).append(file_id)
-                return EDIT_FIELD
-
-            # Новый альбом — собираем до нажатия «✅ Фото готово»
-            if media_group_id:
-                ctx.data(context)["pending_media"] = media_group_id
-                ctx.data(context)["photos"] = [file_id]
-                ctx.data(context)["image"] = file_id
-                await ctx.message(update).reply_text(
-                    "📷 Отправьте остальные фотографии альбома, затем нажмите «✅ Фото готово».",
-                    reply_markup=get_media_done_keyboard(),
-                )
-                logger.info(
-                    f"Начат сбор медиа-группы при редактировании: {media_group_id}."
-                )
-                return EDIT_FIELD
-
-            # Одиночная фотография — как раньше: сразу обновляем и показываем превью
-            ctx.data(context)["photos"] = [file_id]
-            ctx.data(context)["image"] = file_id
-            ctx.data(context).pop("pending_media", None)
-            logger.info("Пользователь обновил изображение.")
-        else:
-            await ctx.message(update).reply_text(
+        if not message.photo:
+            await message.reply_text(
                 "Пожалуйста, отправьте изображение или нажмите 'Пропустить'.",
                 reply_markup=get_skip_keyboard(),
             )
             logger.warning("Пользователь не отправил изображение при редактировании.")
             return EDIT_FIELD
+        state = _store_photo(user_data, message)
+        if state == "started":
+            await message.reply_text(
+                "📷 Отправьте остальные фотографии альбома, "
+                "затем нажмите «✅ Фото готово».",
+                reply_markup=get_media_done_keyboard(),
+            )
+            logger.info(
+                f"Начат сбор медиа-группы при редактировании: "
+                f"{message.media_group_id}."
+            )
+            return EDIT_FIELD
+        if state == "continued":
+            return EDIT_FIELD  # запоздавшее фото альбома добавлено молча
+        logger.info("Пользователь обновил изображение.")
     else:
-        formatter = {
-            "title": format_text,
-            "date": format_text,
-            "time_start": format_text,
-            "time_end": format_text,
-            "place_name": format_text,
-            "text": format_text,
-            "contact": format_text,
-            "place_url": format_text,
-        }.get(field, lambda x: x)
-        ctx.data(context)[field] = formatter(text)
+        # Единое правило форматирования текстовых полей — как в визарде
+        user_data[field] = format_text(text)
         logger.info(f"Пользователь обновил поле '{field}'.")
 
     # Остаёмся в диалоге: превью с актуальными значениями + кнопки действий
@@ -1043,12 +999,9 @@ async def handle_skip_edit(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     query = ctx.query(update)
     await query.answer()
     field = ctx.data(context).get("edit_field")
-    if field == "image":
-        ctx.data(context)["image"] = None
-        ctx.data(context)["photos"] = []
-        ctx.data(context).pop("pending_media", None)
-    elif field:
-        ctx.data(context)[field] = None
+    if field:
+        _apply_skip(ctx.data(context), str(field))
+        logger.info(f"Пользователь пропустил обновление поля '{field}'.")
     await review_post(update, context)
     return POST_CREATION
 

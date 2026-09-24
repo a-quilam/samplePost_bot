@@ -52,9 +52,6 @@ def replace_quotes(text: str) -> str:
     text = re.sub(r'"', "«", text, count=1)  # Первая кавычка в строке
     text = re.sub(r'"', "»", text, count=1)  # Вторая кавычка в строке
 
-    # Если есть дополнительные кавычки, заменим их на английские
-    text = re.sub(r'"', '"', text)
-
     return text
 
 

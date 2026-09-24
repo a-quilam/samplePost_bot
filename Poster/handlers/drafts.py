@@ -53,18 +53,17 @@ def build_drafts_message(
     drafts: list[Draft],
     *,
     offset: int = 0,
-    total: int | None = None,
+    total: int,
 ) -> tuple[str, InlineKeyboardMarkup | None]:
     """
     Список черновиков: карточки + кнопки действий + навигация по страницам.
 
-    total=None (вызовы без пагинации) — страница считается единственной,
-    кнопок листания нет.
+    total — общее число черновиков пользователя (всегда передаётся вызывающим:
+    из него считается «Показано X из Y» и наличие кнопки «Вперёд»).
     """
     if not drafts:
         return "У вас пока нет черновиков.", None
 
-    effective_total = total if total is not None else offset + len(drafts)
     message_text = "📄 <b>Ваши черновики:</b>\n\n"
     keyboard = []
     for draft in drafts:
@@ -94,10 +93,9 @@ def build_drafts_message(
             ]
         )
 
-    if effective_total > len(drafts):
+    if total > len(drafts):
         message_text += (
-            f"<i>Показано {len(drafts)} из {effective_total} — "
-            "листайте кнопками ниже.</i>\n"
+            f"<i>Показано {len(drafts)} из {total} — " "листайте кнопками ниже.</i>\n"
         )
 
     # Навигация: назад — на страницу назад, вперёд — сразу за текущей
@@ -109,7 +107,7 @@ def build_drafts_message(
                 callback_data=f"{PAGE_PREFIX}{max(offset - DRAFTS_PAGE_SIZE, 0)}",
             )
         )
-    if offset + len(drafts) < effective_total:
+    if offset + len(drafts) < total:
         nav_row.append(
             InlineKeyboardButton(
                 "Вперёд ➡️",
