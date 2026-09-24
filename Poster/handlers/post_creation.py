@@ -1,6 +1,10 @@
-# handlers/post_creation.py
-
-from telegram import Update, InlineKeyboardMarkup, InlineKeyboardButton, ReplyKeyboardRemove, ReplyKeyboardMarkup
+import logging
+from telegram import (
+    Update,
+    InlineKeyboardMarkup,
+    InlineKeyboardButton,
+    ReplyKeyboardRemove,
+)
 from telegram.ext import (
     ContextTypes,
     ConversationHandler,
@@ -14,51 +18,48 @@ from utils.formatter import format_text
 from models import Draft, ResponsiblePerson
 from sqlalchemy.orm import Session
 from config import REVIEW_CHAT_ID
+from database import SessionLocal
 
-# Определяем состояния для ConversationHandler
-POST_CREATION = range(9)
+# Настройка логирования
+logger = logging.getLogger(__name__)
 
-# Определяем шаги создания поста
+# Определение состояний
+POST_CREATION, EDIT_FIELD = range(2)
+
+# Определение шагов создания поста
 POST_STEPS = [
     {
         'key': 'title',
         'prompt': "Введите заголовок поста или нажмите 'Пропустить':",
-        'validator': None,
+        'validator': None,  # Нет валидации для заголовка
         'formatter': format_text,
         'optional': True,
     },
     {
         'key': 'date',
-        'prompt': "Введите дату (например, 25.12.2023) или нажмите 'Пропустить':",
+        'prompt': "Введите дату события (ДД.ММ.ГГГГ) или нажмите 'Пропустить':",
         'validator': validate_date,
         'formatter': format_text,
         'optional': True,
     },
     {
         'key': 'time_start',
-        'prompt': "Введите время начала (например, 18:30) или нажмите 'Пропустить':",
+        'prompt': "Введите время начала (ЧЧ:ММ) или нажмите 'Пропустить':",
         'validator': validate_time,
         'formatter': format_text,
         'optional': True,
     },
     {
         'key': 'time_end',
-        'prompt': "Введите время конца (например, 20:30) или нажмите 'Пропустить':",
+        'prompt': "Введите время окончания (ЧЧ:ММ) или нажмите 'Пропустить':",
         'validator': validate_time,
         'formatter': format_text,
         'optional': True,
     },
     {
-        'key': 'place_name',
-        'prompt': "Введите название места или нажмите 'Пропустить':",
+        'key': 'place',
+        'prompt': "Введите место проведения или нажмите 'Пропустить':",
         'validator': None,
-        'formatter': format_text,
-        'optional': True,
-    },
-    {
-        'key': 'place_url',
-        'prompt': "Введите ссылку на место (например, Google Maps URL) или нажмите 'Пропустить':",
-        'validator': validate_url,
         'formatter': format_text,
         'optional': True,
     },
@@ -77,21 +78,34 @@ POST_STEPS = [
         'optional': True,
     },
     {
+        'key': 'place_url',
+        'prompt': "Введите URL места проведения или нажмите 'Пропустить':",
+        'validator': validate_url,
+        'formatter': format_text,
+        'optional': True,
+    },
+    {
         'key': 'image',
-        'prompt': "Отправьте картинку для поста или нажмите 'Пропустить':",
-        'validator': None,
+        'prompt': "Отправьте изображение или нажмите 'Пропустить':",
+        'validator': None,  # Специальная обработка для изображений
         'formatter': None,
         'optional': True,
     },
 ]
 
 def get_skip_keyboard():
+    """
+    Возвращает клавиатуру с кнопкой "Пропустить".
+    """
     keyboard = [
         [InlineKeyboardButton("Пропустить", callback_data='skip')]
     ]
     return InlineKeyboardMarkup(keyboard)
 
 def get_post_actions_keyboard():
+    """
+    Возвращает клавиатуру с действиями для поста.
+    """
     keyboard = [
         [InlineKeyboardButton("📄 В черновик", callback_data='save_draft')],
         [InlineKeyboardButton("🚀 Отправить на согласование", callback_data='send_for_approval')],
@@ -100,48 +114,91 @@ def get_post_actions_keyboard():
     return InlineKeyboardMarkup(keyboard)
 
 async def start_post_creation(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    context.user_data['current_step'] = 0
+    """
+    Запускает процесс создания поста.
+    """
+    logger.info("Начало создания поста.")
+    context.user_data['current_step'] = 0  # Инициализация текущего шага
     await prompt_step(update, context)
     return POST_CREATION
 
 async def prompt_step(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """
+    Отправляет пользователю сообщение с запросом на текущем шаге.
+    """
     step_index = context.user_data['current_step']
     if step_index < len(POST_STEPS):
         step = POST_STEPS[step_index]
-        await update.message.reply_text(
+        await update.effective_message.reply_text(
             step['prompt'],
             reply_markup=get_skip_keyboard()
         )
+        logger.info(f"Переход к шагу {step_index + 1}: {step['key']}.")
     else:
         await review_post(update, context)
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """
+    Обрабатывает сообщения пользователя на каждом шаге создания поста.
+    """
     step_index = context.user_data.get('current_step', 0)
     if step_index >= len(POST_STEPS):
-        return POST_CREATION
+        return ConversationHandler.END
 
     step = POST_STEPS[step_index]
-    text = update.message.text
+    text = update.effective_message.text
 
-    if text.lower() == 'пропустить' and step['optional']:
-        context.user_data[step['key']] = 'Не указано' if step['key'] != 'image' else None
+    logger.info(f"Получено сообщение для шага '{step['key']}': {text}")
+
+    if step['optional'] and text.lower() == 'пропустить':
+        if step['key'] == 'image':
+            context.user_data['image'] = None
+            logger.info("Пользователь пропустил добавление изображения.")
+        else:
+            context.user_data[step['key']] = 'Не указано'
+            logger.info(f"Пользователь пропустил поле '{step['key']}'.")
     else:
         if step['validator'] and not step['validator'](text):
-            await update.message.reply_text(
+            await update.effective_message.reply_text(
                 "Некорректный формат. Пожалуйста, используйте правильный формат или нажмите 'Пропустить'.",
                 reply_markup=get_skip_keyboard()
             )
+            logger.warning(f"Некорректный ввод для поля '{step['key']}'.")
             return POST_CREATION
-        context.user_data[step['key']] = step['formatter'](text) if step['formatter'] else text
+
+        if step['key'] == 'image':
+            if update.effective_message.photo:
+                context.user_data['image'] = update.effective_message.photo[-1].file_id
+                await update.effective_message.reply_text("Картинка добавлена.", reply_markup=get_post_actions_keyboard())
+                logger.info("Пользователь добавил изображение.")
+                context.user_data['current_step'] += 1
+                await review_post(update, context)
+                return ConversationHandler.END
+            else:
+                await update.effective_message.reply_text(
+                    "Пожалуйста, отправьте изображение или нажмите 'Пропустить'.",
+                    reply_markup=get_skip_keyboard()
+                )
+                logger.warning("Пользователь не отправил изображение.")
+                return POST_CREATION
+        else:
+            formatter = step['formatter'] if step['formatter'] else (lambda x: x)
+            context.user_data[step['key']] = formatter(text)
+            logger.info(f"Пользователь ввел '{step['key']}': {context.user_data[step['key']]}")
 
     context.user_data['current_step'] += 1
     await prompt_step(update, context)
     return POST_CREATION
 
 async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """
+    Обрабатывает CallbackQuery от кнопок действий поста.
+    """
     query = update.callback_query
     await query.answer()
     data = query.data
+
+    logger.info(f"Получен CallbackQuery: {data}")
 
     if data == 'skip':
         await handle_message(update, context)
@@ -155,219 +212,187 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
             await edit_post(update, context)
         return ConversationHandler.END
     else:
+        logger.warning(f"Неизвестный CallbackQuery: {data}")
         return POST_CREATION
 
-async def review_post(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    post_data = context.user_data
-    post = (
-        f"📢 *{post_data.get('title', 'Без заголовка')}*\n\n"
-        f"📅 *Дата*: {post_data.get('date', 'Не указана')}\n"
-        f"⏰ *Время*: {post_data.get('time_start', 'Не указано')} - {post_data.get('time_end', 'Не указано')}\n"
-        f"📍 *Место*: [{post_data.get('place_name', 'Не указано')}]({post_data.get('place_url', '')})\n\n"
-        f"{post_data.get('text', 'Без текста')}\n\n"
-        f"📞 *Контакт*: {post_data.get('contact', 'Не указано')}"
-    )
-    
-    if post_data.get('image'):
-        await update.message.reply_photo(
-            photo=post_data['image'],
-            caption=post,
-            parse_mode='MarkdownV2',
-            reply_markup=get_post_actions_keyboard()
-        )
-    else:
-        await update.message.reply_text(
-            post,
-            parse_mode='MarkdownV2',
-            reply_markup=get_post_actions_keyboard()
-        )
-    
-    return POST_CREATION
+async def review_post(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """
+    Отправляет пользователю обзор созданного поста с возможностью редактирования или отправки.
+    """
+    logger.info("Переход к обзору поста.")
+    post = context.user_data
+    review_text = "📋 **Обзор поста:**\n\n"
+    for step in POST_STEPS:
+        key = step['key']
+        if key == 'image':
+            value = 'Добавлено' if post.get('image') else 'Не добавлено'
+        else:
+            value = post.get(key, 'Не указано')
+        review_text += f"• *{key.capitalize()}*: {value}\n"
 
-async def save_draft(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    query = update.callback_query
-    await query.answer()
-    
-    session: Session = context.bot_data['db_session']
-    
-    draft = Draft(
-        user_id=update.effective_user.id,
-        title=context.user_data.get('title'),
-        date=context.user_data.get('date'),
-        time_start=context.user_data.get('time_start'),
-        time_end=context.user_data.get('time_end'),
-        place_name=context.user_data.get('place_name'),
-        place_url=context.user_data.get('place_url'),
-        text=context.user_data.get('text'),
-        contact=context.user_data.get('contact'),
-        image=context.user_data.get('image')
-    )
-    session.add(draft)
-    session.commit()
-    
-    await query.edit_message_caption(
-        caption="Пост сохранён в черновики.",
+    review_text += "\nВыберите действие:"
+
+    await update.effective_message.reply_text(
+        review_text,
         parse_mode='MarkdownV2',
-        reply_markup=None
+        reply_markup=get_post_actions_keyboard()
     )
-    await query.message.reply_text(
-        "Пост сохранён в черновики.",
-        reply_markup=InlineKeyboardMarkup([
-            [InlineKeyboardButton("Главное меню", callback_data='main_menu')]
-        ])
-    )
-    context.user_data.clear()
-    return ConversationHandler.END
 
-async def send_for_approval(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    query = update.callback_query
-    await query.answer()
-    
-    if not REVIEW_CHAT_ID:
-        await query.message.reply_text(
-            "Не настроен REVIEW_CHAT_ID. Пост не отправлен на согласование.",
-            reply_markup=InlineKeyboardMarkup([
-                [InlineKeyboardButton("Главное меню", callback_data='main_menu')]
-            ])
+async def save_draft(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """
+    Сохраняет пост в черновики.
+    """
+    logger.info("Сохранение поста в черновики.")
+    session: Session = SessionLocal()
+    try:
+        draft = Draft(
+            user_id=update.effective_user.id,
+            title=context.user_data.get('title'),
+            date=context.user_data.get('date'),
+            time_start=context.user_data.get('time_start'),
+            time_end=context.user_data.get('time_end'),
+            place=context.user_data.get('place'),
+            text=context.user_data.get('text'),
+            contact=context.user_data.get('contact'),
+            place_url=context.user_data.get('place_url'),
+            image=context.user_data.get('image'),
         )
-        return ConversationHandler.END
+        session.add(draft)
+        session.commit()
+        await update.effective_message.reply_text("Пост сохранен в черновики.", reply_markup=ReplyKeyboardRemove())
+        logger.info("Пост успешно сохранен в черновики.")
+    except Exception as e:
+        session.rollback()
+        await update.effective_message.reply_text("Произошла ошибка при сохранении черновика.", reply_markup=ReplyKeyboardRemove())
+        logger.error(f"Ошибка при сохранении черновика: {e}")
+    finally:
+        session.close()
 
-    session: Session = context.bot_data['db_session']
-    
-    post_data = context.user_data
-    post = (
-        f"📢 *{post_data.get('title', 'Без заголовка')}*\n\n"
-        f"📅 *Дата*: {post_data.get('date', 'Не указана')}\n"
-        f"⏰ *Время*: {post_data.get('time_start', 'Не указано')} - {post_data.get('time_end', 'Не указано')}\n"
-        f"📍 *Место*: [{post_data.get('place_name', 'Не указано')}]({post_data.get('place_url', '')})\n\n"
-        f"{post_data.get('text', 'Без текста')}\n\n"
-        f"📞 *Контакт*: {post_data.get('contact', 'Не указано')}"
-    )
-    
-    # Отправка в общий чат для согласования
-    if post_data.get('image'):
-        await context.bot.send_photo(
+async def send_for_approval(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """
+    Отправляет пост на согласование.
+    """
+    logger.info("Отправка поста на согласование.")
+    session: Session = SessionLocal()
+    try:
+        # Создание объекта Draft
+        draft = Draft(
+            user_id=update.effective_user.id,
+            title=context.user_data.get('title'),
+            date=context.user_data.get('date'),
+            time_start=context.user_data.get('time_start'),
+            time_end=context.user_data.get('time_end'),
+            place=context.user_data.get('place'),
+            text=context.user_data.get('text'),
+            contact=context.user_data.get('contact'),
+            place_url=context.user_data.get('place_url'),
+            image=context.user_data.get('image'),
+            approved=False
+        )
+        session.add(draft)
+        session.commit()
+        logger.info("Пост сохранен и отправлен на согласование.")
+
+        # Отправка сообщения в чат согласования
+        review_text = "📋 **Новый пост для согласования:**\n\n"
+        for step in POST_STEPS:
+            key = step['key']
+            if key == 'image':
+                value = 'Добавлено' if draft.image else 'Не добавлено'
+            else:
+                value = draft.__dict__.get(key, 'Не указано')
+            review_text += f"• *{key.capitalize()}*: {value}\n"
+
+        await context.bot.send_message(
             chat_id=REVIEW_CHAT_ID,
-            photo=post_data['image'],
-            caption=post,
+            text=review_text,
             parse_mode='MarkdownV2'
         )
-    else:
-        await context.bot.send_message(
-            chat_id=REVIEW_CHAT_ID,
-            text=post,
-            parse_mode='MarkdownV2'
-        )
-    
-    # Добавление кнопки выбора ответственного лица
-    responsible_persons = session.query(ResponsiblePerson).all()
-    if responsible_persons:
-        keyboard = [
-            [InlineKeyboardButton(person.name, callback_data=f'responsible_{person.telegram_id}')]
-            for person in responsible_persons
-        ]
-        reply_markup = InlineKeyboardMarkup(keyboard)
-        await context.bot.send_message(
-            chat_id=REVIEW_CHAT_ID,
-            text="Выберите ответственного за этот пост:",
-            reply_markup=reply_markup
-        )
-    else:
-        await context.bot.send_message(
-            chat_id=REVIEW_CHAT_ID,
-            text="Нет ответственных лиц для назначения."
-        )
-    
-    await query.edit_message_caption(
-        caption="Пост отправлен на согласование.",
-        parse_mode='MarkdownV2',
-        reply_markup=None
-    )
-    await query.message.reply_text(
-        "Пост отправлен на согласование.",
-        reply_markup=InlineKeyboardMarkup([
-            [InlineKeyboardButton("Главное меню", callback_data='main_menu')]
-        ])
-    )
-    context.user_data.clear()
-    return ConversationHandler.END
+
+        await update.effective_message.reply_text("Пост отправлен на согласование.", reply_markup=ReplyKeyboardRemove())
+    except Exception as e:
+        session.rollback()
+        await update.effective_message.reply_text("Произошла ошибка при отправке поста на согласование.", reply_markup=ReplyKeyboardRemove())
+        logger.error(f"Ошибка при отправке поста на согласование: {e}")
+    finally:
+        session.close()
 
 async def edit_post(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    query = update.callback_query
-    await query.answer()
-    
+    """
+    Позволяет пользователю выбрать поле для редактирования.
+    """
+    logger.info("Пользователь выбрал редактирование поста.")
     keyboard = [
         [InlineKeyboardButton("Заголовок", callback_data='edit_title')],
         [InlineKeyboardButton("Дата", callback_data='edit_date')],
         [InlineKeyboardButton("Время начала", callback_data='edit_time_start')],
-        [InlineKeyboardButton("Время конца", callback_data='edit_time_end')],
+        [InlineKeyboardButton("Время окончания", callback_data='edit_time_end')],
         [InlineKeyboardButton("Место", callback_data='edit_place')],
         [InlineKeyboardButton("Текст", callback_data='edit_text')],
-        [InlineKeyboardButton("Контакт", callback_data='edit_contact')],
-        [InlineKeyboardButton("Картинка", callback_data='edit_image')],
+        [InlineKeyboardButton("Контакты", callback_data='edit_contact')],
+        [InlineKeyboardButton("URL места", callback_data='edit_place_url')],
+        [InlineKeyboardButton("Изображение", callback_data='edit_image')],
         [InlineKeyboardButton("Отмена", callback_data='cancel_edit')]
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
-    
-    await query.edit_message_caption(
-        caption="Редактирование поста. Выберите поле для изменения:",
-        parse_mode='MarkdownV2',
-        reply_markup=reply_markup
-    )
-    return POST_CREATION
+    await update.effective_message.reply_text("Выберите поле для редактирования:", reply_markup=reply_markup)
+    return EDIT_FIELD
 
 async def handle_edit(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """
+    Обрабатывает выбор поля для редактирования.
+    """
     query = update.callback_query
     await query.answer()
-    action = query.data
-    
-    if action.startswith('edit_'):
-        field = action.split('_')[1]
-        context.user_data['edit_field'] = field
-        prompts = {
-            'title': "Введите новый заголовок или нажмите 'Пропустить':",
-            'date': "Введите новую дату (например, 25.12.2023) или нажмите 'Пропустить':",
-            'time_start': "Введите новое время начала (например, 18:30) или нажмите 'Пропустить':",
-            'time_end': "Введите новое время конца (например, 20:30) или нажмите 'Пропустить':",
-            'place': "Введите новое название места или нажмите 'Пропустить':",
-            'text': "Введите новый текст поста или нажмите 'Пропустить':",
-            'contact': "Введите новую контактную информацию или нажмите 'Пропустить':",
-            'image': "Отправьте новую картинку или нажмите 'Пропустить':"
-        }
-        prompt = prompts.get(field, "Введите новое значение или нажмите 'Пропустить':")
-        await query.edit_message_caption(
-            caption=prompt,
-            parse_mode='MarkdownV2',
-            reply_markup=get_skip_keyboard()
-        )
-        return POST_CREATION
-    elif action == 'cancel_edit':
-        await query.edit_message_caption(
-            caption="Редактирование отменено.",
-            parse_mode='MarkdownV2',
-            reply_markup=get_post_actions_keyboard()
-        )
-        return POST_CREATION
+    data = query.data
+
+    if data == 'cancel_edit':
+        await query.edit_message_text("Редактирование отменено.", reply_markup=ReplyKeyboardRemove())
+        logger.info("Редактирование отменено пользователем.")
+        return ConversationHandler.END
+
+    field_to_edit = data.replace('edit_', '')
+    context.user_data['edit_field'] = field_to_edit
+    step = next((step for step in POST_STEPS if step['key'] == field_to_edit), None)
+
+    if step:
+        if step['key'] == 'image':
+            await query.edit_message_text(
+                "Отправьте новое изображение или нажмите 'Пропустить':",
+                reply_markup=get_skip_keyboard()
+            )
+        else:
+            prompt_text = f"Введите новое значение для '{field_to_edit}' или нажмите 'Пропустить':"
+            await query.edit_message_text(
+                prompt_text,
+                reply_markup=get_skip_keyboard()
+            )
+        logger.info(f"Пользователь выбрал редактировать поле '{field_to_edit}'.")
+        return EDIT_FIELD
     else:
-        await query.edit_message_caption(
-            caption="Неизвестное действие.",
-            parse_mode='MarkdownV2',
-            reply_markup=get_post_actions_keyboard()
-        )
-        return POST_CREATION
+        await query.edit_message_text("Неизвестное поле для редактирования.", reply_markup=ReplyKeyboardRemove())
+        logger.warning(f"Пользователь выбрал неизвестное поле для редактирования: {field_to_edit}")
+        return ConversationHandler.END
 
 async def process_edit(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """
+    Обрабатывает ввод пользователя при редактировании поля.
+    """
     field = context.user_data.get('edit_field')
-    text = update.message.text
+    text = update.effective_message.text
+
+    logger.info(f"Пользователь редактирует поле '{field}' с вводом: {text}")
 
     if text.lower() == 'пропустить':
         if field == 'image':
             context.user_data['image'] = None
-            await update.message.reply_text("Картинка не добавлена.", reply_markup=get_post_actions_keyboard())
+            await update.effective_message.reply_text("Картинка не добавлена.", reply_markup=get_post_actions_keyboard())
+            logger.info("Пользователь пропустил добавление изображения при редактировании.")
         else:
             context.user_data[field] = 'Не указано'
-            await update.message.reply_text("Поле обновлено.", reply_markup=get_post_actions_keyboard())
-        return POST_CREATION
+            await update.effective_message.reply_text(f"Поле '{field}' обновлено.", reply_markup=get_post_actions_keyboard())
+            logger.info(f"Пользователь пропустил обновление поля '{field}'.")
+        return ConversationHandler.END
 
     # Валидация и форматирование
     validators = {
@@ -378,19 +403,25 @@ async def process_edit(update: Update, context: ContextTypes.DEFAULT_TYPE) -> in
     }
 
     if field in validators and not validators[field](text):
-        await update.message.reply_text(
+        await update.effective_message.reply_text(
             "Некорректный формат. Пожалуйста, введите корректные данные или нажмите 'Пропустить'.",
             reply_markup=get_skip_keyboard()
         )
-        return POST_CREATION
+        logger.warning(f"Некорректный ввод при редактировании поля '{field}': {text}")
+        return EDIT_FIELD
 
     if field == 'image':
-        if update.message.photo:
-            context.user_data['image'] = update.message.photo[-1].file_id
-            await update.message.reply_text("Картинка обновлена.", reply_markup=get_post_actions_keyboard())
+        if update.effective_message.photo:
+            context.user_data['image'] = update.effective_message.photo[-1].file_id
+            await update.effective_message.reply_text("Картинка обновлена.", reply_markup=get_post_actions_keyboard())
+            logger.info("Пользователь обновил изображение.")
         else:
-            await update.message.reply_text("Пожалуйста, отправьте изображение или нажмите 'Пропустить'.", reply_markup=get_skip_keyboard())
-            return POST_CREATION
+            await update.effective_message.reply_text(
+                "Пожалуйста, отправьте изображение или нажмите 'Пропустить'.",
+                reply_markup=get_skip_keyboard()
+            )
+            logger.warning("Пользователь не отправил изображение при редактировании.")
+            return EDIT_FIELD
     else:
         formatter = {
             'title': format_text,
@@ -403,13 +434,22 @@ async def process_edit(update: Update, context: ContextTypes.DEFAULT_TYPE) -> in
             'place_url': format_text
         }.get(field, lambda x: x)
         context.user_data[field] = formatter(text)
-        await update.message.reply_text("Поле обновлено.", reply_markup=get_post_actions_keyboard())
-    
-    return POST_CREATION
+        await update.effective_message.reply_text(f"Поле '{field}' обновлено.", reply_markup=get_post_actions_keyboard())
+        logger.info(f"Пользователь обновил поле '{field}'.")
+
+    return ConversationHandler.END
+
+async def cancel_creation(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """
+    Отменяет процесс создания поста.
+    """
+    await update.effective_message.reply_text("Создание поста отменено.", reply_markup=ReplyKeyboardRemove())
+    logger.info("Пользователь отменил создание поста.")
+    return ConversationHandler.END
 
 def post_creation_handlers() -> list:
     """
-    Возвращает список обработчиков для процесса создания поста.
+    Возвращает список обработчиков для создания поста.
     """
     return [
         ConversationHandler(
@@ -418,16 +458,14 @@ def post_creation_handlers() -> list:
                 POST_CREATION: [
                     MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message),
                     CallbackQueryHandler(handle_callback_query, pattern='^(skip|save_draft|send_for_approval|edit_post)$'),
-                    CallbackQueryHandler(handle_edit, pattern='^edit_.*$'),
-                    MessageHandler(filters.PHOTO, process_edit),  # Обработка фото для 'image'
-                    MessageHandler(filters.TEXT & ~filters.COMMAND, process_edit),  # Обработка текстовых сообщений для редактирования
+                ],
+                EDIT_FIELD: [
+                    CallbackQueryHandler(handle_edit, pattern='^edit_.*$|^cancel_edit$'),
+                    MessageHandler(filters.PHOTO, process_edit),
+                    MessageHandler(filters.TEXT & ~filters.COMMAND, process_edit),
                 ],
             },
             fallbacks=[CommandHandler('cancel', cancel_creation)],
             allow_reentry=True,
         )
     ]
-
-async def cancel_creation(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    await update.message.reply_text("Создание поста отменено.", reply_markup=ReplyKeyboardRemove())
-    return ConversationHandler.END

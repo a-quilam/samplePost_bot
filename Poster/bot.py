@@ -1,73 +1,71 @@
-# bot.py
-
 import logging
 from telegram import Update
 from telegram.ext import (
     ApplicationBuilder,
     CommandHandler,
     MessageHandler,
+    CallbackQueryHandler,
     ContextTypes,
+    ConversationHandler,
     filters
 )
-from handlers.main_menu import main_menu_handlers, start, help_command
+from handlers.main_menu import main_menu_handlers
+from handlers.admin import admin_handlers
+from handlers.callbacks import callbacks_handlers
+from handlers.drafts import drafts_handlers
+from handlers.post_creation import post_creation_handlers
+from handlers.jobs import setup_jobs
+from config import TELEGRAM_BOT_TOKEN
+from database import init_db
 
 # Настройка логирования
 logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    level=logging.INFO
+    level=logging.DEBUG  # Изменено на DEBUG для более подробного логирования
 )
 logger = logging.getLogger(__name__)
 
-# Пример команды /add_responsible
-async def add_responsible(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Добавляет ответственного пользователя (только админам)"""
-    admin_ids = [123456789, 987654321]  # Замените на реальные Telegram ID админов
-    if update.effective_user.id not in admin_ids:
-        await update.message.reply_text("У вас нет прав для выполнения этой команды.")
-        return
-
-    try:
-        name = context.args[0]
-        telegram_id = int(context.args[1])
-        await update.message.reply_text(f"Добавлен ответственный: {name} (ID: {telegram_id})")
-    except (IndexError, ValueError):
-        await update.message.reply_text("Использование: /add_responsible <Имя> <Telegram_ID>")
-
-# Пример команды /remove_responsible
-async def remove_responsible(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Удаляет ответственного пользователя (только админам)"""
-    admin_ids = [123456789, 987654321]  # Замените на реальные Telegram ID админов
-    if update.effective_user.id not in admin_ids:
-        await update.message.reply_text("У вас нет прав для выполнения этой команды.")
-        return
-
-    try:
-        telegram_id = int(context.args[0])
-        await update.message.reply_text(f"Удалён ответственный с ID: {telegram_id}")
-    except (IndexError, ValueError):
-        await update.message.reply_text("Использование: /remove_responsible <Telegram_ID>")
-
-async def unknown_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Обработчик неизвестных команд"""
-    await update.message.reply_text("Извините, я не понимаю эту команду. Используйте /help для списка доступных команд.")
-
 def main():
-    """Основная функция для запуска бота"""
-    application = ApplicationBuilder().token("7379612076:AAE3YZV8JiKcNx61w4You4L_OZkixipP7m8").build()
+    init_db()
+    application = ApplicationBuilder().token(TELEGRAM_BOT_TOKEN).build()
 
-    # Добавление обработчиков команд
-    application.add_handler(CommandHandler("start", start))
-    application.add_handler(CommandHandler("help", help_command))
-    application.add_handler(CommandHandler("add_responsible", add_responsible))
-    application.add_handler(CommandHandler("remove_responsible", remove_responsible))
+    # Добавление обработчиков главного меню
+    for handler in main_menu_handlers():
+        application.add_handler(handler)
 
-    # Добавление ConversationHandler для главного меню
-    application.add_handler(main_menu_handlers())
+    # Добавление административных обработчиков
+    for handler in admin_handlers():
+        application.add_handler(handler)
+
+    # Добавление обработчиков CallbackQuery
+    for handler in callbacks_handlers():
+        application.add_handler(handler)
+
+    # Добавление обработчиков черновиков
+    for handler in drafts_handlers():
+        application.add_handler(handler)
+
+    # Добавление обработчиков создания постов
+    for handler in post_creation_handlers():
+        application.add_handler(handler)
+
+    # Добавление фоновых задач
+    setup_jobs(application)
 
     # Обработчик неизвестных команд
-    application.add_handler(MessageHandler(filters.COMMAND, unknown_command))
+    application.add_handler(
+        MessageHandler(
+            filters.COMMAND,
+            lambda update, context: update.effective_message.reply_text("Неизвестная команда.")
+        )
+    )
 
-    # Запуск бота
+    # Добавление глобального обработчика ошибок
+    async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
+        logger.error(msg="Exception while handling an update:", exc_info=context.error)
+
+    application.add_error_handler(error_handler)
+
     application.run_polling()
 
 if __name__ == "__main__":

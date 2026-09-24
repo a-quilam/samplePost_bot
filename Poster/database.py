@@ -2,19 +2,12 @@
 
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
-from base import Base  # Импортируем Base из base.py
+from base import Base
 
-# Путь к базе данных SQLite
-SQLALCHEMY_DATABASE_URL = "sqlite:///./handlers/drafts.db"
+SQLALCHEMY_DATABASE_URL = "sqlite:///./post_bot.db"
 
-# Создание SQLAlchemy engine
-engine = create_engine(
-    SQLALCHEMY_DATABASE_URL, connect_args={"check_same_thread": False}
-)
-
-# Создание конфигурированного класса Session
+engine = create_engine(SQLALCHEMY_DATABASE_URL, connect_args={"check_same_thread": False})
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 
-# Функция для создания таблиц
 def init_db():
     Base.metadata.create_all(bind=engine)
