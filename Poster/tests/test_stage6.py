@@ -32,8 +32,11 @@ try:
     import bot as bot_module
     import config
     from handlers.post_creation import (
+        EDIT_FIELD,
+        POST_STEPS,
         finish_post,
         handle_callback_query,
+        handle_edit,
         handle_message,
         handle_photo,
     )
@@ -84,7 +87,10 @@ def make_message_update(text=None, *, photo=None):
 def make_callback_update(data):
     """Update, имитирующий нажатие inline-кнопки."""
     query = SimpleNamespace(
-        data=data, answer=AsyncMock(), from_user=SimpleNamespace(id=7)
+        data=data,
+        answer=AsyncMock(),
+        edit_message_text=AsyncMock(),
+        from_user=SimpleNamespace(id=7),
     )
     message = SimpleNamespace(text=None, photo=None, reply_text=AsyncMock())
     return SimpleNamespace(
@@ -137,6 +143,8 @@ class FullCycleTests(unittest.TestCase):
         self.assertEqual(preview["chat_id"], 777)
         for value in FULL_TEXT_VALUES:
             self.assertIn(escape_markdown(value), preview["caption"])
+        # сводка с русскими названиями полей
+        self.assertIn("*Заголовок*:", preview["caption"])
 
         # «Готово» → финальная отправка + подтверждение, диалог закрыт
         finish_update = make_callback_update("finish")
@@ -196,6 +204,97 @@ class FullCycleTests(unittest.TestCase):
         self.assertEqual(user_data.get("title"), "Концерт")
         reply = update.effective_message.reply_text.await_args.args[0]
         self.assertIn("Не удалось отправить", reply)
+
+
+@unittest.skipIf(
+    HANDLERS_IMPORT_ERROR is not None,
+    f"импорт обработчиков недоступен: {HANDLERS_IMPORT_ERROR}",
+)
+class PartialPostTests(unittest.TestCase):
+    """Пропуск полей: пустые поля не показываются в превью, заглушек нет."""
+
+    def test_skip_fields_preview_shows_only_filled(self):
+        bot = RecordingBot()
+        user_data = {"current_step": 0}
+        context = SimpleNamespace(user_data=user_data, bot=bot)
+
+        # Заголовок — ввод, дата — кнопка «Пропустить»
+        asyncio.run(handle_message(make_message_update("Концерт"), context))
+        self.assertEqual(user_data["title"], "Концерт")
+        asyncio.run(handle_callback_query(make_callback_update("skip"), context))
+        self.assertIsNone(user_data["date"])  # пропуск = пустое поле, не строка
+
+        # Оставшиеся 6 текстовых полей — пропуск словом
+        for _ in range(6):
+            asyncio.run(handle_message(make_message_update("Пропустить"), context))
+        self.assertIsNone(user_data["place_url"])
+        # 9-й шаг (изображение) — тоже пропуск, дальше превью
+        asyncio.run(handle_message(make_message_update("Пропустить"), context))
+
+        self.assertEqual(len(bot.calls), 1)
+        summary = bot.calls[0].get("caption") or bot.calls[0]["text"]
+        self.assertIn("• *Заголовок*: Концерт", summary)
+        self.assertNotIn("• *Дата*:", summary)  # пропущенное поле не показано
+        self.assertNotIn("Не указано", summary)  # нигде — ни как значение, ни как текст
+
+    def test_partial_post_can_be_finished(self):
+        # Пустой пост блокируется, частично заполненный — отправляется
+        bot = RecordingBot()
+        user_data = {"current_step": 0}
+        context = SimpleNamespace(user_data=user_data, bot=bot)
+
+        asyncio.run(handle_message(make_message_update("Только заголовок"), context))
+        for _ in range(8):
+            asyncio.run(handle_callback_query(make_callback_update("skip"), context))
+
+        self.assertTrue(asyncio.run(finish_post(make_message_update(""), context)))
+        # последняя отправка — готовый пост (превью было первым)
+        self.assertEqual(len(bot.calls), 2)
+        summary = bot.calls[-1].get("text") or bot.calls[-1].get("caption")
+        self.assertIn("Только заголовок", summary)
+        self.assertNotIn("Не указано", summary)
+
+
+@unittest.skipIf(
+    HANDLERS_IMPORT_ERROR is not None,
+    f"импорт обработчиков недоступен: {HANDLERS_IMPORT_ERROR}",
+)
+class EditFlowTests(unittest.TestCase):
+    """Редактирование: меню и промпт с человекочитаемыми названиями полей."""
+
+    @staticmethod
+    def _to_preview():
+        return {"current_step": len(POST_STEPS)}, RecordingBot()
+
+    def test_edit_menu_lists_all_fields_in_russian(self):
+        user_data, bot = self._to_preview()
+        context = SimpleNamespace(user_data=user_data, bot=bot)
+        update = make_callback_update("edit_post")
+
+        asyncio.run(handle_callback_query(update, context))
+
+        reply = update.effective_message.reply_text.await_args
+        self.assertIn("Выберите поле", reply.args[0])
+        labels = [
+            button.text
+            for row in reply.kwargs["reply_markup"].inline_keyboard
+            for button in row
+        ]
+        expected = [step["label"] for step in POST_STEPS]
+        for label in expected:
+            self.assertIn(label, labels)
+
+    def test_edit_prompt_uses_russian_field_name(self):
+        user_data, bot = self._to_preview()
+        context = SimpleNamespace(user_data=user_data, bot=bot)
+        update = make_callback_update("edit_time_start")
+
+        result = asyncio.run(handle_edit(update, context))
+
+        prompt = update.callback_query.edit_message_text.await_args.args[0]
+        self.assertIn("«Время начала»", prompt)
+        self.assertNotIn("time_start", prompt)  # внутренний ключ не показывается
+        self.assertEqual(result, EDIT_FIELD)  # остаёмся в режиме редактирования
 
 
 @unittest.skipIf(

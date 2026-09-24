@@ -230,16 +230,38 @@ class FormatterGuardTests(unittest.TestCase):
     f"импорт обработчиков недоступен: {HANDLERS_IMPORT_ERROR}",
 )
 class PostSummaryTests(unittest.TestCase):
-    """Сводка поста (превью == готовый пост): экранирование значений."""
+    """Сводка поста (превью == готовый пост): только заполненные поля."""
 
     def test_summary_escapes_user_values(self):
         summary = build_post_summary({"title": "Скидка 50%_*"}, heading="h")
         self.assertIn("\\*", summary)  # '*' пользователя экранирован
         self.assertIn("\\_", summary)  # '_' пользователя экранирован
 
-    def test_summary_none_safe(self):
-        summary = build_post_summary({}, heading="h")  # все поля отсутствуют
-        self.assertIn("Не указано", summary)
+    def test_summary_shows_only_filled_fields(self):
+        summary = build_post_summary({"title": "Концерт"}, heading="h")
+        self.assertIn("• *Заголовок*: Концерт", summary)
+        for label in ("Дата", "Время начала", "Текст", "Изображение"):
+            self.assertNotIn(label, summary)
+
+    def test_summary_legacy_placeholder_is_empty(self):
+        # «Не указано» из старых черновиков не показывается как значение
+        summary = build_post_summary(
+            {"title": "Не указано", "date": "15.09.2026"}, heading="h"
+        )
+        self.assertNotIn("• *Заголовок*:", summary)
+        self.assertIn("• *Дата*: 15\\.09\\.2026", summary)
+
+    def test_summary_photo_line_only_when_present(self):
+        self.assertIn(
+            "• *Изображение*: Добавлено",
+            build_post_summary({"image": "f1"}, heading="h"),
+        )
+        self.assertNotIn("Изображение", build_post_summary({"title": "Т"}, heading="h"))
+
+    def test_empty_summary_has_no_field_lines(self):
+        summary = build_post_summary({}, heading="h")
+        self.assertNotIn("•", summary)
+        self.assertNotIn("Не указано", summary)
 
 
 class MigrationTests(unittest.TestCase):

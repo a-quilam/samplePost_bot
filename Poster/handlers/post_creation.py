@@ -55,6 +55,7 @@ DRAFT_FIELD_KEYS = [
 POST_STEPS: list[dict[str, Any]] = [
     {
         "key": "title",
+        "label": "Заголовок",
         "prompt": "Введите заголовок поста или нажмите 'Пропустить':",
         "validator": None,
         "formatter": format_text,
@@ -62,6 +63,7 @@ POST_STEPS: list[dict[str, Any]] = [
     },
     {
         "key": "date",
+        "label": "Дата",
         "prompt": "Введите дату события (ДД.ММ.ГГГГ) или нажмите 'Пропустить':",
         "validator": validate_date,
         "formatter": format_text,
@@ -69,6 +71,7 @@ POST_STEPS: list[dict[str, Any]] = [
     },
     {
         "key": "time_start",
+        "label": "Время начала",
         "prompt": "Введите время начала (ЧЧ:ММ) или нажмите 'Пропустить':",
         "validator": validate_time,
         "formatter": format_text,
@@ -76,6 +79,7 @@ POST_STEPS: list[dict[str, Any]] = [
     },
     {
         "key": "time_end",
+        "label": "Время окончания",
         "prompt": "Введите время окончания (ЧЧ:ММ) или нажмите 'Пропустить':",
         "validator": validate_time,
         "formatter": format_text,
@@ -83,6 +87,7 @@ POST_STEPS: list[dict[str, Any]] = [
     },
     {
         "key": "place_name",
+        "label": "Место",
         "prompt": "Введите место проведения или нажмите 'Пропустить':",
         "validator": None,
         "formatter": format_text,
@@ -90,6 +95,7 @@ POST_STEPS: list[dict[str, Any]] = [
     },
     {
         "key": "text",
+        "label": "Текст",
         "prompt": "Введите текст поста или нажмите 'Пропустить':",
         "validator": None,
         "formatter": format_text,
@@ -97,6 +103,7 @@ POST_STEPS: list[dict[str, Any]] = [
     },
     {
         "key": "contact",
+        "label": "Контакты",
         "prompt": "Введите контактную информацию или нажмите 'Пропустить':",
         "validator": None,
         "formatter": format_text,
@@ -104,6 +111,7 @@ POST_STEPS: list[dict[str, Any]] = [
     },
     {
         "key": "place_url",
+        "label": "URL места",
         "prompt": "Введите URL места проведения или нажмите 'Пропустить':",
         "validator": validate_url,
         "formatter": format_text,
@@ -111,6 +119,7 @@ POST_STEPS: list[dict[str, Any]] = [
     },
     {
         "key": "image",
+        "label": "Изображение",
         "prompt": "Отправьте изображение или нажмите 'Пропустить':",
         "validator": None,
         "formatter": None,
@@ -237,7 +246,9 @@ async def start_edit_draft(update: Update, context: ContextTypes.DEFAULT_TYPE) -
 
         _clear_post_data(ctx.data(context))
         for key in DRAFT_FIELD_KEYS:
-            ctx.data(context)[key] = getattr(draft, key)
+            value = getattr(draft, key)
+            # Легаси-заглушка «Не указано» из старых черновиков = пустое поле
+            ctx.data(context)[key] = None if value == "Не указано" else value
         photos = get_draft_photos(draft)
         ctx.data(context)["photos"] = photos
         ctx.data(context)["image"] = photos[0] if photos else None
@@ -265,8 +276,12 @@ async def prompt_step(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     step_index = ctx.data(context)["current_step"]
     if step_index < len(POST_STEPS):
         step = POST_STEPS[step_index]
+        # Заголовок шага: номер прогресса + русское имя поля — пользователь
+        # всегда видит, какое поле заполняется сейчас
         await ctx.message(update).reply_text(
-            step["prompt"], reply_markup=get_skip_keyboard()
+            f"Шаг {step_index + 1} из {len(POST_STEPS)} — {step['label']}.\n"
+            f"{step['prompt']}",
+            reply_markup=get_skip_keyboard(),
         )
         logger.info(f"Переход к шагу {step_index + 1}: {step['key']}.")
     else:
@@ -300,7 +315,9 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             ctx.data(context).pop("pending_media", None)
             logger.info("Пользователь пропустил добавление изображения.")
         else:
-            ctx.data(context)[step["key"]] = "Не указано"
+            # Пропуск — пустое поле (None), а не строка-заглушка:
+            # «Не указано» не должно попадать ни в сводку, ни в БД
+            ctx.data(context)[step["key"]] = None
             logger.info(f"Пользователь пропустил поле '{step['key']}'.")
     else:
         if step["validator"] and not step["validator"](text):
@@ -358,7 +375,7 @@ async def handle_skip(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int
         ctx.data(context).pop("pending_media", None)
         logger.info("Пользователь пропустил добавление изображения.")
     else:
-        ctx.data(context)[step["key"]] = "Не указано"
+        ctx.data(context)[step["key"]] = None
         logger.info(f"Пользователь пропустил поле '{step['key']}'.")
 
     ctx.data(context)["current_step"] += 1
@@ -490,27 +507,27 @@ async def handle_callback_query(
         return POST_CREATION
 
 
-def _field_label(key: str) -> str:
-    """
-    Человекочитаемая метка поля для MarkdownV2-сообщения.
-    Заменяем '_' на пробел: символ '_' обязан экранироваться в MarkdownV2.
-    """
-    return key.replace("_", " ").capitalize()
-
-
 def build_post_summary(post_data: dict, *, heading: str) -> str:
     """
-    Собирает итоговое MarkdownV2-сообщение о посте.
-    Наша разметка (*жирный*) остаётся как есть, значения пользователя экранируются.
+    Собирает итоговое MarkdownV2-сообщение о посте: русские названия полей,
+    показываются ТОЛЬКО заполненные поля (пропуск не даёт строки в сводке).
+
+    Превью и готовый пост собираются этой же функцией — тексты совпадают
+    дословно. Наша разметка (*жирный*) остаётся как есть, значения
+    пользователя экранируются.
     """
     lines = [heading, ""]
     for step in POST_STEPS:
         key = step["key"]
         if key == "image":
-            value = "Добавлено" if post_data.get("image") else "Не добавлено"
-        else:
-            value = escape_markdown(str(post_data.get(key) or "Не указано"))
-        lines.append(f"• *{_field_label(key)}*: {value}")
+            if post_data.get("image") or post_data.get("photos"):
+                lines.append(f"• *{step['label']}*: Добавлено")
+            continue
+        value = post_data.get(key)
+        # «Не указано» — легаси-запись старых черновиков, для сводки это пусто
+        if value in (None, "", "Не указано"):
+            continue
+        lines.append(f"• *{step['label']}*: {escape_markdown(str(value))}")
     lines.append("")
     return "\n".join(lines)
 
@@ -773,20 +790,16 @@ async def finish_post(update: Update, context: ContextTypes.DEFAULT_TYPE) -> boo
 async def edit_post(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     """
     Позволяет пользователю выбрать поле для редактирования.
+
+    Список полей берётся из POST_STEPS (единый источник): русские названия
+    и ключи полей совпадают с шагами создания.
     """
     logger.info("Пользователь выбрал редактирование поста.")
     keyboard = [
-        [InlineKeyboardButton("Заголовок", callback_data="edit_title")],
-        [InlineKeyboardButton("Дата", callback_data="edit_date")],
-        [InlineKeyboardButton("Время начала", callback_data="edit_time_start")],
-        [InlineKeyboardButton("Время окончания", callback_data="edit_time_end")],
-        [InlineKeyboardButton("Место", callback_data="edit_place_name")],
-        [InlineKeyboardButton("Текст", callback_data="edit_text")],
-        [InlineKeyboardButton("Контакты", callback_data="edit_contact")],
-        [InlineKeyboardButton("URL места", callback_data="edit_place_url")],
-        [InlineKeyboardButton("Изображение", callback_data="edit_image")],
-        [InlineKeyboardButton("Отмена", callback_data="cancel_edit")],
+        [InlineKeyboardButton(step["label"], callback_data=f"edit_{step['key']}")]
+        for step in POST_STEPS
     ]
+    keyboard.append([InlineKeyboardButton("Отмена", callback_data="cancel_edit")])
     reply_markup = InlineKeyboardMarkup(keyboard)
     await ctx.message(update).reply_text(
         "Выберите поле для редактирования:", reply_markup=reply_markup
@@ -822,7 +835,12 @@ async def handle_edit(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int
                 reply_markup=get_skip_keyboard(),
             )
         else:
-            prompt_text = f"Введите новое значение для '{field_to_edit}' или нажмите 'Пропустить':"
+            # В промпте — человекочитаемое имя поля («Время начала»),
+            # а не внутренний ключ (time_start)
+            prompt_text = (
+                f"Введите новое значение для «{step['label']}» "
+                "или нажмите 'Пропустить':"
+            )
             await query.edit_message_text(prompt_text, reply_markup=get_skip_keyboard())
         logger.info(f"Пользователь выбрал редактировать поле '{field_to_edit}'.")
         return EDIT_FIELD
@@ -864,7 +882,7 @@ async def process_edit(update: Update, context: ContextTypes.DEFAULT_TYPE) -> in
                 "Пользователь пропустил добавление изображения при редактировании."
             )
         elif field:
-            ctx.data(context)[field] = "Не указано"
+            ctx.data(context)[field] = None
             logger.info(f"Пользователь пропустил обновление поля '{field}'.")
         await review_post(update, context)
         # Возвращаемся в POST_CREATION: кнопки действий должны остаться рабочими
@@ -957,7 +975,7 @@ async def handle_skip_edit(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         ctx.data(context)["photos"] = []
         ctx.data(context).pop("pending_media", None)
     elif field:
-        ctx.data(context)[field] = "Не указано"
+        ctx.data(context)[field] = None
     await review_post(update, context)
     return POST_CREATION
 
