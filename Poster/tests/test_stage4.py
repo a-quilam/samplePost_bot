@@ -26,9 +26,9 @@ from types import SimpleNamespace
 from typing import Any, cast
 
 import log_config
-from approval import photos_to_json
 from handlers.drafts import build_drafts_message
 from handlers.post_creation import _apply_fields, _clear_post_data, _post_fields
+from models import photos_to_json
 from utils import tg_context as ctx
 from utils.tg_context import data as ctx_data
 
@@ -182,35 +182,23 @@ class EnvExampleConsistencyTests(unittest.TestCase):
 class ConfigParseTests(unittest.TestCase):
     """config.py в изолированном процессе (env приоритетнее .env)."""
 
-    CODE = (
-        "import config;" "print(config.ADMIN_IDS);" "print(config.PUBLICATION_CHAT_ID)"
-    )
-
-    def test_admin_ids_parsed_with_spaces(self):
+    def test_token_parsed_from_env(self):
         result = _run_python(
-            self.CODE,
-            {
-                "TELEGRAM_BOT_TOKEN": "12345:TEST-TOKEN",
-                "ADMIN_IDS": "111, 222",
-                "PUBLICATION_CHAT_ID": "-100777",
-            },
+            "import config; print(config.TELEGRAM_BOT_TOKEN)",
+            {"TELEGRAM_BOT_TOKEN": "12345:TEST-TOKEN"},
         )
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertIn("[111, 222]", result.stdout)
-        self.assertIn("-100777", result.stdout)
+        self.assertIn("12345:TEST-TOKEN", result.stdout)
 
-    def test_missing_admin_ids_raises(self):
+    def test_missing_token_raises(self):
         # Пустая строка в окружении блокирует загрузку значения из .env —
         # конфигурация обязана упасть с понятной ошибкой
         result = _run_python(
-            self.CODE,
-            {
-                "TELEGRAM_BOT_TOKEN": "12345:TEST-TOKEN",
-                "ADMIN_IDS": "",
-            },
+            "import config",
+            {"TELEGRAM_BOT_TOKEN": ""},
         )
-        self.assertNotEqual(result.returncode, 0, "config обязан упасть без ADMIN_IDS")
-        self.assertIn("ADMIN_IDS", result.stderr)
+        self.assertNotEqual(result.returncode, 0, "config обязан упасть без токена")
+        self.assertIn("TELEGRAM_BOT_TOKEN", result.stderr)
 
 
 class DatabaseUrlTests(unittest.TestCase):

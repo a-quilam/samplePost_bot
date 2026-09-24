@@ -1,7 +1,6 @@
 # handlers/callbacks.py
 """
-Обработчики CallbackQuery, которые НЕ входят в ConversationHandler создания поста
-и НЕ относятся к согласованию (оно вынесено в handlers/approval.py):
+Обработчики CallbackQuery, которые НЕ входят в ConversationHandler создания поста:
 - Возврат в главное меню из inline-кнопок
 """
 
@@ -41,7 +40,7 @@ async def handle_main_menu_selection(
 def callbacks_handlers() -> list[BaseHandler]:
     """
     Возвращает список обработчиков для CallbackQuery, не входящих
-    в ConversationHandler создания поста и в согласование.
+    в ConversationHandler создания поста.
     """
     return [
         CallbackQueryHandler(handle_main_menu_selection, pattern="^main_menu$"),

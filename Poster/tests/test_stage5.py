@@ -4,12 +4,9 @@
 
 - models.utcnow(): наивный UTC вместо устаревшего datetime.utcnow;
 - PRAGMA SQLite (busy timeout, WAL, synchronous) — конкурентный доступ;
-- фоновая чистка черновиков не трогает активные согласования;
-- /remove_responsible отвечает после удаления (имя фиксируется до commit);
+- фоновая чистка старых черновиков (TTL);
 - split_long_text: отправка текста длиннее лимита Telegram (4096);
-- is_post_empty: пустой пост не уходит на согласование;
-- send_for_approval: черновик сохранён даже при сбое отправки в чат;
-- notify_responsible: недоставленное уведомление ≠ сбой назначения;
+- is_post_empty: пустой пост не отправляется;
 - UX диалога: подсказка на превью, «Черновики» завершают диалог,
   дедупликация промптов альбома, единая клавиатура главного меню;
 - errors.py: уведомление пользователя об ошибке + троттлинг,
@@ -36,22 +33,15 @@ from sqlalchemy import create_engine, text
 from sqlalchemy.orm import sessionmaker
 
 import models  # noqa: F401  — регистрация таблиц в Base.metadata
-from approval import (
-    STATUS_APPROVED,
-    STATUS_ASSIGNED,
-    STATUS_DECLINED,
-    STATUS_PUBLISHED,
-)
 from base import Base
 from database import SQLITE_BUSY_TIMEOUT_SECONDS, apply_sqlite_pragmas
-from models import Draft, PostApproval, utcnow
+from models import Draft, utcnow
 
 # Импорт обработчиков требует config (.env с токеном) и telegram —
 # при недоступности соответствующие тесты пропускаются, а не падают.
 try:
     import bot as bot_module
     import handlers.post_creation as post_creation_module
-    from handlers.approval import notify_responsible
     from handlers.drafts import (
         DRAFTS_PAGE_SIZE,
         build_drafts_message,
@@ -66,7 +56,6 @@ try:
         handle_photo,
         is_post_empty,
         process_edit,
-        send_for_approval,
         send_post,
         split_long_text,
         view_drafts_and_exit,
@@ -165,7 +154,7 @@ class SqlitePragmaTests(unittest.TestCase):
 
 
 class RemoveOldDraftsTests(unittest.TestCase):
-    """sync_remove_old_drafts: TTL 30 дней, активные согласования не трогаются."""
+    """sync_remove_old_drafts: TTL 30 дней — старые удаляются, свежие остаются."""
 
     def setUp(self):
         import handlers.jobs as jobs_module
@@ -179,139 +168,24 @@ class RemoveOldDraftsTests(unittest.TestCase):
         self.jobs.SessionLocal = self._orig_session_local
         self.engine.dispose()
 
-    def _seed(self):
+    def test_removes_old_keeps_fresh(self):
         session = self.session_factory()
         try:
-            old_free = make_old_draft(session, title="Без согласования")
-            old_declined = make_old_draft(session, title="Отклонённый")
-            old_published = make_old_draft(session, title="Опубликованный")
-            old_assigned = make_old_draft(session, title="На согласовании")
-            old_approved = make_old_draft(session, title="Согласован")
-            fresh = Draft(user_id=111, title="Свежий", created_at=utcnow())
-            session.add(fresh)
+            make_old_draft(session, title="Старый 1")
+            make_old_draft(session, title="Старый 2")
+            session.add(Draft(user_id=111, title="Свежий", created_at=utcnow()))
             session.commit()
-            for draft, status in (
-                (old_declined, STATUS_DECLINED),
-                (old_published, STATUS_PUBLISHED),
-                (old_assigned, STATUS_ASSIGNED),
-                (old_approved, STATUS_APPROVED),
-            ):
-                session.add(
-                    PostApproval(
-                        draft_id=draft.id,
-                        responsible_telegram_id=42,
-                        status=status,
-                    )
-                )
-            session.commit()
-            return {
-                d.title: d.id
-                for d in (
-                    old_free,
-                    old_declined,
-                    old_published,
-                    old_assigned,
-                    old_approved,
-                    fresh,
-                )
-            }
         finally:
             session.close()
 
-    def _titles_left(self):
-        session = self.session_factory()
-        try:
-            return {d.title for d in session.query(Draft).all()}
-        finally:
-            session.close()
-
-    def _approvals_left(self):
-        session = self.session_factory()
-        try:
-            return session.query(PostApproval).count()
-        finally:
-            session.close()
-
-    def test_removes_inactive_keeps_active(self):
-        self._seed()
         self.jobs.sync_remove_old_drafts()
 
-        self.assertEqual(
-            self._titles_left(),
-            {"На согласовании", "Согласован", "Свежий"},
-        )
-
-    def test_orphan_approvals_removed_with_drafts(self):
-        self._seed()
-        self.jobs.sync_remove_old_drafts()
-        # Остаются ровно 2 записи согласования (assigned + approved)
-        self.assertEqual(self._approvals_left(), 2)
-
-
-class RemoveResponsibleTests(unittest.TestCase):
-    """remove_responsible: имя фиксируется до удаления (без DetachedInstanceError)."""
-
-    def setUp(self):
-        import handlers.admin as admin_module
-
-        self.admin = admin_module
-        self._orig_session_local = admin_module.SessionLocal
-        self._orig_admin_ids = admin_module.ADMIN_IDS
-        self.session_factory, self.engine = make_session_factory()
-        admin_module.SessionLocal = self.session_factory
-        admin_module.ADMIN_IDS = [777]
-
         session = self.session_factory()
         try:
-            from models import ResponsiblePerson
-
-            session.add(ResponsiblePerson(name="Иван Тестов", telegram_id=42))
-            session.commit()
+            titles = {d.title for d in session.query(Draft).all()}
         finally:
             session.close()
-
-    def tearDown(self):
-        self.admin.SessionLocal = self._orig_session_local
-        self.admin.ADMIN_IDS = self._orig_admin_ids
-        self.engine.dispose()
-
-    def test_remove_replies_success_and_deletes_row(self):
-        reply = AsyncMock()
-        update = SimpleNamespace(
-            effective_message=SimpleNamespace(reply_text=reply),
-            effective_user=SimpleNamespace(id=777),
-        )
-        context = SimpleNamespace(args=["42"])
-
-        asyncio.run(self.admin.remove_responsible(update, context))
-
-        reply.assert_awaited()
-        text_sent = reply.await_args.args[0]
-        self.assertIn("удалён успешно", text_sent)
-        self.assertIn("Иван Тестов", text_sent)
-
-        session = self.session_factory()
-        try:
-            from models import ResponsiblePerson
-
-            self.assertIsNone(
-                session.query(ResponsiblePerson).filter_by(telegram_id=42).first()
-            )
-        finally:
-            session.close()
-
-    def test_remove_missing_person_replies_not_found(self):
-        reply = AsyncMock()
-        update = SimpleNamespace(
-            effective_message=SimpleNamespace(reply_text=reply),
-            effective_user=SimpleNamespace(id=777),
-        )
-        context = SimpleNamespace(args=["999"])
-
-        asyncio.run(self.admin.remove_responsible(update, context))
-
-        reply.assert_awaited()
-        self.assertIn("не найден", reply.await_args.args[0])
+        self.assertEqual(titles, {"Свежий"})
 
 
 class SplitLongTextTests(unittest.TestCase):
@@ -437,7 +311,7 @@ class SendPostLongTextTests(unittest.TestCase):
 
 
 class IsPostEmptyTests(unittest.TestCase):
-    """is_post_empty: пустой пост не отправляется на согласование."""
+    """is_post_empty: пустой пост не отправляется по кнопке «Готово»."""
 
     def test_empty_dict(self):
         self.assertTrue(is_post_empty({}))
@@ -467,145 +341,6 @@ class IsPostEmptyTests(unittest.TestCase):
 
     def test_photos_json_only_not_empty(self):
         self.assertFalse(is_post_empty({"photos": '["file_id_1"]'}))
-
-
-@unittest.skipIf(
-    HANDLERS_IMPORT_ERROR is not None,
-    f"импорт обработчиков недоступен: {HANDLERS_IMPORT_ERROR}",
-)
-class SendForApprovalGuardTests(unittest.TestCase):
-    """send_for_approval: пустой пост отклоняется до отправки."""
-
-    def test_empty_post_replies_and_sends_nothing(self):
-        reply = AsyncMock()
-        update = SimpleNamespace(
-            effective_message=SimpleNamespace(reply_text=reply),
-            effective_user=SimpleNamespace(id=5),
-        )
-        context = SimpleNamespace(
-            user_data={
-                "title": "Не указано",
-                "date": "Не указано",
-                "text": "Не указано",
-            },
-            bot=object(),  # бот не должен использоваться — проверка раньше отправки
-        )
-
-        asyncio.run(send_for_approval(update, context))
-
-        reply.assert_awaited()
-        self.assertIn("Пост пуст", reply.await_args.args[0])
-
-
-@unittest.skipIf(
-    HANDLERS_IMPORT_ERROR is not None,
-    f"импорт обработчиков недоступен: {HANDLERS_IMPORT_ERROR}",
-)
-class SendForApprovalFailureTests(unittest.TestCase):
-    """Сбой отправки в чат согласования: черновик сохранён и НЕ потерян."""
-
-    class FailingBot:
-        async def send_message(self, **kwargs):
-            raise RuntimeError("chat not found")
-
-        async def send_photo(self, **kwargs):
-            raise RuntimeError("chat not found")
-
-        async def send_media_group(self, **kwargs):
-            raise RuntimeError("chat not found")
-
-    def setUp(self):
-        self._orig_session_local = post_creation_module.SessionLocal
-        self._orig_review = post_creation_module.REVIEW_CHAT_ID
-        self.session_factory, self.engine = make_session_factory()
-        post_creation_module.SessionLocal = self.session_factory
-        post_creation_module.REVIEW_CHAT_ID = "-100777"
-
-    def tearDown(self):
-        post_creation_module.SessionLocal = self._orig_session_local
-        post_creation_module.REVIEW_CHAT_ID = self._orig_review
-        self.engine.dispose()
-
-    def _run(self, user_data, bot):
-        reply = AsyncMock()
-        update = SimpleNamespace(
-            effective_message=SimpleNamespace(reply_text=reply),
-            effective_user=SimpleNamespace(id=5),
-        )
-        context = SimpleNamespace(user_data=user_data, bot=bot)
-        asyncio.run(send_for_approval(update, context))
-        return reply
-
-    def test_draft_saved_even_if_review_send_fails(self):
-        reply = self._run({"title": "Концерт", "text": "В 19:00"}, self.FailingBot())
-
-        # Пользователь должен знать, что пост сохранён, а не потерян
-        last_text = reply.await_args.args[0]
-        self.assertIn("Черновик сохранён", last_text)
-        self.assertIn("не удалось", last_text)
-
-        session = self.session_factory()
-        try:
-            drafts = session.query(Draft).all()
-            self.assertEqual(len(drafts), 1)
-            self.assertEqual(drafts[0].title, "Концерт")
-        finally:
-            session.close()
-
-    def test_success_path_reports_sent(self):
-        class OkBot:
-            async def send_message(self, **kwargs):
-                return None
-
-            async def send_photo(self, **kwargs):
-                return None
-
-            async def send_media_group(self, **kwargs):
-                return None
-
-        reply = self._run({"title": "Концерт"}, OkBot())
-        self.assertIn("Пост отправлен на согласование", reply.await_args.args[0])
-
-
-@unittest.skipIf(
-    HANDLERS_IMPORT_ERROR is not None,
-    f"импорт обработчиков недоступен: {HANDLERS_IMPORT_ERROR}",
-)
-class NotifyResponsibleTests(unittest.TestCase):
-    """notify_responsible: 403/сбой доставки ≠ сбой назначения."""
-
-    def test_success_returns_true(self):
-        calls = []
-
-        class Bot:
-            async def send_message(self, **kwargs):
-                calls.append(kwargs)
-
-            async def send_photo(self, **kwargs):
-                calls.append(kwargs)
-
-            async def send_media_group(self, **kwargs):
-                calls.append(kwargs)
-
-        draft = Draft(user_id=1, title="Пост")
-        notified = asyncio.run(notify_responsible(Bot(), 42, draft, 7))
-        self.assertTrue(notified)
-        self.assertTrue(calls)
-
-    def test_failure_returns_false(self):
-        class Bot:
-            async def send_message(self, **kwargs):
-                raise RuntimeError("Forbidden: bot was blocked by the user")
-
-            async def send_photo(self, **kwargs):
-                raise RuntimeError("Forbidden")
-
-            async def send_media_group(self, **kwargs):
-                raise RuntimeError("Forbidden")
-
-        draft = Draft(user_id=1, title="Пост")
-        notified = asyncio.run(notify_responsible(Bot(), 42, draft, 7))
-        self.assertFalse(notified)
 
 
 @unittest.skipIf(

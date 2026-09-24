@@ -18,20 +18,10 @@ from telegram.ext import (
     filters,
 )
 
-from approval import (
-    STATUS_DECLINED,
-    draft_to_post_data,
-    edit_block_reason,
-    get_approval,
-    get_draft_photos,
-    photos_to_json,
-    reset_declined,
-)
-from config import REVIEW_CHAT_ID
 from database import SessionLocal
 from handlers.drafts import view_drafts
 from handlers.main_menu import main_menu_keyboard
-from models import Draft, ResponsiblePerson
+from models import Draft, get_draft_photos, photos_to_json
 from utils import tg_context as ctx
 from utils.formatter import escape_markdown, format_text
 from utils.validators import validate_date, validate_time, validate_url
@@ -42,8 +32,8 @@ logger = logging.getLogger(__name__)
 # Определение состояний
 POST_CREATION, EDIT_FIELD = range(2)
 
-# Единый заголовок поста для ПРЕВЬЮ и ПУБЛИКАЦИИ: текст, который видит автор
-# в превью, дословно совпадает с тем, что уйдёт в чат публикации.
+# Единый заголовок поста для ПРЕВЬЮ и ГОТОВОГО ПОСТА: текст, который видит
+# пользователь в превью, дословно совпадает с финальной отправкой по «Готово».
 POST_HEADING = "📢 *Новый пост:*"
 
 # Поля черновика (совпадают с колонками модели Draft, кроме служебных)
@@ -139,16 +129,13 @@ def get_skip_keyboard():
 
 def get_post_actions_keyboard():
     """
-    Возвращает клавиатуру с действиями для поста.
+    Действия на экране превью: отредактировать, сохранить в черновики,
+    завершить — получить готовый пост.
     """
     keyboard = [
-        [InlineKeyboardButton("📄 В черновик", callback_data="save_draft")],
-        [
-            InlineKeyboardButton(
-                "🚀 Отправить на согласование", callback_data="send_for_approval"
-            )
-        ],
         [InlineKeyboardButton("✏️ Редактировать", callback_data="edit_post")],
+        [InlineKeyboardButton("📄 Сохранить в черновики", callback_data="save_draft")],
+        [InlineKeyboardButton("✅ Готово", callback_data="finish")],
     ]
     return InlineKeyboardMarkup(keyboard)
 
@@ -230,8 +217,8 @@ async def start_edit_draft(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     Открывает существующий черновик в редакторе (callback editdraft_<id>).
 
     Точка входа ConversationHandler: черновик загружается в user_data,
-    показывается превью — дальше работают те же кнопки «В черновик»
-    (обновление БЕЗ создания копии) и «Отправить на согласование».
+    показывается превью — дальше работают те же кнопки «Сохранить в черновики»
+    (обновление БЕЗ создания копии) и «Готово».
     """
     query = ctx.query(update)
     await query.answer()
@@ -246,18 +233,6 @@ async def start_edit_draft(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         draft = _find_own_draft(session, draft_id, query.from_user.id)
         if draft is None:
             await ctx.message(update).reply_text("Черновик не найден.")
-            return ConversationHandler.END
-
-        block = edit_block_reason(session, draft_id)
-        if block is not None:
-            reasons = {
-                "assigned": "на согласовании",
-                "approved": "согласован и ожидает публикации",
-                "published": "уже опубликован",
-            }
-            await ctx.message(update).reply_text(
-                f"Редактирование запрещено: пост {reasons.get(block, block)}."
-            )
             return ConversationHandler.END
 
         _clear_post_data(ctx.data(context))
@@ -501,9 +476,12 @@ async def handle_callback_query(
     elif data == "save_draft":
         await save_draft(update, context)
         return ConversationHandler.END
-    elif data == "send_for_approval":
-        await send_for_approval(update, context)
-        return ConversationHandler.END
+    elif data == "finish":
+        # «Готово»: пост отправлен → цикл завершён; иначе (пустой пост,
+        # сбой отправки) остаёмся на превью, данные не потеряны
+        if await finish_post(update, context):
+            return ConversationHandler.END
+        return POST_CREATION
     elif data == "edit_post":
         # Важно: возвращаем EDIT_FIELD, иначе состояние редактирования не наступит
         return await edit_post(update, context)
@@ -611,23 +589,20 @@ async def send_post(
     photos: list,
     *,
     heading: str,
-    extra_lines: str = "",
     reply_markup: InlineKeyboardMarkup | None = None,
     markup_lead_text: str | None = None,
 ) -> None:
     """
     ЕДИНАЯ отправка поста: текст / фото с подписью / медиа-группа.
 
-    Используется в превью, чате согласования, уведомлении ответственного
-    и публикации — формат сообщения везде одинаковый, без дублирования
-    логики форматирования и без повторного экранирования.
+    Используется в превью и в финальной отправке по кнопке «Готово» —
+    формат сообщения одинаковый, без дублирования логики форматирования
+    и без повторного экранирования.
 
     Текст длиннее MESSAGE_TEXT_LIMIT разбивается на несколько сообщений
     (лимит Telegram — 4096); кнопки прикрепляются к первому сообщению.
     """
     text = build_post_summary(post_data, heading=heading)
-    if extra_lines:
-        text += extra_lines
 
     file_ids = [p for p in (photos or []) if p]
     chunks = split_long_text(text)
@@ -686,8 +661,9 @@ async def send_post(
 
 async def review_post(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """
-    Превью поста: фотографии + ровно тот же текст, что увидит чат публикации.
-    Кнопки действий — к этому же сообщению (для альбома — отдельным сообщением).
+    Превью поста: фотографии + ровно тот же текст, что уйдёт в готовом
+    посте по кнопке «Готово». Кнопки действий — к этому же сообщению
+    (для альбома — отдельным сообщением).
     """
     logger.info("Переход к превью поста.")
     await send_post(
@@ -742,8 +718,8 @@ def is_post_empty(post_data: dict) -> bool:
     """
     Пост пуст, если нет ни одного содержательного поля и нет фотографий.
 
-    Значения-заглушки «Не указано» (пропущенные шаги) считаются пустыми —
-    такой пост бессмысленно отправлять на согласование.
+    Значения-заглушки «Не указано» (легаси-черновики со старыми записями)
+    считаются пустыми — такой пост бессмысленно отправлять.
     """
     empty_values = (None, "", "Не указано")
     for key in DRAFT_FIELD_KEYS:
@@ -754,133 +730,44 @@ def is_post_empty(post_data: dict) -> bool:
     return not post_data.get("image") and not post_data.get("photos")
 
 
-async def send_for_approval(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+async def finish_post(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
     """
-    Отправляет пост на согласование: сохраняет (или обновляет) черновик
-    и создаёт цикл согласования. Повторная отправка отклонённого поста
-    начинает НОВЫЙ цикл; уже согласованный/назначенный — не дублируется.
+    «Готово»: отправляет пользователю ГОТОВЫЙ пост тем же механизмом
+    (send_post), что и превью, — в ТОТ ЖЕ личный чат, без посредников.
 
-    Ошибки разделены: сбой БД («не удалось сохранить») и сбой отправки
-    в чат согласования («черновик сохранён, но отправить не удалось») —
-    пользователь должен знать, что его пост не потерян.
+    Возвращает True, если пост отправлен (цикл завершён).
+    False — пустой пост или сбой отправки: пользователь остаётся
+    на превью, введённые данные не теряются.
     """
-    logger.info("Отправка поста на согласование.")
     user_data = ctx.data(context)
 
     if is_post_empty(_post_fields(user_data)):
         await ctx.message(update).reply_text(
-            "Пост пуст: добавьте хотя бы заголовок, текст или изображение.",
-            reply_markup=main_menu_keyboard(),
+            "Пост пуст: добавьте хотя бы заголовок, текст или изображение."
         )
-        return
+        return False
 
-    if not REVIEW_CHAT_ID:
-        await ctx.message(update).reply_text(
-            "Не настроен REVIEW_CHAT_ID. Пост не отправлен на согласование.",
-            reply_markup=main_menu_keyboard(),
-        )
-        return
-
-    session: Session = SessionLocal()
-    try:
-        # --- Работа с БД: черновик + цикл согласования + список ответственных
-        draft = _find_own_draft(
-            session, user_data.get("editing_draft_id"), ctx.user(update).id
-        )
-        if draft is None:
-            draft = Draft(user_id=ctx.user(update).id)
-            session.add(draft)
-        _apply_fields(draft, user_data)
-        session.commit()
-
-        # Один активный цикл согласования на пост
-        approval = get_approval(session, draft.id)
-        if approval is not None and approval.status != STATUS_DECLINED:
-            await ctx.message(update).reply_text(
-                "Этот пост уже отправлен на согласование.",
-                reply_markup=main_menu_keyboard(),
-            )
-            return
-        if approval is not None:
-            # Отклонён: правки внесены — начинаем новый цикл согласования
-            reset_declined(session, draft.id)
-
-        responsible_persons = session.query(ResponsiblePerson).all()
-        keyboard = (
-            InlineKeyboardMarkup(
-                [
-                    [
-                        InlineKeyboardButton(
-                            person.name,
-                            callback_data=f"responsible_{draft.id}_{person.telegram_id}",
-                        )
-                    ]
-                    for person in responsible_persons
-                ]
-            )
-            if responsible_persons
-            else None
-        )
-
-        # Всё, что нужно для отправки, фиксируем ДО закрытия сессии:
-        # после close() объекты отсоединены и их атрибуты недоступны.
-        draft_id = draft.id
-        post_data = draft_to_post_data(draft)
-        photos = get_draft_photos(draft)
-        author_id = draft.user_id
-    except Exception as e:
-        session.rollback()
-        logger.error(f"Ошибка при сохранении поста на согласование: {e}")
-        await ctx.message(update).reply_text(
-            "Произошла ошибка при сохранении поста.",
-            reply_markup=main_menu_keyboard(),
-        )
-        return
-    finally:
-        session.close()
-
-    logger.info(f"Черновик {draft_id} сохранён, отправляем в чат согласования.")
-
-    # --- Отправка в чат согласования: БД больше не нужна, ошибки — отдельно
     try:
         await send_post(
             context.bot,
-            REVIEW_CHAT_ID,
-            post_data,
-            photos,
-            heading="📋 *Новый пост для согласования:*",
-            extra_lines=f"*Автор поста:* {author_id}\n",
+            ctx.chat(update).id,
+            user_data,
+            _current_photos(user_data),
+            heading=POST_HEADING,
         )
-
-        # Клавиатура выбора ответственного: в callback_data передаём id поста,
-        # чтобы ответственный и данные поста определялись из БД, а не из
-        # ctx.data(context) нажавшего администратора
-        if keyboard is not None:
-            await context.bot.send_message(
-                chat_id=REVIEW_CHAT_ID,
-                text="Выберите ответственного за этот пост:",
-                reply_markup=keyboard,
-            )
-        else:
-            await context.bot.send_message(
-                chat_id=REVIEW_CHAT_ID, text="Нет ответственных лиц для назначения."
-            )
     except Exception as e:
-        logger.error(
-            f"Черновик {draft_id} сохранён, но отправка в чат согласования "
-            f"не удалась: {e}"
-        )
+        logger.error(f"Не удалось отправить готовый пост: {e}")
         await ctx.message(update).reply_text(
-            f"Черновик сохранён (№{draft_id}), но отправить пост в чат "
-            "согласования не удалось. Проверьте, что бот добавлен в чат "
-            "и REVIEW_CHAT_ID указан верно.",
-            reply_markup=main_menu_keyboard(),
+            "Не удалось отправить готовый пост. Попробуйте ещё раз."
         )
-        return
+        return False
 
+    _clear_post_data(user_data)
     await ctx.message(update).reply_text(
-        "Пост отправлен на согласование.", reply_markup=main_menu_keyboard()
+        "Пост готов.", reply_markup=main_menu_keyboard()
     )
+    logger.info("Готовый пост отправлен пользователю.")
+    return True
 
 
 async def edit_post(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
@@ -1143,7 +1030,7 @@ def post_creation_handlers() -> list[BaseHandler]:
                     MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message),
                     CallbackQueryHandler(
                         handle_callback_query,
-                        pattern="^(skip|save_draft|send_for_approval|edit_post|media_done)$",
+                        pattern="^(skip|save_draft|finish|edit_post|media_done)$",
                     ),
                 ],
                 EDIT_FIELD: [

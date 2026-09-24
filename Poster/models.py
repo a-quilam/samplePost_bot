@@ -1,5 +1,6 @@
 # models.py
 
+import json
 from datetime import datetime, timezone
 
 from sqlalchemy import DateTime, Integer, String, Text
@@ -46,47 +47,31 @@ class Draft(Base):
         return f"<Draft(id={self.id}, user_id={self.user_id}, title={self.title})>"
 
 
-class ResponsiblePerson(Base):
-    __tablename__ = "responsible_persons"
-
-    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
-    name: Mapped[str] = mapped_column(String(255), nullable=False)
-    telegram_id: Mapped[int] = mapped_column(Integer, unique=True, nullable=False)
-
-    def __repr__(self) -> str:
-        return (
-            f"<ResponsiblePerson(id={self.id}, name={self.name}, "
-            f"telegram_id={self.telegram_id})>"
-        )
+# --- Фотографии поста (медиа-группы) -----------------------------------------
 
 
-class PostApproval(Base):
+def photos_to_json(photos: list[str] | None) -> str | None:
     """
-    Состояние согласования поста.
-
-    Минимальное изменение схемы: НОВАЯ таблица — её создаёт create_all
-    автоматически, существующие таблицы и данные не изменяются
-    (без ALTER TABLE и миграций). На пост — ровно одна запись (unique draft_id),
-    поэтому повторное нажатие кнопки не создаёт дублей.
+    Сериализует список file_id в JSON для колонки Draft.photos.
+    Пустой список -> None (столбец не заполняется).
     """
+    file_ids = [str(p) for p in (photos or []) if p]
+    return json.dumps(file_ids, ensure_ascii=False) if file_ids else None
 
-    __tablename__ = "post_approvals"
 
-    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
-    draft_id: Mapped[int] = mapped_column(
-        Integer, nullable=False, unique=True, index=True
-    )
-    responsible_telegram_id: Mapped[int] = mapped_column(
-        Integer, nullable=False, index=True
-    )
-    # Возможные значения: 'assigned' -> 'approved' -> 'published' | 'declined'
-    status: Mapped[str] = mapped_column(String(16), nullable=False, default="assigned")
-    created_at: Mapped[datetime] = mapped_column(
-        DateTime, default=utcnow, nullable=False
-    )
+def get_draft_photos(draft: Draft) -> list[str]:
+    """
+    Возвращает список file_id фотографий поста.
 
-    def __repr__(self) -> str:
-        return (
-            f"<PostApproval(draft_id={self.draft_id}, "
-            f"responsible={self.responsible_telegram_id}, status={self.status})>"
-        )
+    Совместимость со старыми черновиками: если photos не заполнен (NULL/пусто/
+    битый JSON), берём image — единственную фотографию прежнего формата.
+    """
+    raw = getattr(draft, "photos", None)
+    if raw:
+        try:
+            parsed = json.loads(raw)
+        except (ValueError, TypeError):
+            parsed = None
+        if isinstance(parsed, list) and parsed:
+            return [str(p) for p in parsed if p]
+    return [draft.image] if draft.image else []

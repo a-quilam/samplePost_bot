@@ -62,16 +62,14 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Справка по командам и сценарию работы."""
     await ctx.message(update).reply_text(
-        "Я помогаю подготовить пост и провести его согласование.\n\n"
+        "Я помогаю собрать полноценный пост по шагам, проверить его в превью "
+        "и получить готовый результат.\n\n"
         "Команды:\n"
         "/start — главное меню\n"
         "/create_post — создать новый пост\n"
         "/drafts — список ваших черновиков\n"
         "/cancel — отменить текущий диалог\n"
-        "/help — эта справка\n\n"
-        "Администраторам:\n"
-        "/add_responsible <Имя> <Telegram_ID> — добавить ответственного\n"
-        "/remove_responsible <Telegram_ID> — удалить ответственного"
+        "/help — эта справка"
     )
 
 

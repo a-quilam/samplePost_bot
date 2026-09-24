@@ -10,7 +10,6 @@ from telegram.ext import (
     ContextTypes,
 )
 
-from approval import remove_draft
 from database import SessionLocal
 from models import Draft
 from utils import tg_context as ctx
@@ -174,9 +173,8 @@ async def handle_drafts_page(
 
 async def delete_draft(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """
-    Удаление черновика. Активное согласование (assigned/approved/published)
-    запрещает удаление — иначе «осиротеют» записи и уведомления ответственного.
-    Отклонённый пост удаляется вместе со своей записью согласования.
+    Удаление черновика: удаляется только СВОЙ черновик (по user_id),
+    чужие и несуществующие недоступны.
     """
     query = ctx.query(update)
     await query.answer()
@@ -185,13 +183,12 @@ async def delete_draft(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     session: Session = SessionLocal()
     draft = session.query(Draft).filter(Draft.id == draft_id).first()
     try:
-        outcome = remove_draft(session, draft, query.from_user.id)
-        texts = {
-            "ok": f"Черновик {draft_id} удалён.",
-            "not_found": "Черновик не найден.",
-            "blocked": "Черновик нельзя удалить: пост находится на согласовании.",
-        }
-        text = texts.get(outcome, "Черновик не найден.")
+        if draft is None or draft.user_id != query.from_user.id:
+            text = "Черновик не найден."
+        else:
+            session.delete(draft)
+            session.commit()
+            text = f"Черновик {draft_id} удалён."
     except Exception:
         session.rollback()
         text = "Ошибка при удалении черновика."

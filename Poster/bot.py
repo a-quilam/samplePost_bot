@@ -13,8 +13,6 @@ from telegram.ext import (
 from config import TELEGRAM_BOT_TOKEN
 from database import init_db
 from errors import error_handler
-from handlers.admin import admin_handlers
-from handlers.approval import approval_handlers
 from handlers.callbacks import callbacks_handlers
 from handlers.drafts import drafts_handlers
 from handlers.jobs import setup_jobs
@@ -42,7 +40,7 @@ def build_application() -> Application:
     ВНУТРИ диалога, обрабатываются состояниями диалога (с завершением
     диалога), а не глобальным хендлером main_menu — состояние не «висит».
     Вне диалога ConversationHandler возвращает None, и update уходит
-    дальше по цепочке (main_menu → admin → callbacks → approval → drafts).
+    дальше по цепочке (main_menu → callbacks → drafts).
     """
     # TELEGRAM_BOT_TOKEN проверяется в config при импорте; здесь — ещё и
     # нарровинг для mypy (build_application типизирован, в отличие от старого main)
@@ -58,16 +56,8 @@ def build_application() -> Application:
     for handler in main_menu_handlers():
         application.add_handler(handler)
 
-    # Административные обработчики
-    for handler in admin_handlers():
-        application.add_handler(handler)
-
     # Обработчики CallbackQuery
     for handler in callbacks_handlers():
-        application.add_handler(handler)
-
-    # Обработчики согласования (назначение ответственного, решения)
-    for handler in approval_handlers():
         application.add_handler(handler)
 
     # Обработчики черновиков

@@ -1,6 +1,6 @@
 # tests/test_stage3.py
 """
-Юнит-тесты Stage 3: публикация, редактирование черновиков, медиа-группы, миграция.
+Юнит-тесты Stage 3: отправка поста, медиа-группы, миграция, экранирование.
 
 Запуск из каталога Poster:
     python -m unittest discover -s tests -v
@@ -15,29 +15,15 @@ from sqlalchemy import create_engine, inspect, text
 from sqlalchemy.orm import sessionmaker
 
 import models  # noqa: F401  — регистрация таблиц в Base.metadata
-from approval import (
-    STATUS_APPROVED,
-    STATUS_ASSIGNED,
-    STATUS_DECLINED,
-    STATUS_PUBLISHED,
-    assign_responsible,
-    decide,
-    edit_block_reason,
-    get_approval,
-    get_draft_photos,
-    photos_to_json,
-    publish,
-    remove_draft,
-    reset_declined,
-)
 from base import Base
 from database import _migrate
-from models import Draft, PostApproval
+from models import Draft, get_draft_photos, photos_to_json
+from utils.formatter import escape_markdown, format_text
 
 # Импорт обработчиков требует config (.env с токеном) и telegram —
 # при недоступности соответствующие тесты пропускаются, а не падают.
 try:
-    from handlers.post_creation import POST_HEADING, send_post
+    from handlers.post_creation import POST_HEADING, build_post_summary, send_post
 
     HANDLERS_IMPORT_ERROR = None
 except Exception as e:  # noqa: BLE001 — причина попадает в сообщение пропуска
@@ -56,14 +42,6 @@ def make_draft(session, user_id=111, title="Тестовый пост", **fields
     session.add(draft)
     session.commit()
     return draft
-
-
-def approve_post(session, draft_id, responsible_id=100):
-    """Полный цикл: назначение ответственного + согласование."""
-    assign_responsible(session, draft_id, responsible_id)
-    approval, outcome = decide(session, draft_id, responsible_id, STATUS_APPROVED)
-    assert outcome == "ok", outcome
-    return approval
 
 
 class PhotosHelperTests(unittest.TestCase):
@@ -115,190 +93,6 @@ class PhotosHelperTests(unittest.TestCase):
         self.assertEqual(reloaded.image, "p1")  # image — первая фотография (dual-write)
 
 
-class PublishTests(unittest.TestCase):
-    """Публикация: только ответственный, только после согласования, без повторов."""
-
-    def setUp(self):
-        self.session = make_session()
-        self.draft = make_draft(self.session)
-
-    def tearDown(self):
-        engine = self.session.get_bind()
-        self.session.close()
-        engine.dispose()
-
-    def test_publish_after_approval(self):
-        approve_post(self.session, self.draft.id)
-        approval, outcome = publish(self.session, self.draft.id, 100)
-        self.assertEqual(outcome, "ok")
-        self.assertEqual(approval.status, STATUS_PUBLISHED)
-
-    def test_double_publish_blocked(self):
-        approve_post(self.session, self.draft.id)
-        publish(self.session, self.draft.id, 100)
-        _, outcome = publish(self.session, self.draft.id, 100)
-        self.assertEqual(outcome, "already")
-        self.assertEqual(
-            get_approval(self.session, self.draft.id).status, STATUS_PUBLISHED
-        )
-
-    def test_publish_by_other_user_forbidden(self):
-        approve_post(self.session, self.draft.id)
-        approval, outcome = publish(self.session, self.draft.id, 200)
-        self.assertEqual(outcome, "forbidden")
-        # статус не изменился: публикация так же возможна основным ответственным
-        self.assertEqual(approval.status, STATUS_APPROVED)
-
-    def test_publish_without_approval(self):
-        _, outcome = publish(self.session, self.draft.id, 100)
-        self.assertEqual(outcome, "no_approval")
-
-    def test_publish_while_assigned(self):
-        assign_responsible(self.session, self.draft.id, 100)
-        approval, outcome = publish(self.session, self.draft.id, 100)
-        self.assertEqual(outcome, "not_approved")
-        self.assertEqual(approval.status, STATUS_ASSIGNED)
-
-    def test_publish_declined(self):
-        assign_responsible(self.session, self.draft.id, 100)
-        decide(self.session, self.draft.id, 100, STATUS_DECLINED)
-        approval, outcome = publish(self.session, self.draft.id, 100)
-        self.assertEqual(outcome, "not_approved")
-        self.assertEqual(approval.status, STATUS_DECLINED)
-
-    def test_publish_missing_draft(self):
-        approval, outcome = publish(self.session, 9999, 100)
-        self.assertEqual(outcome, "no_draft")
-        self.assertIsNone(approval)
-
-    def test_decide_after_publish_is_final(self):
-        approve_post(self.session, self.draft.id)
-        publish(self.session, self.draft.id, 100)
-        _, outcome = decide(self.session, self.draft.id, 100, STATUS_APPROVED)
-        self.assertEqual(outcome, "already")
-        self.assertEqual(
-            get_approval(self.session, self.draft.id).status, STATUS_PUBLISHED
-        )
-
-    def test_one_approval_row_throughout(self):
-        approve_post(self.session, self.draft.id)
-        publish(self.session, self.draft.id, 100)
-        publish(self.session, self.draft.id, 100)
-        self.assertEqual(self.session.query(PostApproval).count(), 1)
-
-
-class EditBlockTests(unittest.TestCase):
-    """Редактирование черновика: запрещено на согласовании/после публикации."""
-
-    def setUp(self):
-        self.session = make_session()
-        self.draft = make_draft(self.session)
-
-    def tearDown(self):
-        engine = self.session.get_bind()
-        self.session.close()
-        engine.dispose()
-
-    def test_editable_without_approval(self):
-        self.assertIsNone(edit_block_reason(self.session, self.draft.id))
-
-    def test_editable_when_declined(self):
-        # Отклонённый пост правится автором и отправляется на согласование заново
-        assign_responsible(self.session, self.draft.id, 100)
-        decide(self.session, self.draft.id, 100, STATUS_DECLINED)
-        self.assertIsNone(edit_block_reason(self.session, self.draft.id))
-
-    def test_blocked_when_assigned(self):
-        assign_responsible(self.session, self.draft.id, 100)
-        self.assertEqual(edit_block_reason(self.session, self.draft.id), "assigned")
-
-    def test_blocked_when_approved(self):
-        approve_post(self.session, self.draft.id)
-        self.assertEqual(edit_block_reason(self.session, self.draft.id), "approved")
-
-    def test_blocked_when_published(self):
-        approve_post(self.session, self.draft.id)
-        publish(self.session, self.draft.id, 100)
-        self.assertEqual(edit_block_reason(self.session, self.draft.id), "published")
-
-
-class RemoveDraftTests(unittest.TestCase):
-    """Удаление черновика не ломает согласование и не оставляет сирот."""
-
-    def setUp(self):
-        self.session = make_session()
-        self.draft = make_draft(self.session, user_id=111)
-
-    def tearDown(self):
-        engine = self.session.get_bind()
-        self.session.close()
-        engine.dispose()
-
-    def test_delete_without_approval(self):
-        self.assertEqual(remove_draft(self.session, self.draft, 111), "ok")
-        self.assertIsNone(self.session.query(Draft).get(self.draft.id))
-
-    def test_delete_blocked_while_assigned(self):
-        assign_responsible(self.session, self.draft.id, 100)
-        self.assertEqual(remove_draft(self.session, self.draft, 111), "blocked")
-        self.assertIsNotNone(self.session.query(Draft).get(self.draft.id))
-        self.assertIsNotNone(get_approval(self.session, self.draft.id))
-
-    def test_delete_blocked_after_publish(self):
-        approve_post(self.session, self.draft.id)
-        publish(self.session, self.draft.id, 100)
-        self.assertEqual(remove_draft(self.session, self.draft, 111), "blocked")
-        self.assertIsNotNone(self.session.query(Draft).get(self.draft.id))
-
-    def test_delete_declined_cascades_approval(self):
-        assign_responsible(self.session, self.draft.id, 100)
-        decide(self.session, self.draft.id, 100, STATUS_DECLINED)
-        self.assertEqual(remove_draft(self.session, self.draft, 111), "ok")
-        self.assertIsNone(self.session.query(Draft).get(self.draft.id))
-        self.assertIsNone(get_approval(self.session, self.draft.id))  # без сирот
-
-    def test_delete_foreign_draft_not_found(self):
-        self.assertEqual(remove_draft(self.session, self.draft, 999), "not_found")
-        self.assertIsNotNone(self.session.query(Draft).get(self.draft.id))
-
-    def test_delete_missing_draft(self):
-        self.assertEqual(remove_draft(self.session, None, 111), "not_found")
-
-
-class ResubmitTests(unittest.TestCase):
-    """Ре-сабмит отклонённого поста: новый цикл согласования после правок."""
-
-    def setUp(self):
-        self.session = make_session()
-        self.draft = make_draft(self.session)
-
-    def tearDown(self):
-        engine = self.session.get_bind()
-        self.session.close()
-        engine.dispose()
-
-    def test_reset_declined_starts_new_cycle(self):
-        assign_responsible(self.session, self.draft.id, 100)
-        decide(self.session, self.draft.id, 100, STATUS_DECLINED)
-        self.assertTrue(reset_declined(self.session, self.draft.id))
-        self.assertIsNone(get_approval(self.session, self.draft.id))
-        # Новое назначение после повторной отправки работает «с нуля»
-        approval, outcome = assign_responsible(self.session, self.draft.id, 200)
-        self.assertEqual(outcome, "created")
-        self.assertEqual(approval.responsible_telegram_id, 200)
-
-    def test_reset_keeps_active_approval(self):
-        approve_post(self.session, self.draft.id)
-        self.assertFalse(reset_declined(self.session, self.draft.id))
-        self.assertIsNotNone(get_approval(self.session, self.draft.id))
-        self.assertEqual(
-            get_approval(self.session, self.draft.id).status, STATUS_APPROVED
-        )
-
-    def test_reset_without_approval(self):
-        self.assertFalse(reset_declined(self.session, self.draft.id))
-
-
 class StubBot:
     """Асинхронная заглушка бота: записывает вызовы отправки."""
 
@@ -343,7 +137,7 @@ class SendPostTests(unittest.TestCase):
 
     POST = {"title": "Встреча", "date": "01.01.2027", "text": "Приходите!"}
 
-    def send(self, photos, post=None, extra_lines="", reply_markup=None, heading=None):
+    def send(self, photos, post=None, reply_markup=None, heading=None):
         bot = StubBot()
         asyncio.run(
             send_post(
@@ -352,7 +146,6 @@ class SendPostTests(unittest.TestCase):
                 post or self.POST,
                 photos,
                 heading=heading if heading is not None else POST_HEADING,
-                extra_lines=extra_lines,
                 reply_markup=reply_markup,
                 markup_lead_text="Выберите действие:",
             )
@@ -409,15 +202,44 @@ class SendPostTests(unittest.TestCase):
         self.assertEqual([c["type"] for c in calls], ["media_group", "message"])
         self.assertIsNone(calls[0]["media"][0].caption)
 
-    def test_extra_lines_appended(self):
-        calls = self.send([], extra_lines="*Автор поста:* 111\n")
-        self.assertIn("*Автор поста:* 111", calls[0]["text"])
-
-    def test_preview_and_publication_text_identical(self):
-        # Текст превью и публикации собирается одним и тем же кодом
+    def test_preview_and_final_text_identical(self):
+        # Текст превью и финальной отправки собирается одним и тем же кодом
         preview = self.send(["p1"])
-        publication = self.send(["p1"])
-        self.assertEqual(preview[0]["caption"], publication[0]["caption"])
+        final = self.send(["p1"])
+        self.assertEqual(preview[0]["caption"], final[0]["caption"])
+
+
+@unittest.skipIf(
+    HANDLERS_IMPORT_ERROR is not None,
+    f"импорт обработчиков недоступен: {HANDLERS_IMPORT_ERROR}",
+)
+class FormatterGuardTests(unittest.TestCase):
+    """Защита от возврата двойного экранирования (анализ БД: затронутых записей — 0)."""
+
+    def test_format_text_does_not_add_backslashes(self):
+        formatted = format_text('Встреча "в 12.00" - вход свободный')
+        self.assertNotIn("\\", formatted)
+
+    def test_escape_applied_once_at_render(self):
+        self.assertEqual(escape_markdown("a_b"), "a\\_b")
+        self.assertEqual(escape_markdown("5.00"), "5\\.00")
+
+
+@unittest.skipIf(
+    HANDLERS_IMPORT_ERROR is not None,
+    f"импорт обработчиков недоступен: {HANDLERS_IMPORT_ERROR}",
+)
+class PostSummaryTests(unittest.TestCase):
+    """Сводка поста (превью == готовый пост): экранирование значений."""
+
+    def test_summary_escapes_user_values(self):
+        summary = build_post_summary({"title": "Скидка 50%_*"}, heading="h")
+        self.assertIn("\\*", summary)  # '*' пользователя экранирован
+        self.assertIn("\\_", summary)  # '_' пользователя экранирован
+
+    def test_summary_none_safe(self):
+        summary = build_post_summary({}, heading="h")  # все поля отсутствуют
+        self.assertIn("Не указано", summary)
 
 
 class MigrationTests(unittest.TestCase):
