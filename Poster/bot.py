@@ -12,6 +12,7 @@ from telegram.ext import (
 from handlers.main_menu import main_menu_handlers
 from handlers.admin import admin_handlers
 from handlers.callbacks import callbacks_handlers
+from handlers.approval import approval_handlers
 from handlers.drafts import drafts_handlers
 from handlers.post_creation import post_creation_handlers
 from handlers.jobs import setup_jobs
@@ -39,6 +40,12 @@ def main():
 
     # Добавление обработчиков CallbackQuery
     for handler in callbacks_handlers():
+        application.add_handler(handler)
+
+    # Обработчики согласования (назначение ответственного, решения).
+    # Регистрируются ДО ConversationHandler создания поста: их callback_data
+    # не пересекается с паттернами диалога, порядок делает перехват явным.
+    for handler in approval_handlers():
         application.add_handler(handler)
 
     # Добавление обработчиков черновиков

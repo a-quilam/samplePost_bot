@@ -339,6 +339,8 @@ async def send_for_approval(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         # Отправка сообщения в чат согласования (уникальная логика из callbacks.py:
         # отправка фото и клавиатура выбора ответственного)
         review_text = build_post_summary(context.user_data, heading="📋 *Новый пост для согласования:*")
+        # Автор поста — из сохранённой записи draft.user_id
+        review_text += f"*Автор поста:* {draft.user_id}\n"
 
         image_file_id = context.user_data.get('image')
         if image_file_id:
@@ -355,11 +357,16 @@ async def send_for_approval(update: Update, context: ContextTypes.DEFAULT_TYPE) 
                 parse_mode='MarkdownV2'
             )
 
-        # Клавиатура выбора ответственного (перенесена из callbacks.py)
+        # Клавиатура выбора ответственного: в callback_data передаём id поста,
+        # чтобы ответственный и данные поста определялись из БД, а не из
+        # context.user_data нажавшего администратора
         responsible_persons = session.query(ResponsiblePerson).all()
         if responsible_persons:
             keyboard = [
-                [InlineKeyboardButton(person.name, callback_data=f'responsible_{person.telegram_id}')]
+                [InlineKeyboardButton(
+                    person.name,
+                    callback_data=f'responsible_{draft.id}_{person.telegram_id}'
+                )]
                 for person in responsible_persons
             ]
             await context.bot.send_message(

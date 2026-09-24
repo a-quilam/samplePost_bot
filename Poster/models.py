@@ -34,3 +34,26 @@ class ResponsiblePerson(Base):
 
     def __repr__(self):
         return f"<ResponsiblePerson(id={self.id}, name={self.name}, telegram_id={self.telegram_id})>"
+
+
+class PostApproval(Base):
+    """
+    Состояние согласования поста.
+
+    Минимальное изменение схемы: НОВАЯ таблица — её создаёт create_all
+    автоматически, существующие таблицы и данные не изменяются
+    (без ALTER TABLE и миграций). На пост — ровно одна запись (unique draft_id),
+    поэтому повторное нажатие кнопки не создаёт дублей.
+    """
+    __tablename__ = 'post_approvals'
+
+    id = Column(Integer, primary_key=True, index=True)
+    draft_id = Column(Integer, nullable=False, unique=True, index=True)
+    responsible_telegram_id = Column(Integer, nullable=False, index=True)
+    # Возможные значения: 'assigned' -> 'approved' | 'declined'
+    status = Column(String(16), nullable=False, default='assigned')
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+
+    def __repr__(self):
+        return (f"<PostApproval(draft_id={self.draft_id}, "
+                f"responsible={self.responsible_telegram_id}, status={self.status})>")
