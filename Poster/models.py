@@ -1,11 +1,21 @@
 # models.py
 
-from datetime import datetime
+from datetime import datetime, timezone
 
 from sqlalchemy import DateTime, Integer, String, Text
 from sqlalchemy.orm import Mapped, mapped_column
 
 from base import Base  # Импортируем Base из base.py
+
+
+def utcnow() -> datetime:
+    """
+    Наивный (без таймзоны) текущий момент UTC.
+
+    datetime.utcnow() устарел в Python 3.12+ и шумит DeprecationWarning;
+    колонки DateTime хранят наивные значения — поэтому tzinfo срезаем.
+    """
+    return datetime.now(timezone.utc).replace(tzinfo=None)
 
 
 class Draft(Base):
@@ -29,7 +39,7 @@ class Draft(Base):
     # поэтому существующие записи продолжают работать без миграции данных.
     photos: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(
-        DateTime, default=datetime.utcnow, nullable=False
+        DateTime, default=utcnow, nullable=False
     )
 
     def __repr__(self) -> str:
@@ -72,7 +82,7 @@ class PostApproval(Base):
     # Возможные значения: 'assigned' -> 'approved' -> 'published' | 'declined'
     status: Mapped[str] = mapped_column(String(16), nullable=False, default="assigned")
     created_at: Mapped[datetime] = mapped_column(
-        DateTime, default=datetime.utcnow, nullable=False
+        DateTime, default=utcnow, nullable=False
     )
 
     def __repr__(self) -> str:

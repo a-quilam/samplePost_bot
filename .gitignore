@@ -167,3 +167,10 @@ cython_debug/
 
 # SQLite databases — базы данных не хранятся в Git
 Poster/*.db
+Poster/*.db-journal
+Poster/*.db-wal
+Poster/*.db-shm
+Poster/handlers/*.db
+
+# macOS
+.DS_Store

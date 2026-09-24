@@ -104,12 +104,15 @@ async def remove_responsible(
         session.close()
         return
 
+    # Имя фиксируем ДО удаления: после commit/close объект отсоединён,
+    # и обращение к его атрибутам бросило бы DetachedInstanceError
+    person_name = person.name
     session.delete(person)
     session.commit()
     session.close()
 
     await ctx.message(update).reply_text(
-        f"Ответственный {person.name} с Telegram_ID {telegram_id} удалён успешно."
+        f"Ответственный {person_name} с Telegram_ID {telegram_id} удалён успешно."
     )
 
 

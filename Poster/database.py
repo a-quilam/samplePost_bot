@@ -3,7 +3,7 @@
 import os
 
 from dotenv import load_dotenv
-from sqlalchemy import create_engine, inspect, text
+from sqlalchemy import create_engine, event, inspect, text
 from sqlalchemy.orm import sessionmaker
 
 from base import Base
@@ -12,6 +12,32 @@ from base import Base
 # Пустое значение или отсутствие переменной = путь по умолчанию.
 load_dotenv()
 SQLALCHEMY_DATABASE_URL = os.getenv("DATABASE_URL") or "sqlite:///./post_bot.db"
+
+# Busy timeout (сек): обработчики PTB и job-пул работают с БД из разных
+# потоков/задач — ждём освобождения блокировки вместо мгновенного
+# «database is locked».
+SQLITE_BUSY_TIMEOUT_SECONDS = 30
+
+
+def apply_sqlite_pragmas(dbapi_connection, connection_record) -> None:
+    """
+    PRAGMA на каждом новом соединении с SQLite:
+
+    - busy_timeout — ждём блокировку (см. SQLITE_BUSY_TIMEOUT_SECONDS);
+    - journal_mode=WAL — чтение не блокирует запись (параллельные job и
+      обработчики), данные переживают сбои;
+    - synchronous=NORMAL — рекомендуемый для WAL уровень надёжности/скорости.
+
+    Для не-SQLite БД (и :memory:) функция не применяется.
+    """
+    cursor = dbapi_connection.cursor()
+    try:
+        cursor.execute(f"PRAGMA busy_timeout={SQLITE_BUSY_TIMEOUT_SECONDS * 1000}")
+        cursor.execute("PRAGMA journal_mode=WAL")
+        cursor.execute("PRAGMA synchronous=NORMAL")
+    finally:
+        cursor.close()
+
 
 engine = create_engine(
     SQLALCHEMY_DATABASE_URL,
@@ -22,6 +48,9 @@ engine = create_engine(
         else {}
     ),
 )
+if SQLALCHEMY_DATABASE_URL.startswith("sqlite"):
+    event.listen(engine, "connect", apply_sqlite_pragmas)
+
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 
 
