@@ -1,0 +1,35 @@
+# Конфигурация инструментов качества для проекта Poster
+# (ruff — линтинг+сортировка импортов, black — форматирование, mypy — типы)
+
+[tool.ruff]
+line-length = 88
+target-version = "py313"
+extend-exclude = ["ZUMMARY"]
+
+[tool.ruff.lint]
+# E,F — pycodestyle/pyflakes, W — предупреждения, I — сортировка импортов
+select = ["E", "F", "W", "I"]
+# E501 (длина строки) контролирует black; конфликт с длинными строками бесполезен
+ignore = ["E501"]
+
+[tool.black]
+line-length = 88
+target-version = ["py313"]
+
+[tool.mypy]
+python_version = "3.13"
+files = ["."]
+exclude = ["ZUMMARY"]
+# Poster/__init__.py существует, поэтому файл не должен находиться дважды
+# под именами "config" и "Poster.config"
+explicit_package_bases = true
+mypy_path = "."
+# Третьи библиотеки без собственных типов (dotenv и пр.)
+ignore_missing_imports = true
+warn_unused_ignores = true
+warn_redundant_casts = true
+show_error_codes = true
+# Нестрогий режим: проект не типизирован целиком — mypy проверяет размеченный
+# код и не требует крупного рефакторинга ради флагов строгости
+disallow_untyped_defs = false
+check_untyped_defs = false

@@ -143,6 +143,12 @@ venv.bak/
 .dmypy.json
 dmypy.json
 
+# ruff
+.ruff_cache/
+
+# логи бота (log_config.py: каталог logs/ создаётся при запуске)
+Poster/logs/
+
 # Pyre type checker
 .pyre/
 

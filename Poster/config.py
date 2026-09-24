@@ -1,6 +1,7 @@
 # config.py
 
 import os
+
 from dotenv import load_dotenv
 
 # Загрузка переменных окружения из файла .env
@@ -18,7 +19,11 @@ PUBLICATION_CHAT_ID = os.getenv("PUBLICATION_CHAT_ID")
 
 # Получение списка администраторов из переменных окружения
 # Предполагается, что ADMIN_IDS хранятся в виде "123456789,987654321"
-ADMIN_IDS = [int(admin_id.strip()) for admin_id in os.getenv("ADMIN_IDS", "").split(",") if admin_id.strip().isdigit()]
+ADMIN_IDS = [
+    int(admin_id.strip())
+    for admin_id in os.getenv("ADMIN_IDS", "").split(",")
+    if admin_id.strip().isdigit()
+]
 
 if not TELEGRAM_BOT_TOKEN:
     raise ValueError("TELEGRAM_BOT_TOKEN не установлен в .env файле.")

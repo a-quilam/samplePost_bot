@@ -10,15 +10,10 @@
 
 import logging
 
-from telegram import Update, InlineKeyboardMarkup, InlineKeyboardButton
-from telegram.ext import ContextTypes, CallbackQueryHandler
 from sqlalchemy.orm import Session
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Message, Update
+from telegram.ext import BaseHandler, CallbackQueryHandler, ContextTypes
 
-from database import SessionLocal
-from models import ResponsiblePerson
-from utils.formatter import escape_markdown
-from config import PUBLICATION_CHAT_ID
-from handlers.post_creation import POST_HEADING, send_post
 from approval import (
     STATUS_APPROVED,
     STATUS_ASSIGNED,
@@ -34,6 +29,12 @@ from approval import (
     parse_responsible_callback,
     publish,
 )
+from config import PUBLICATION_CHAT_ID
+from database import SessionLocal
+from handlers.post_creation import POST_HEADING, send_post
+from models import ResponsiblePerson
+from utils import tg_context as ctx
+from utils.formatter import escape_markdown
 
 logger = logging.getLogger(__name__)
 
@@ -41,24 +42,42 @@ logger = logging.getLogger(__name__)
 def _responsible_keyboard(draft_id: int) -> InlineKeyboardMarkup:
     """Кнопки работы ответственного с конкретным постом."""
     keyboard = [
-        [InlineKeyboardButton("✅ Согласовать", callback_data=f"approvepost_{draft_id}")],
+        [
+            InlineKeyboardButton(
+                "✅ Согласовать", callback_data=f"approvepost_{draft_id}"
+            )
+        ],
         [InlineKeyboardButton("❌ Отклонить", callback_data=f"declinepost_{draft_id}")],
-        [InlineKeyboardButton("📄 Показать пост", callback_data=f"viewpost_{draft_id}")],
+        [
+            InlineKeyboardButton(
+                "📄 Показать пост", callback_data=f"viewpost_{draft_id}"
+            )
+        ],
     ]
     return InlineKeyboardMarkup(keyboard)
 
 
 def _view_only_keyboard(draft_id: int) -> InlineKeyboardMarkup:
     """Кнопки после принятия решения: остаётся только просмотр."""
-    keyboard = [[InlineKeyboardButton("📄 Показать пост", callback_data=f"viewpost_{draft_id}")]]
+    keyboard = [
+        [InlineKeyboardButton("📄 Показать пост", callback_data=f"viewpost_{draft_id}")]
+    ]
     return InlineKeyboardMarkup(keyboard)
 
 
 def _approved_keyboard(draft_id: int) -> InlineKeyboardMarkup:
     """Кнопки после СОГЛАСОВАНИЯ: ответственный может опубликовать пост."""
     keyboard = [
-        [InlineKeyboardButton("📢 Опубликовать", callback_data=f"publishpost_{draft_id}")],
-        [InlineKeyboardButton("📄 Показать пост", callback_data=f"viewpost_{draft_id}")],
+        [
+            InlineKeyboardButton(
+                "📢 Опубликовать", callback_data=f"publishpost_{draft_id}"
+            )
+        ],
+        [
+            InlineKeyboardButton(
+                "📄 Показать пост", callback_data=f"viewpost_{draft_id}"
+            )
+        ],
     ]
     return InlineKeyboardMarkup(keyboard)
 
@@ -82,10 +101,12 @@ async def _send_post(bot, chat_id: int, draft, heading: str, reply_markup=None) 
 
 def _alert_text(text: str) -> str:
     """Callback answer ограничен 200 символами."""
-    return text if len(text) <= 190 else text[:187] + '...'
+    return text if len(text) <= 190 else text[:187] + "..."
 
 
-async def _answer_safely(query, text: str = None, show_alert: bool = False) -> None:
+async def _answer_safely(
+    query, text: str | None = None, show_alert: bool = False
+) -> None:
     """Отвечает на callback; повторный ответ (после ошибки) не роняет обработку."""
     try:
         if text is None:
@@ -96,14 +117,16 @@ async def _answer_safely(query, text: str = None, show_alert: bool = False) -> N
         logger.exception("Не удалось ответить на CallbackQuery")
 
 
-async def handle_responsible_selection(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+async def handle_responsible_selection(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> None:
     """
     Назначение ответственного за пост в review-чате.
     callback_data: responsible_<draft_id>_<telegram_id>.
     Автор и ответственный берутся из БД — независимо от того, кто нажал кнопку.
     Повторное нажатие не создаёт дублей: назначение ровно одно на пост.
     """
-    query = update.callback_query
+    query = ctx.query(update)
 
     parsed = parse_responsible_callback(query.data)
     if parsed is None:
@@ -113,28 +136,43 @@ async def handle_responsible_selection(update: Update, context: ContextTypes.DEF
 
     session: Session = SessionLocal()
     try:
-        person = session.query(ResponsiblePerson).filter_by(telegram_id=telegram_id).first()
+        person = (
+            session.query(ResponsiblePerson).filter_by(telegram_id=telegram_id).first()
+        )
         if person is None:
             await _answer_safely(query, "Ответственный не найден.", show_alert=True)
             return
 
         approval, outcome = assign_responsible(session, draft_id, telegram_id)
 
-        if outcome == 'no_draft':
-            await _answer_safely(query, "Пост не найден (возможно, удалён).", show_alert=True)
+        if outcome == "no_draft":
+            await _answer_safely(
+                query, "Пост не найден (возможно, удалён).", show_alert=True
+            )
             return
 
-        if outcome == 'same':
+        # Контракт assign_responsible(): после 'no_draft' approval всегда есть
+        assert approval is not None
+
+        if outcome == "same":
             # Повторное нажатие той же кнопки — консистентно, без дублей
-            await _answer_safely(query, "Этот ответственный уже назначен на пост.", show_alert=True)
+            await _answer_safely(
+                query, "Этот ответственный уже назначен на пост.", show_alert=True
+            )
             return
 
-        if outcome == 'other':
-            current = session.query(ResponsiblePerson).filter_by(
-                telegram_id=approval.responsible_telegram_id
-            ).first()
-            current_name = current.name if current else str(approval.responsible_telegram_id)
-            await _answer_safely(query, f"Уже назначен ответственный: {current_name}", show_alert=True)
+        if outcome == "other":
+            current = (
+                session.query(ResponsiblePerson)
+                .filter_by(telegram_id=approval.responsible_telegram_id)
+                .first()
+            )
+            current_name = (
+                current.name if current else str(approval.responsible_telegram_id)
+            )
+            await _answer_safely(
+                query, f"Уже назначен ответственный: {current_name}", show_alert=True
+            )
             return
 
         # outcome == 'created': уведомляем ответственного данными ИЗ БД
@@ -154,7 +192,7 @@ async def handle_responsible_selection(update: Update, context: ContextTypes.DEF
         # Снимаем клавиатуру выбора (пустая inline-клавиатура удаляет кнопки)
         await query.edit_message_text(
             f"Ответственный назначен: {safe_name}",
-            parse_mode='MarkdownV2',
+            parse_mode="MarkdownV2",
             reply_markup=InlineKeyboardMarkup([]),
         )
         logger.info(f"Пост #{draft_id}: назначен ответственный {telegram_id}.")
@@ -171,7 +209,7 @@ async def handle_view_post(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     Просмотр поста ответственным. callback_data: viewpost_<draft_id>.
     Доступно только назначенному ответственному.
     """
-    query = update.callback_query
+    query = ctx.query(update)
 
     parsed = parse_post_action(query.data)
     if parsed is None:
@@ -183,24 +221,30 @@ async def handle_view_post(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     try:
         approval = get_approval(session, draft_id)
         if approval is None:
-            await _answer_safely(query, "Пост не назначался ответственному.", show_alert=True)
+            await _answer_safely(
+                query, "Пост не назначался ответственному.", show_alert=True
+            )
             return
         if approval.responsible_telegram_id != query.from_user.id:
             await _answer_safely(
-                query, "Просмотр доступен только назначенному ответственному.", show_alert=True
+                query,
+                "Просмотр доступен только назначенному ответственному.",
+                show_alert=True,
             )
             return
 
         draft = get_draft(session, draft_id)
         if draft is None:
-            await _answer_safely(query, "Пост не найден (возможно, удалён).", show_alert=True)
+            await _answer_safely(
+                query, "Пост не найден (возможно, удалён).", show_alert=True
+            )
             return
 
         await _answer_safely(query)
         # Отдельным сообщением, чтобы не ломать кнопочное сообщение
         await _send_post(
             context.bot,
-            chat_id=query.effective_chat.id,
+            chat_id=ctx.chat(update).id,
             draft=draft,
             heading="📋 *Пост для согласования:*",
         )
@@ -212,9 +256,11 @@ async def handle_view_post(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         session.close()
 
 
-async def _handle_decision(update: Update, context: ContextTypes.DEFAULT_TYPE, new_status: str) -> None:
+async def _handle_decision(
+    update: Update, context: ContextTypes.DEFAULT_TYPE, new_status: str
+) -> None:
     """Фиксирует решение ответственного и обновляет кнопки в его сообщении."""
-    query = update.callback_query
+    query = ctx.query(update)
 
     parsed = parse_post_action(query.data)
     if parsed is None:
@@ -226,22 +272,30 @@ async def _handle_decision(update: Update, context: ContextTypes.DEFAULT_TYPE, n
     try:
         approval, outcome = decide(session, draft_id, query.from_user.id, new_status)
 
-        if outcome == 'bad_status':
+        if outcome == "bad_status":
             await _answer_safely(query, "Недопустимое действие.", show_alert=True)
             return
-        if outcome == 'no_approval':
-            await _answer_safely(query, "Пост не назначался ответственному.", show_alert=True)
-            return
-        if outcome == 'forbidden':
+        if outcome == "no_approval":
             await _answer_safely(
-                query, "Действие доступно только назначенному ответственному.", show_alert=True
+                query, "Пост не назначался ответственному.", show_alert=True
             )
             return
-        if outcome == 'already':
+        if outcome == "forbidden":
+            await _answer_safely(
+                query,
+                "Действие доступно только назначенному ответственному.",
+                show_alert=True,
+            )
+            return
+
+        # Контракт decide(): после bad_status/no_approval/forbidden approval есть
+        assert approval is not None
+
+        if outcome == "already":
             words = {
-                STATUS_APPROVED: 'согласован',
-                STATUS_DECLINED: 'отклонён',
-                STATUS_PUBLISHED: 'опубликован',
+                STATUS_APPROVED: "согласован",
+                STATUS_DECLINED: "отклонён",
+                STATUS_PUBLISHED: "опубликован",
             }
             await _answer_safely(
                 query,
@@ -251,12 +305,20 @@ async def _handle_decision(update: Update, context: ContextTypes.DEFAULT_TYPE, n
             return
 
         # outcome == 'ok'
-        label = "✅ Пост согласован." if new_status == STATUS_APPROVED else "❌ Пост отклонён."
+        label = (
+            "✅ Пост согласован."
+            if new_status == STATUS_APPROVED
+            else "❌ Пост отклонён."
+        )
         await _answer_safely(query, "Решение принято ✓")
 
         # Согласован: ответственному доступна публикация; отклонён — только просмотр
-        markup = _approved_keyboard(draft_id) if new_status == STATUS_APPROVED else _view_only_keyboard(draft_id)
-        if query.message is not None and query.message.photo:
+        markup = (
+            _approved_keyboard(draft_id)
+            if new_status == STATUS_APPROVED
+            else _view_only_keyboard(draft_id)
+        )
+        if isinstance(query.message, Message) and query.message.photo:
             # Уведомление было отправлено как фото — правим подпись
             await query.edit_message_caption(caption=label, reply_markup=markup)
         else:
@@ -273,17 +335,23 @@ async def _handle_decision(update: Update, context: ContextTypes.DEFAULT_TYPE, n
         session.close()
 
 
-async def handle_approve_post(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+async def handle_approve_post(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> None:
     """Согласование поста ответственным. callback_data: approvepost_<draft_id>."""
     await _handle_decision(update, context, STATUS_APPROVED)
 
 
-async def handle_decline_post(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+async def handle_decline_post(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> None:
     """Отклонение поста ответственным. callback_data: declinepost_<draft_id>."""
     await _handle_decision(update, context, STATUS_DECLINED)
 
 
-async def handle_publish_post(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+async def handle_publish_post(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> None:
     """
     Публикация согласованного поста. callback_data: publishpost_<draft_id>.
 
@@ -291,7 +359,7 @@ async def handle_publish_post(update: Update, context: ContextTypes.DEFAULT_TYPE
     Повторная публикация невозможна: статус approved -> published меняется
     атомарно ДО отправки, при ошибке отправки статус откатывается в approved.
     """
-    query = update.callback_query
+    query = ctx.query(update)
 
     parsed = parse_post_action(query.data)
     if parsed is None:
@@ -311,22 +379,36 @@ async def handle_publish_post(update: Update, context: ContextTypes.DEFAULT_TYPE
     try:
         approval, outcome = publish(session, draft_id, query.from_user.id)
 
-        if outcome == 'no_draft':
-            await _answer_safely(query, "Пост не найден (возможно, удалён).", show_alert=True)
-            return
-        if outcome == 'no_approval':
-            await _answer_safely(query, "Пост не назначался ответственному.", show_alert=True)
-            return
-        if outcome == 'forbidden':
+        if outcome == "no_draft":
             await _answer_safely(
-                query, "Публикация доступна только назначенному ответственному.", show_alert=True
+                query, "Пост не найден (возможно, удалён).", show_alert=True
             )
             return
-        if outcome == 'already':
+        if outcome == "no_approval":
+            await _answer_safely(
+                query, "Пост не назначался ответственному.", show_alert=True
+            )
+            return
+        if outcome == "forbidden":
+            await _answer_safely(
+                query,
+                "Публикация доступна только назначенному ответственному.",
+                show_alert=True,
+            )
+            return
+
+        # Контракт publish(): после no_draft/no_approval/forbidden approval есть
+        assert approval is not None
+
+        if outcome == "already":
             await _answer_safely(query, "Пост уже опубликован.", show_alert=True)
             return
-        if outcome == 'not_approved':
-            word = 'ещё не согласован' if approval.status == STATUS_ASSIGNED else 'отклонён'
+        if outcome == "not_approved":
+            word = (
+                "ещё не согласован"
+                if approval.status == STATUS_ASSIGNED
+                else "отклонён"
+            )
             await _answer_safely(
                 query, f"Пост {word} — публикация невозможна.", show_alert=True
             )
@@ -334,6 +416,12 @@ async def handle_publish_post(update: Update, context: ContextTypes.DEFAULT_TYPE
 
         # outcome == 'ok': статус уже 'published' — публикуем ровно один раз
         draft = get_draft(session, draft_id)
+        if draft is None:
+            # publish() уже проверил наличие поста — защита от гонки удаления
+            await _answer_safely(
+                query, "Пост не найден (возможно, удалён).", show_alert=True
+            )
+            return
         try:
             await send_post(
                 context.bot,
@@ -347,13 +435,15 @@ async def handle_publish_post(update: Update, context: ContextTypes.DEFAULT_TYPE
             approval.status = STATUS_APPROVED
             session.commit()
             logger.error(f"Ошибка публикации поста #{draft_id}: {send_error}")
-            await _answer_safely(query, f"Ошибка публикации: {send_error}", show_alert=True)
+            await _answer_safely(
+                query, f"Ошибка публикации: {send_error}", show_alert=True
+            )
             return
 
         await _answer_safely(query, "Пост опубликован ✓")
         label = "✅ Пост согласован.\n📢 Пост опубликован."
         markup = _view_only_keyboard(draft_id)
-        if query.message is not None and query.message.photo:
+        if isinstance(query.message, Message) and query.message.photo:
             await query.edit_message_caption(caption=label, reply_markup=markup)
         else:
             await query.edit_message_text(text=label, reply_markup=markup)
@@ -369,15 +459,17 @@ async def handle_publish_post(update: Update, context: ContextTypes.DEFAULT_TYPE
         session.close()
 
 
-def approval_handlers() -> list:
+def approval_handlers() -> list[BaseHandler]:
     """
     Возвращает обработчики согласования (регистрируются ДО ConversationHandler
     создания поста; паттерны не пересекаются с его callback_data).
     """
     return [
-        CallbackQueryHandler(handle_approve_post, pattern=r'^approvepost_\d+$'),
-        CallbackQueryHandler(handle_decline_post, pattern=r'^declinepost_\d+$'),
-        CallbackQueryHandler(handle_publish_post, pattern=r'^publishpost_\d+$'),
-        CallbackQueryHandler(handle_view_post, pattern=r'^viewpost_\d+$'),
-        CallbackQueryHandler(handle_responsible_selection, pattern=r'^responsible_\d+_\d+$'),
+        CallbackQueryHandler(handle_approve_post, pattern=r"^approvepost_\d+$"),
+        CallbackQueryHandler(handle_decline_post, pattern=r"^declinepost_\d+$"),
+        CallbackQueryHandler(handle_publish_post, pattern=r"^publishpost_\d+$"),
+        CallbackQueryHandler(handle_view_post, pattern=r"^viewpost_\d+$"),
+        CallbackQueryHandler(
+            handle_responsible_selection, pattern=r"^responsible_\d+_\d+$"
+        ),
     ]

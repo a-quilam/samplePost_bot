@@ -1,0 +1,27 @@
+# docker-compose.yml — запуск бота Poster
+#
+#   cd Poster
+#   docker compose up -d --build      # запуск
+#   docker compose logs -f bot        # логи (консоль + logs/bot.log в volume)
+#   docker compose down               # остановка (данные сохраняются в volume)
+#
+# Секреты берутся из .env (env_file) — сам файл в образ не попадает.
+
+services:
+  bot:
+    build: .
+    container_name: post_bot
+    env_file:
+      - .env
+    environment:
+      # SQLite в именованном volume — данные переживают пересоздание контейнера.
+      # Значение environment приоритетнее env_file, поэтому путь всегда корректен.
+      DATABASE_URL: sqlite:////app/data/post_bot.db
+    volumes:
+      - bot_data:/app/data
+      - bot_logs:/app/logs
+    restart: unless-stopped
+
+volumes:
+  bot_data:
+  bot_logs:

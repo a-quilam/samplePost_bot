@@ -1,0 +1,16 @@
+# Dev-инструменты проекта Poster ( Stage 4 — качество)
+# Установка: pip install -r requirements-dev.txt
+#
+# ruff — линтинг и сортировка импортов
+# black — форматирование кода
+# mypy — проверка типов
+#
+# Проверки (из каталога Poster):
+#   ruff check .
+#   black --check .
+#   mypy
+#   python -m unittest discover -s tests -v
+
+ruff==0.16.8
+black==26.5.1
+mypy==2.3.1

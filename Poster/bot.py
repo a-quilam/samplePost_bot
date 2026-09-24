@@ -1,30 +1,28 @@
 import logging
-from telegram import Update
+
 from telegram.ext import (
     ApplicationBuilder,
-    CommandHandler,
-    MessageHandler,
-    CallbackQueryHandler,
     ContextTypes,
-    ConversationHandler,
-    filters
+    MessageHandler,
+    filters,
 )
-from handlers.main_menu import main_menu_handlers
-from handlers.admin import admin_handlers
-from handlers.callbacks import callbacks_handlers
-from handlers.approval import approval_handlers
-from handlers.drafts import drafts_handlers
-from handlers.post_creation import post_creation_handlers
-from handlers.jobs import setup_jobs
+
 from config import TELEGRAM_BOT_TOKEN
 from database import init_db
+from handlers.admin import admin_handlers
+from handlers.approval import approval_handlers
+from handlers.callbacks import callbacks_handlers
+from handlers.drafts import drafts_handlers
+from handlers.jobs import setup_jobs
+from handlers.main_menu import main_menu_handlers
+from handlers.post_creation import post_creation_handlers
+from log_config import setup_logging
 
-# Настройка логирования
-logging.basicConfig(
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    level=logging.DEBUG  # Изменено на DEBUG для более подробного логирования
-)
+# Структурированное логирование: консоль + logs/bot.log с ротацией.
+# Уровень задаётся LOG_LEVEL в .env (по умолчанию INFO) — см. log_config.py
+setup_logging()
 logger = logging.getLogger(__name__)
+
 
 def main():
     init_db()
@@ -63,7 +61,9 @@ def main():
     application.add_handler(
         MessageHandler(
             filters.COMMAND,
-            lambda update, context: update.effective_message.reply_text("Неизвестная команда.")
+            lambda update, context: update.effective_message.reply_text(
+                "Неизвестная команда."
+            ),
         )
     )
 
@@ -74,6 +74,7 @@ def main():
     application.add_error_handler(error_handler)
 
     application.run_polling()
+
 
 if __name__ == "__main__":
     main()

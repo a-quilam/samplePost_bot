@@ -1,0 +1,22 @@
+# .dockerignore — что НЕ попадает в образ
+
+# Секреты и локальные данные
+.env
+.env.*
+*.db
+*.db-*
+logs/
+data/
+
+# Python-артефакты
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Разработка и системный мусор
+tests/
+.DS_Store

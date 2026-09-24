@@ -5,39 +5,48 @@
 - Возврат в главное меню из inline-кнопок
 """
 
-from telegram import ReplyKeyboardMarkup, Update, KeyboardButton
+from telegram import KeyboardButton, ReplyKeyboardMarkup, Update
 from telegram.ext import (
-    ContextTypes,
+    BaseHandler,
     CallbackQueryHandler,
+    ContextTypes,
 )
 
-async def handle_main_menu_selection(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+from utils import tg_context as ctx
+
+
+async def handle_main_menu_selection(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> None:
     """
     Обрабатывает нажатие кнопки "Главное меню" в inline-клавиатуре.
-    Заменяет inline-клавиатуру на Reply-клавиатуру главного меню.
-    """
-    query = update.callback_query
-    await query.answer()
-    data = query.data
 
-    if data == 'main_menu':
+    editMessageText принимает только inline-клавиатуру (ReplyKeyboardMarkup
+    там не поддерживается API), поэтому текст редактируется без reply_markup,
+    а reply-клавиатура главного меню отправляется отдельным сообщением.
+    """
+    query = ctx.query(update)
+    await query.answer()
+
+    if query.data == "main_menu":
         keyboard = [
-            [KeyboardButton('✏️ Создать пост')],
-            [KeyboardButton('📝 Черновики')]
+            [KeyboardButton("✏️ Создать пост")],
+            [KeyboardButton("📝 Черновики")],
         ]
         reply_markup = ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
-        await query.edit_message_text(
-            "Здравствуйте! 👋\n\nВыберите действие:",
-            reply_markup=reply_markup
+        await query.edit_message_text("Здравствуйте! 👋")
+        await ctx.message(update).reply_text(
+            "Выберите действие:", reply_markup=reply_markup
         )
     else:
-        await query.edit_message_text("Неизвестное действие.", reply_markup=None)
+        await query.edit_message_text("Неизвестное действие.")
 
-def callbacks_handlers() -> list:
+
+def callbacks_handlers() -> list[BaseHandler]:
     """
     Возвращает список обработчиков для CallbackQuery, не входящих
     в ConversationHandler создания поста и в согласование.
     """
     return [
-        CallbackQueryHandler(handle_main_menu_selection, pattern='^main_menu$'),
+        CallbackQueryHandler(handle_main_menu_selection, pattern="^main_menu$"),
     ]

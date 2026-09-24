@@ -1,43 +1,53 @@
 # models.py
 
-from sqlalchemy import Column, Integer, String, Text, DateTime
 from datetime import datetime
+
+from sqlalchemy import DateTime, Integer, String, Text
+from sqlalchemy.orm import Mapped, mapped_column
+
 from base import Base  # Импортируем Base из base.py
 
 
 class Draft(Base):
-    __tablename__ = 'drafts'
+    __tablename__ = "drafts"
 
-    id = Column(Integer, primary_key=True, index=True)
-    user_id = Column(Integer, nullable=False, index=True)
-    title = Column(String(255), nullable=True)
-    date = Column(String(50), nullable=True)
-    time_start = Column(String(50), nullable=True)
-    time_end = Column(String(50), nullable=True)
-    place_name = Column(String(255), nullable=True)
-    place_url = Column(String(255), nullable=True)
-    text = Column(Text, nullable=True)
-    contact = Column(String(255), nullable=True)
-    image = Column(String(255), nullable=True)
+    # Стиль SQLAlchemy 2.0 (Mapped/mapped_column): mypy видит int/str,
+    # а не Column[...]; nullable указан явно — схема БД не меняется.
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+    user_id: Mapped[int] = mapped_column(Integer, nullable=False, index=True)
+    title: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    date: Mapped[str | None] = mapped_column(String(50), nullable=True)
+    time_start: Mapped[str | None] = mapped_column(String(50), nullable=True)
+    time_end: Mapped[str | None] = mapped_column(String(50), nullable=True)
+    place_name: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    place_url: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    text: Mapped[str | None] = mapped_column(Text, nullable=True)
+    contact: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    image: Mapped[str | None] = mapped_column(String(255), nullable=True)
     # JSON-список file_id всех фотографий поста (медиа-группа).
     # У старых черновиков NULL — тогда используется image (единственная/первая),
     # поэтому существующие записи продолжают работать без миграции данных.
-    photos = Column(Text, nullable=True)
-    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    photos: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime, default=datetime.utcnow, nullable=False
+    )
 
-    def __repr__(self):
+    def __repr__(self) -> str:
         return f"<Draft(id={self.id}, user_id={self.user_id}, title={self.title})>"
 
 
 class ResponsiblePerson(Base):
-    __tablename__ = 'responsible_persons'
-    
-    id = Column(Integer, primary_key=True, index=True)
-    name = Column(String(255), nullable=False)
-    telegram_id = Column(Integer, unique=True, nullable=False)
+    __tablename__ = "responsible_persons"
 
-    def __repr__(self):
-        return f"<ResponsiblePerson(id={self.id}, name={self.name}, telegram_id={self.telegram_id})>"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+    name: Mapped[str] = mapped_column(String(255), nullable=False)
+    telegram_id: Mapped[int] = mapped_column(Integer, unique=True, nullable=False)
+
+    def __repr__(self) -> str:
+        return (
+            f"<ResponsiblePerson(id={self.id}, name={self.name}, "
+            f"telegram_id={self.telegram_id})>"
+        )
 
 
 class PostApproval(Base):
@@ -49,15 +59,24 @@ class PostApproval(Base):
     (без ALTER TABLE и миграций). На пост — ровно одна запись (unique draft_id),
     поэтому повторное нажатие кнопки не создаёт дублей.
     """
-    __tablename__ = 'post_approvals'
 
-    id = Column(Integer, primary_key=True, index=True)
-    draft_id = Column(Integer, nullable=False, unique=True, index=True)
-    responsible_telegram_id = Column(Integer, nullable=False, index=True)
+    __tablename__ = "post_approvals"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+    draft_id: Mapped[int] = mapped_column(
+        Integer, nullable=False, unique=True, index=True
+    )
+    responsible_telegram_id: Mapped[int] = mapped_column(
+        Integer, nullable=False, index=True
+    )
     # Возможные значения: 'assigned' -> 'approved' -> 'published' | 'declined'
-    status = Column(String(16), nullable=False, default='assigned')
-    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    status: Mapped[str] = mapped_column(String(16), nullable=False, default="assigned")
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime, default=datetime.utcnow, nullable=False
+    )
 
-    def __repr__(self):
-        return (f"<PostApproval(draft_id={self.draft_id}, "
-                f"responsible={self.responsible_telegram_id}, status={self.status})>")
+    def __repr__(self) -> str:
+        return (
+            f"<PostApproval(draft_id={self.draft_id}, "
+            f"responsible={self.responsible_telegram_id}, status={self.status})>"
+        )
