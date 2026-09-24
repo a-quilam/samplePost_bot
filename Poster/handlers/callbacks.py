@@ -5,13 +5,14 @@
 - Возврат в главное меню из inline-кнопок
 """
 
-from telegram import KeyboardButton, ReplyKeyboardMarkup, Update
+from telegram import Update
 from telegram.ext import (
     BaseHandler,
     CallbackQueryHandler,
     ContextTypes,
 )
 
+from handlers.main_menu import main_menu_keyboard
 from utils import tg_context as ctx
 
 
@@ -29,14 +30,9 @@ async def handle_main_menu_selection(
     await query.answer()
 
     if query.data == "main_menu":
-        keyboard = [
-            [KeyboardButton("✏️ Создать пост")],
-            [KeyboardButton("📝 Черновики")],
-        ]
-        reply_markup = ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
         await query.edit_message_text("Здравствуйте! 👋")
         await ctx.message(update).reply_text(
-            "Выберите действие:", reply_markup=reply_markup
+            "Выберите действие:", reply_markup=main_menu_keyboard()
         )
     else:
         await query.edit_message_text("Неизвестное действие.")

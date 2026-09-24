@@ -9,7 +9,12 @@
 - split_long_text: отправка текста длиннее лимита Telegram (4096);
 - is_post_empty: пустой пост не уходит на согласование;
 - send_for_approval: черновик сохранён даже при сбое отправки в чат;
-- notify_responsible: недоставленное уведомление ≠ сбой назначения.
+- notify_responsible: недоставленное уведомление ≠ сбой назначения;
+- UX диалога: подсказка на превью, «Черновики» завершают диалог,
+  дедупликация промптов альбома, единая клавиатура главного меню;
+- errors.py: уведомление пользователя об ошибке + троттлинг,
+  подавление «message is not modified»;
+- порядок регистрации обработчиков (build_application).
 
 Запуск из каталога Poster:
     python -m unittest discover -s tests -v
@@ -43,13 +48,21 @@ from models import Draft, PostApproval, utcnow
 # Импорт обработчиков требует config (.env с токеном) и telegram —
 # при недоступности соответствующие тесты пропускаются, а не падают.
 try:
+    import bot as bot_module
     import handlers.post_creation as post_creation_module
     from handlers.approval import notify_responsible
+    from handlers.main_menu import help_command, main_menu_keyboard
     from handlers.post_creation import (
+        POST_CREATION,
+        POST_STEPS,
+        handle_message,
+        handle_photo,
         is_post_empty,
+        process_edit,
         send_for_approval,
         send_post,
         split_long_text,
+        view_drafts_and_exit,
     )
 
     HANDLERS_IMPORT_ERROR = None
@@ -586,6 +599,280 @@ class NotifyResponsibleTests(unittest.TestCase):
         draft = Draft(user_id=1, title="Пост")
         notified = asyncio.run(notify_responsible(Bot(), 42, draft, 7))
         self.assertFalse(notified)
+
+
+@unittest.skipIf(
+    HANDLERS_IMPORT_ERROR is not None,
+    f"импорт обработчиков недоступен: {HANDLERS_IMPORT_ERROR}",
+)
+class MainMenuKeyboardTests(unittest.TestCase):
+    """Единая клавиатура главного меню + справка /help."""
+
+    def test_keyboard_structure(self):
+        from telegram import ReplyKeyboardMarkup
+
+        keyboard = main_menu_keyboard()
+        self.assertIsInstance(keyboard, ReplyKeyboardMarkup)
+        texts = [button.text for row in keyboard.keyboard for button in row]
+        self.assertEqual(texts, ["✏️ Создать пост", "📝 Черновики"])
+        self.assertTrue(keyboard.resize_keyboard)
+
+    def test_help_lists_commands(self):
+        reply = AsyncMock()
+        update = SimpleNamespace(
+            effective_message=SimpleNamespace(reply_text=reply),
+            effective_user=SimpleNamespace(id=1),
+        )
+        asyncio.run(help_command(update, SimpleNamespace(user_data={})))
+        text = reply.await_args.args[0]
+        for command in ("/start", "/create_post", "/drafts", "/cancel", "/help"):
+            self.assertIn(command, text)
+
+
+class ErrorNoticeTests(unittest.TestCase):
+    """errors.py: ответ пользователю при ошибках, троттлинг, подавление."""
+
+    def setUp(self):
+        import errors
+
+        self.errors = errors
+        errors._last_error_notice.clear()
+        self._orig_notice = errors._send_error_notice
+        self.notice = AsyncMock(return_value=True)
+        errors._send_error_notice = self.notice
+
+    def tearDown(self):
+        self.errors._send_error_notice = self._orig_notice
+        self.errors._last_error_notice.clear()
+
+    @staticmethod
+    def _update(chat_id=555):
+        from datetime import datetime
+
+        from telegram import Chat, Message, Update
+
+        return Update(
+            update_id=1,
+            message=Message(
+                message_id=1,
+                date=datetime(2026, 1, 1),
+                chat=Chat(id=chat_id, type="private"),
+                text="тест",
+            ),
+        )
+
+    def test_not_modified_is_not_notified(self):
+        from telegram.error import BadRequest
+
+        context = SimpleNamespace(
+            error=BadRequest("Message is not modified: нажатие повторено")
+        )
+        with self.assertLogs(self.errors.logger, level="INFO"):
+            asyncio.run(self.errors.error_handler(self._update(), context))
+        self.notice.assert_not_awaited()
+
+    def test_other_error_notifies_user_with_chat_id(self):
+        context = SimpleNamespace(error=RuntimeError("boom"))
+        with self.assertLogs(self.errors.logger, level="ERROR"):
+            asyncio.run(self.errors.error_handler(self._update(), context))
+        self.notice.assert_awaited_once()
+        self.assertEqual(self.notice.await_args.args[1], 555)
+
+    def test_non_update_object_does_not_crash(self):
+        context = SimpleNamespace(error=RuntimeError("boom"))
+        with self.assertLogs(self.errors.logger, level="ERROR"):
+            asyncio.run(self.errors.error_handler(object(), context))
+        self.notice.assert_not_awaited()
+
+    def test_throttles_repeated_notices_per_chat(self):
+        # Реальная реализация троттлинга (мок в setUp подменён обратно)
+        self.errors._send_error_notice = self._orig_notice
+        message = SimpleNamespace(reply_text=AsyncMock())
+
+        first = asyncio.run(self.errors._send_error_notice(message, 42))
+        second = asyncio.run(self.errors._send_error_notice(message, 42))
+
+        self.assertTrue(first)
+        self.assertFalse(second)
+        message.reply_text.assert_awaited_once()
+
+
+@unittest.skipIf(
+    HANDLERS_IMPORT_ERROR is not None,
+    f"импорт обработчиков недоступен: {HANDLERS_IMPORT_ERROR}",
+)
+class DialogUxTests(unittest.TestCase):
+    """UX диалога: превью, альбомы, редактирование, кнопка «Черновики»."""
+
+    def test_preview_text_keeps_dialog_open(self):
+        # Раньше текст на превью молча завершал диалог (END) — теперь подсказка
+        reply = AsyncMock()
+        update = SimpleNamespace(
+            effective_message=SimpleNamespace(text="просто текст", reply_text=reply),
+            effective_user=SimpleNamespace(id=1),
+        )
+        context = SimpleNamespace(user_data={"current_step": len(POST_STEPS)})
+
+        result = asyncio.run(handle_message(update, context))
+
+        self.assertEqual(result, POST_CREATION)
+        reply.assert_awaited()
+        self.assertIn("кнопк", reply.await_args.args[0])
+
+    def test_album_outside_image_step_prompts_once(self):
+        # Альбом не на шаге изображения: один промпт на весь альбом, без спама
+        context = SimpleNamespace(user_data={"current_step": 0})
+
+        def make_message():
+            return SimpleNamespace(
+                photo=[SimpleNamespace(file_id="fid")],
+                media_group_id="mg-1",
+                reply_text=AsyncMock(),
+            )
+
+        first = make_message()
+        asyncio.run(
+            handle_photo(
+                SimpleNamespace(
+                    effective_message=first, effective_user=SimpleNamespace(id=1)
+                ),
+                context,
+            )
+        )
+        second = make_message()
+        asyncio.run(
+            handle_photo(
+                SimpleNamespace(
+                    effective_message=second, effective_user=SimpleNamespace(id=1)
+                ),
+                context,
+            )
+        )
+
+        first.reply_text.assert_awaited_once()
+        second.reply_text.assert_not_awaited()
+
+    def test_edit_without_field_returns_to_preview(self):
+        # EDIT_FIELD без edit_field: не пишем мусор в user_data, а к превью
+        class StubBot:
+            def __init__(self):
+                self.calls = []
+
+            async def send_message(self, **kwargs):
+                self.calls.append(kwargs)
+
+            async def send_photo(self, **kwargs):
+                self.calls.append(kwargs)
+
+            async def send_media_group(self, **kwargs):
+                self.calls.append(kwargs)
+
+        bot = StubBot()
+        update = SimpleNamespace(
+            effective_message=SimpleNamespace(
+                text="какой-то текст", reply_text=AsyncMock()
+            ),
+            effective_user=SimpleNamespace(id=1),
+            effective_chat=SimpleNamespace(id=77),
+        )
+        context = SimpleNamespace(user_data={}, bot=bot)
+
+        result = asyncio.run(process_edit(update, context))
+
+        self.assertEqual(result, POST_CREATION)
+        self.assertTrue(bot.calls, "превью должно быть отправлено")
+        self.assertNotIn("", context.user_data, "мусорный ключ не должен появиться")
+
+    def test_drafts_button_inside_dialog_shows_list_and_ends(self):
+        from telegram.ext import ConversationHandler
+
+        import handlers.drafts as drafts_module
+
+        session_factory, engine = make_session_factory()
+        orig = drafts_module.SessionLocal
+        drafts_module.SessionLocal = session_factory
+        try:
+            reply = AsyncMock()
+            update = SimpleNamespace(
+                effective_message=SimpleNamespace(reply_text=reply),
+                effective_user=SimpleNamespace(id=1),
+            )
+            context = SimpleNamespace(user_data={})
+
+            result = asyncio.run(view_drafts_and_exit(update, context))
+
+            self.assertEqual(result, ConversationHandler.END)
+            reply.assert_awaited()
+            self.assertIn("нет черновиков", reply.await_args.args[0])
+        finally:
+            drafts_module.SessionLocal = orig
+            engine.dispose()
+
+
+@unittest.skipIf(
+    HANDLERS_IMPORT_ERROR is not None,
+    f"импорт обработчиков недоступен: {HANDLERS_IMPORT_ERROR}",
+)
+class HandlerOrderTests(unittest.TestCase):
+    """
+    Порядок регистрации: ConversationHandler ПЕРВЫМ — иначе reply-кнопки
+    внутри диалога перехватываются глобальными хендлерами и состояние висит.
+    """
+
+    def test_conversation_registered_before_main_menu(self):
+        from telegram.ext import CommandHandler, ConversationHandler
+
+        application = bot_module.build_application()
+        handlers = application.handlers[0]
+
+        conv_index = next(
+            i for i, h in enumerate(handlers) if isinstance(h, ConversationHandler)
+        )
+        start_index = next(
+            i
+            for i, h in enumerate(handlers)
+            if isinstance(h, CommandHandler) and "start" in (h.commands or set())
+        )
+        self.assertLess(conv_index, start_index)
+
+    def test_drafts_button_matched_first_in_conversation_states(self):
+        from datetime import datetime
+
+        from telegram import Chat, Message, Update
+        from telegram.ext import ConversationHandler, MessageHandler
+
+        application = bot_module.build_application()
+        conversation = next(
+            h for h in application.handlers[0] if isinstance(h, ConversationHandler)
+        )
+
+        update = Update(
+            update_id=1,
+            message=Message(
+                message_id=1,
+                date=datetime(2026, 1, 1),
+                chat=Chat(id=555, type="private"),
+                text="📝 Черновики",
+            ),
+        )
+
+        for state in (
+            post_creation_module.POST_CREATION,
+            post_creation_module.EDIT_FIELD,
+        ):
+            matched = [
+                h
+                for h in conversation.states[state]
+                if isinstance(h, MessageHandler) and h.check_update(update)
+            ]
+            self.assertTrue(matched, f"кнопка «Черновики» не обрабатывается в {state}")
+            # Первым должен сработать обработчик, завершающий диалог,
+            # а не generic TEXT-хендлер (иначе текст кнопки запишется в поле)
+            self.assertEqual(
+                getattr(matched[0].callback, "__name__", ""),
+                "view_drafts_and_exit",
+                f"в состоянии {state} «Черновики» перехватывает {matched[0].callback}",
+            )
 
 
 if __name__ == "__main__":

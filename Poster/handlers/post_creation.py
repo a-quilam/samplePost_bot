@@ -6,7 +6,6 @@ from telegram import (
     InlineKeyboardButton,
     InlineKeyboardMarkup,
     InputMediaPhoto,
-    ReplyKeyboardRemove,
     Update,
 )
 from telegram.ext import (
@@ -30,6 +29,8 @@ from approval import (
 )
 from config import REVIEW_CHAT_ID
 from database import SessionLocal
+from handlers.drafts import view_drafts
+from handlers.main_menu import main_menu_keyboard
 from models import Draft, ResponsiblePerson
 from utils import tg_context as ctx
 from utils.formatter import escape_markdown, format_text
@@ -164,6 +165,7 @@ def _clear_post_data(user_data: dict) -> None:
     for key in DRAFT_FIELD_KEYS + [
         "photos",
         "pending_media",
+        "last_rejected_media",
         "editing_draft_id",
         "edit_field",
     ]:
@@ -302,7 +304,14 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     """
     step_index = ctx.data(context).get("current_step", 0)
     if step_index >= len(POST_STEPS):
-        return ConversationHandler.END
+        # Экран превью: раньше любой текст молча завершал диалог (END),
+        # и пользователь терял состояние без объяснений. Теперь — подсказка,
+        # диалог остаётся активным, действие выбирается кнопками.
+        await ctx.message(update).reply_text(
+            "Пост готов к действию. Выберите действие кнопками под сообщением "
+            "превью — или /cancel, чтобы отменить."
+        )
+        return POST_CREATION
 
     step = POST_STEPS[step_index]
     text = ctx.message(update).text or ""
@@ -434,6 +443,12 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> in
 
     # Фото вне шага изображения: повторяем текущий запрос (или ничего —
     # на экране превью изменение фото делается через «Редактировать»).
+    # Альбом отвечаем ОДНИМ сообщением: без дедупликации каждое фото
+    # альбома породило бы свой промпт (спам в чат).
+    if media_group_id:
+        if user_data.get("last_rejected_media") == media_group_id:
+            return POST_CREATION
+        user_data["last_rejected_media"] = media_group_id
     if step_index < len(POST_STEPS):
         await message.reply_text(
             POST_STEPS[step_index]["prompt"],
@@ -705,18 +720,18 @@ async def save_draft(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         session.commit()
         if is_update:
             await ctx.message(update).reply_text(
-                f"Черновик {draft.id} обновлён.", reply_markup=ReplyKeyboardRemove()
+                f"Черновик {draft.id} обновлён.", reply_markup=main_menu_keyboard()
             )
         else:
             await ctx.message(update).reply_text(
-                "Пост сохранен в черновики.", reply_markup=ReplyKeyboardRemove()
+                "Пост сохранен в черновики.", reply_markup=main_menu_keyboard()
             )
         logger.info(f"Черновик {draft.id} сохранён (обновление={is_update}).")
     except Exception as e:
         session.rollback()
         await ctx.message(update).reply_text(
             "Произошла ошибка при сохранении черновика.",
-            reply_markup=ReplyKeyboardRemove(),
+            reply_markup=main_menu_keyboard(),
         )
         logger.error(f"Ошибка при сохранении черновика: {e}")
     finally:
@@ -755,14 +770,14 @@ async def send_for_approval(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     if is_post_empty(_post_fields(user_data)):
         await ctx.message(update).reply_text(
             "Пост пуст: добавьте хотя бы заголовок, текст или изображение.",
-            reply_markup=ReplyKeyboardRemove(),
+            reply_markup=main_menu_keyboard(),
         )
         return
 
     if not REVIEW_CHAT_ID:
         await ctx.message(update).reply_text(
             "Не настроен REVIEW_CHAT_ID. Пост не отправлен на согласование.",
-            reply_markup=ReplyKeyboardRemove(),
+            reply_markup=main_menu_keyboard(),
         )
         return
 
@@ -783,7 +798,7 @@ async def send_for_approval(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         if approval is not None and approval.status != STATUS_DECLINED:
             await ctx.message(update).reply_text(
                 "Этот пост уже отправлен на согласование.",
-                reply_markup=ReplyKeyboardRemove(),
+                reply_markup=main_menu_keyboard(),
             )
             return
         if approval is not None:
@@ -818,7 +833,7 @@ async def send_for_approval(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         logger.error(f"Ошибка при сохранении поста на согласование: {e}")
         await ctx.message(update).reply_text(
             "Произошла ошибка при сохранении поста.",
-            reply_markup=ReplyKeyboardRemove(),
+            reply_markup=main_menu_keyboard(),
         )
         return
     finally:
@@ -859,12 +874,12 @@ async def send_for_approval(update: Update, context: ContextTypes.DEFAULT_TYPE) 
             f"Черновик сохранён (№{draft_id}), но отправить пост в чат "
             "согласования не удалось. Проверьте, что бот добавлен в чат "
             "и REVIEW_CHAT_ID указан верно.",
-            reply_markup=ReplyKeyboardRemove(),
+            reply_markup=main_menu_keyboard(),
         )
         return
 
     await ctx.message(update).reply_text(
-        "Пост отправлен на согласование.", reply_markup=ReplyKeyboardRemove()
+        "Пост отправлен на согласование.", reply_markup=main_menu_keyboard()
     )
 
 
@@ -945,6 +960,13 @@ async def process_edit(update: Update, context: ContextTypes.DEFAULT_TYPE) -> in
     text = ctx.message(update).text or ""
 
     logger.info(f"Пользователь редактирует поле '{field}' с вводом: {text}")
+
+    if not field:
+        # Состояние EDIT_FIELD без выбранного поля (не должно случаться):
+        # не пишем мусор в user_data, а возвращаем пользователя к превью
+        logger.warning("Редактирование без выбранного поля — возврат к превью.")
+        await review_post(update, context)
+        return POST_CREATION
 
     if text.lower() == "пропустить":
         if field == "image":
@@ -1071,9 +1093,22 @@ async def cancel_creation(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     Отменяет процесс создания поста.
     """
     await ctx.message(update).reply_text(
-        "Создание поста отменено.", reply_markup=ReplyKeyboardRemove()
+        "Создание поста отменено.", reply_markup=main_menu_keyboard()
     )
     logger.info("Пользователь отменил создание поста.")
+    return ConversationHandler.END
+
+
+async def view_drafts_and_exit(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> int:
+    """
+    Reply-кнопка «📝 Черновики» ВНУТРИ диалога: показывает список черновиков
+    и завершает диалог — состояние не должно «висеть» после перехода
+    в другой раздел (иначе следующий текст пользователя уходил бы
+    на шаг диалога, который пользователь уже покинул).
+    """
+    await view_drafts(update, context)
     return ConversationHandler.END
 
 
@@ -1098,6 +1133,12 @@ def post_creation_handlers() -> list[BaseHandler]:
                     MessageHandler(
                         filters.Regex("^✏️ Создать пост$"), start_post_creation
                     ),
+                    # «Черновики» в диалоге: показать список и завершить диалог
+                    # (важно стоять ДО общего TEXT-хендлера — иначе текст
+                    # кнопки запишется в поле поста)
+                    MessageHandler(
+                        filters.Regex("^📝 Черновики$"), view_drafts_and_exit
+                    ),
                     MessageHandler(filters.PHOTO, handle_photo),
                     MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message),
                     CallbackQueryHandler(
@@ -1106,6 +1147,11 @@ def post_creation_handlers() -> list[BaseHandler]:
                     ),
                 ],
                 EDIT_FIELD: [
+                    # То же и в режиме редактирования поля: иначе нажатие
+                    # «Черновики» записалось бы в редактируемое поле
+                    MessageHandler(
+                        filters.Regex("^📝 Черновики$"), view_drafts_and_exit
+                    ),
                     CallbackQueryHandler(
                         handle_edit, pattern="^edit_.*$|^cancel_edit$"
                     ),
