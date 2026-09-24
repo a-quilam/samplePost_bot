@@ -4,7 +4,6 @@
 [tool.ruff]
 line-length = 88
 target-version = "py313"
-extend-exclude = ["ZUMMARY"]
 
 [tool.ruff.lint]
 # E,F — pycodestyle/pyflakes, W — предупреждения, I — сортировка импортов
@@ -19,7 +18,6 @@ target-version = ["py313"]
 [tool.mypy]
 python_version = "3.13"
 files = ["."]
-exclude = ["ZUMMARY"]
 # Poster/__init__.py существует, поэтому файл не должен находиться дважды
 # под именами "config" и "Poster.config"
 explicit_package_bases = true

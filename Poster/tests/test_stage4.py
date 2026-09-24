@@ -167,13 +167,20 @@ class EnvExampleConsistencyTests(unittest.TestCase):
     def test_required_keys_present(self):
         documented = self._example_keys()
         self.assertIn("TELEGRAM_BOT_TOKEN", documented)
-        self.assertIn("ADMIN_IDS", documented)
+
+    def test_workflow_keys_absent(self):
+        # Workflow согласования удалён: чаты и админы не описаны и не читаются
+        documented = self._example_keys()
+        for key in ("ADMIN_IDS", "REVIEW_CHAT_ID", "PUBLICATION_CHAT_ID"):
+            self.assertNotIn(key, documented)
 
     def test_example_contains_no_secrets(self):
         with open(os.path.join(POSTER_DIR, ".env.example"), encoding="utf-8") as f:
             for line in f:
                 line = line.strip()
-                if line.startswith(("TELEGRAM_BOT_TOKEN=", "ADMIN_IDS=")):
+                if line.startswith(
+                    ("TELEGRAM_BOT_TOKEN=", "DATABASE_URL=", "LOG_LEVEL=")
+                ):
                     self.assertEqual(
                         line, line.split("=")[0] + "=", f"Найдено значение: {line}"
                     )
