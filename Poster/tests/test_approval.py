@@ -76,11 +76,13 @@ class ParseCallbackTests(unittest.TestCase):
         self.assertEqual(parse_post_action('viewpost_9'), ('view', 9))
         self.assertEqual(parse_post_action('approvepost_9'), ('approve', 9))
         self.assertEqual(parse_post_action('declinepost_9'), ('decline', 9))
+        self.assertEqual(parse_post_action('publishpost_9'), ('publish', 9))
 
     def test_post_action_invalid(self):
         self.assertIsNone(parse_post_action('viewpost_'))
         self.assertIsNone(parse_post_action('viewpost_x'))
         self.assertIsNone(parse_post_action('responsible_1_2'))
+        self.assertIsNone(parse_post_action('editdraft_1'))
 
 
 class AssignTests(unittest.TestCase):
@@ -222,7 +224,7 @@ class HandlerConsistencyTests(unittest.TestCase):
 
     def test_handler_counts(self):
         self.assertEqual(len(post_creation_handlers()), 1)
-        self.assertEqual(len(approval_handlers()), 4)
+        self.assertEqual(len(approval_handlers()), 5)  # + публикация (publishpost)
         self.assertEqual(len(callbacks_handlers()), 1)
 
     def test_approval_callbacks_not_clash_with_conversation(self):
@@ -238,12 +240,34 @@ class HandlerConsistencyTests(unittest.TestCase):
 
         approval_samples = [
             'responsible_1_2', 'viewpost_1', 'approvepost_1', 'declinepost_1',
+            'publishpost_1',
         ]
         for sample in approval_samples:
             for pat in conv_patterns:
                 self.assertIsNone(
                     pat.search(sample),
                     f"callback '{sample}' перехватывается ConversationHandler: {pat.pattern}",
+                )
+
+    def test_conversation_callbacks_not_clash_with_approval(self):
+        """
+        approval_handlers регистрируются ДО ConversationHandler — их паттерны
+        не должны перехватывать callback'и диалога (иначе редактирование
+        черновика и сбор фото не работают).
+        """
+        approval_patterns = [h.pattern for h in approval_handlers() if h.pattern is not None]
+        self.assertTrue(approval_patterns)
+
+        conversation_samples = [
+            'editdraft_1', 'skip', 'media_done',
+            'save_draft', 'send_for_approval', 'edit_post',
+            'edit_title', 'cancel_edit',
+        ]
+        for sample in conversation_samples:
+            for pat in approval_patterns:
+                self.assertIsNone(
+                    pat.search(sample),
+                    f"callback '{sample}' перехватывается approval_handlers: {pat.pattern}",
                 )
 
     def test_summary_escapes_user_values(self):

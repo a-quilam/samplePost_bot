@@ -17,17 +17,22 @@ from sqlalchemy.orm import Session
 from database import SessionLocal
 from models import ResponsiblePerson
 from utils.formatter import escape_markdown
-from handlers.post_creation import build_post_summary
+from config import PUBLICATION_CHAT_ID
+from handlers.post_creation import POST_HEADING, send_post
 from approval import (
     STATUS_APPROVED,
+    STATUS_ASSIGNED,
     STATUS_DECLINED,
+    STATUS_PUBLISHED,
     assign_responsible,
     decide,
     draft_to_post_data,
     get_approval,
     get_draft,
+    get_draft_photos,
     parse_post_action,
     parse_responsible_callback,
+    publish,
 )
 
 logger = logging.getLogger(__name__)
@@ -49,36 +54,29 @@ def _view_only_keyboard(draft_id: int) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(keyboard)
 
 
-def _build_post_message(draft, heading: str) -> str:
-    """
-    Итоговый текст поста из БД + автор и id поста.
-    Заголовок/поля экранируются в build_post_summary, id и user_id — цифры.
-    """
-    text = build_post_summary(draft_to_post_data(draft), heading=heading)
-    text += f"*ID поста:* {draft.id}\n*Автор поста:* {draft.user_id}"
-    return text
+def _approved_keyboard(draft_id: int) -> InlineKeyboardMarkup:
+    """Кнопки после СОГЛАСОВАНИЯ: ответственный может опубликовать пост."""
+    keyboard = [
+        [InlineKeyboardButton("📢 Опубликовать", callback_data=f"publishpost_{draft_id}")],
+        [InlineKeyboardButton("📄 Показать пост", callback_data=f"viewpost_{draft_id}")],
+    ]
+    return InlineKeyboardMarkup(keyboard)
 
 
-async def _send_post_message(bot, chat_id: int, draft, heading: str, reply_markup=None) -> None:
-    """Отправляет пост ответственному: фото с подписью либо текстом."""
-    text = _build_post_message(draft, heading)
-    if draft.image:
-        # Лимит подписи к фото — 1024 символа: при переполнении отправляем раздельно
-        if len(text) <= 1000:
-            await bot.send_photo(
-                chat_id=chat_id,
-                photo=draft.image,
-                caption=text,
-                parse_mode='MarkdownV2',
-                reply_markup=reply_markup,
-            )
-            return
-        await bot.send_photo(chat_id=chat_id, photo=draft.image)
-    await bot.send_message(
-        chat_id=chat_id,
-        text=text,
-        parse_mode='MarkdownV2',
+async def _send_post(bot, chat_id: int, draft, heading: str, reply_markup=None) -> None:
+    """
+    Отправляет пост из БД ответственному/в чат: единый формат send_post
+    (фото, медиа-группа, лимит подписи) + служебные строки ID и автора.
+    """
+    await send_post(
+        bot,
+        chat_id,
+        draft_to_post_data(draft),
+        get_draft_photos(draft),
+        heading=heading,
+        extra_lines=f"*ID поста:* {draft.id}\n*Автор поста:* {draft.user_id}",
         reply_markup=reply_markup,
+        markup_lead_text="Ваши действия:",
     )
 
 
@@ -145,7 +143,7 @@ async def handle_responsible_selection(update: Update, context: ContextTypes.DEF
 
         await _answer_safely(query, "Ответственный назначен ✓")
 
-        await _send_post_message(
+        await _send_post(
             context.bot,
             chat_id=telegram_id,
             draft=draft,
@@ -200,7 +198,7 @@ async def handle_view_post(update: Update, context: ContextTypes.DEFAULT_TYPE) -
 
         await _answer_safely(query)
         # Отдельным сообщением, чтобы не ломать кнопочное сообщение
-        await _send_post_message(
+        await _send_post(
             context.bot,
             chat_id=query.effective_chat.id,
             draft=draft,
@@ -240,9 +238,15 @@ async def _handle_decision(update: Update, context: ContextTypes.DEFAULT_TYPE, n
             )
             return
         if outcome == 'already':
-            word = 'согласован' if approval.status == STATUS_APPROVED else 'отклонён'
+            words = {
+                STATUS_APPROVED: 'согласован',
+                STATUS_DECLINED: 'отклонён',
+                STATUS_PUBLISHED: 'опубликован',
+            }
             await _answer_safely(
-                query, f"Решение уже принято: пост {word}.", show_alert=True
+                query,
+                f"Решение уже принято: пост {words.get(approval.status, approval.status)}.",
+                show_alert=True,
             )
             return
 
@@ -250,7 +254,8 @@ async def _handle_decision(update: Update, context: ContextTypes.DEFAULT_TYPE, n
         label = "✅ Пост согласован." if new_status == STATUS_APPROVED else "❌ Пост отклонён."
         await _answer_safely(query, "Решение принято ✓")
 
-        markup = _view_only_keyboard(draft_id)
+        # Согласован: ответственному доступна публикация; отклонён — только просмотр
+        markup = _approved_keyboard(draft_id) if new_status == STATUS_APPROVED else _view_only_keyboard(draft_id)
         if query.message is not None and query.message.photo:
             # Уведомление было отправлено как фото — правим подпись
             await query.edit_message_caption(caption=label, reply_markup=markup)
@@ -278,6 +283,92 @@ async def handle_decline_post(update: Update, context: ContextTypes.DEFAULT_TYPE
     await _handle_decision(update, context, STATUS_DECLINED)
 
 
+async def handle_publish_post(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """
+    Публикация согласованного поста. callback_data: publishpost_<draft_id>.
+
+    Доступна только назначенному ответственному и только после согласования.
+    Повторная публикация невозможна: статус approved -> published меняется
+    атомарно ДО отправки, при ошибке отправки статус откатывается в approved.
+    """
+    query = update.callback_query
+
+    parsed = parse_post_action(query.data)
+    if parsed is None:
+        await _answer_safely(query, "Неверный формат данных кнопки.", show_alert=True)
+        return
+    _, draft_id = parsed
+
+    if not PUBLICATION_CHAT_ID:
+        await _answer_safely(
+            query,
+            "PUBLICATION_CHAT_ID не настроен: публикация отключена.",
+            show_alert=True,
+        )
+        return
+
+    session: Session = SessionLocal()
+    try:
+        approval, outcome = publish(session, draft_id, query.from_user.id)
+
+        if outcome == 'no_draft':
+            await _answer_safely(query, "Пост не найден (возможно, удалён).", show_alert=True)
+            return
+        if outcome == 'no_approval':
+            await _answer_safely(query, "Пост не назначался ответственному.", show_alert=True)
+            return
+        if outcome == 'forbidden':
+            await _answer_safely(
+                query, "Публикация доступна только назначенному ответственному.", show_alert=True
+            )
+            return
+        if outcome == 'already':
+            await _answer_safely(query, "Пост уже опубликован.", show_alert=True)
+            return
+        if outcome == 'not_approved':
+            word = 'ещё не согласован' if approval.status == STATUS_ASSIGNED else 'отклонён'
+            await _answer_safely(
+                query, f"Пост {word} — публикация невозможна.", show_alert=True
+            )
+            return
+
+        # outcome == 'ok': статус уже 'published' — публикуем ровно один раз
+        draft = get_draft(session, draft_id)
+        try:
+            await send_post(
+                context.bot,
+                PUBLICATION_CHAT_ID,
+                draft_to_post_data(draft),
+                get_draft_photos(draft),
+                heading=POST_HEADING,
+            )
+        except Exception as send_error:
+            # Отправка не удалась — откатываем статус, чтобы можно было повторить
+            approval.status = STATUS_APPROVED
+            session.commit()
+            logger.error(f"Ошибка публикации поста #{draft_id}: {send_error}")
+            await _answer_safely(query, f"Ошибка публикации: {send_error}", show_alert=True)
+            return
+
+        await _answer_safely(query, "Пост опубликован ✓")
+        label = "✅ Пост согласован.\n📢 Пост опубликован."
+        markup = _view_only_keyboard(draft_id)
+        if query.message is not None and query.message.photo:
+            await query.edit_message_caption(caption=label, reply_markup=markup)
+        else:
+            await query.edit_message_text(text=label, reply_markup=markup)
+        logger.info(
+            f"Пост #{draft_id}: опубликован в {PUBLICATION_CHAT_ID} "
+            f"(ответственный {query.from_user.id})."
+        )
+    except Exception as e:
+        session.rollback()
+        logger.error(f"Ошибка публикации поста #{draft_id}: {e}")
+        await _answer_safely(query, f"Ошибка: {e}", show_alert=True)
+    finally:
+        session.close()
+
+
 def approval_handlers() -> list:
     """
     Возвращает обработчики согласования (регистрируются ДО ConversationHandler
@@ -286,6 +377,7 @@ def approval_handlers() -> list:
     return [
         CallbackQueryHandler(handle_approve_post, pattern=r'^approvepost_\d+$'),
         CallbackQueryHandler(handle_decline_post, pattern=r'^declinepost_\d+$'),
+        CallbackQueryHandler(handle_publish_post, pattern=r'^publishpost_\d+$'),
         CallbackQueryHandler(handle_view_post, pattern=r'^viewpost_\d+$'),
         CallbackQueryHandler(handle_responsible_selection, pattern=r'^responsible_\d+_\d+$'),
     ]

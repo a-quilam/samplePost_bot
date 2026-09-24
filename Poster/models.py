@@ -19,6 +19,10 @@ class Draft(Base):
     text = Column(Text, nullable=True)
     contact = Column(String(255), nullable=True)
     image = Column(String(255), nullable=True)
+    # JSON-список file_id всех фотографий поста (медиа-группа).
+    # У старых черновиков NULL — тогда используется image (единственная/первая),
+    # поэтому существующие записи продолжают работать без миграции данных.
+    photos = Column(Text, nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
 
     def __repr__(self):
@@ -50,7 +54,7 @@ class PostApproval(Base):
     id = Column(Integer, primary_key=True, index=True)
     draft_id = Column(Integer, nullable=False, unique=True, index=True)
     responsible_telegram_id = Column(Integer, nullable=False, index=True)
-    # Возможные значения: 'assigned' -> 'approved' | 'declined'
+    # Возможные значения: 'assigned' -> 'approved' -> 'published' | 'declined'
     status = Column(String(16), nullable=False, default='assigned')
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
 

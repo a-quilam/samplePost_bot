@@ -3,6 +3,7 @@ from telegram import (
     Update,
     InlineKeyboardMarkup,
     InlineKeyboardButton,
+    InputMediaPhoto,
     ReplyKeyboardRemove,
 )
 from telegram.ext import (
@@ -19,12 +20,31 @@ from models import Draft, ResponsiblePerson
 from sqlalchemy.orm import Session
 from config import REVIEW_CHAT_ID
 from database import SessionLocal
+from approval import (
+    STATUS_DECLINED,
+    draft_to_post_data,
+    edit_block_reason,
+    get_approval,
+    get_draft_photos,
+    photos_to_json,
+    reset_declined,
+)
 
 # Настройка логирования
 logger = logging.getLogger(__name__)
 
 # Определение состояний
 POST_CREATION, EDIT_FIELD = range(2)
+
+# Единый заголовок поста для ПРЕВЬЮ и ПУБЛИКАЦИИ: текст, который видит автор
+# в превью, дословно совпадает с тем, что уйдёт в чат публикации.
+POST_HEADING = "📢 *Новый пост:*"
+
+# Поля черновика (совпадают с колонками модели Draft, кроме служебных)
+DRAFT_FIELD_KEYS = [
+    'title', 'date', 'time_start', 'time_end', 'place_name',
+    'place_url', 'text', 'contact', 'image',
+]
 
 # Определение шагов создания поста
 POST_STEPS = [
@@ -113,14 +133,111 @@ def get_post_actions_keyboard():
     ]
     return InlineKeyboardMarkup(keyboard)
 
+def get_media_done_keyboard():
+    """Кнопка завершения сбора фотографий медиа-группы."""
+    return InlineKeyboardMarkup(
+        [[InlineKeyboardButton("✅ Фото готово", callback_data='media_done')]]
+    )
+
+def _clear_post_data(user_data: dict) -> None:
+    """Полностью сбрасывает данные поста (новое создание — без «наследства»)."""
+    for key in DRAFT_FIELD_KEYS + ['photos', 'pending_media', 'editing_draft_id', 'edit_field']:
+        user_data.pop(key, None)
+
+def _current_photos(user_data: dict) -> list:
+    """Фотографии текущего поста из user_data (fallback на одиночную image)."""
+    photos = user_data.get('photos') or []
+    if not photos and user_data.get('image'):
+        photos = [user_data['image']]
+    return list(photos)
+
+def _post_fields(user_data: dict) -> dict:
+    """
+    Поля поста из user_data в формате колонок Draft.
+    photos (JSON-список) — основной источник; image дублирует ПЕРВУЮ
+    фотографию для совместимости со старым кодом и старыми черновиками.
+    """
+    photos = _current_photos(user_data)
+    fields = {key: user_data.get(key) for key in DRAFT_FIELD_KEYS}
+    fields['image'] = photos[0] if photos else None
+    fields['photos'] = photos_to_json(photos)
+    return fields
+
+def _apply_fields(draft: Draft, user_data: dict) -> None:
+    """Заполняет/обновляет поля черновика из user_data (без создания копии)."""
+    for key, value in _post_fields(user_data).items():
+        setattr(draft, key, value)
+
+def _find_own_draft(session: Session, draft_id, user_id: int):
+    """Черновик текущего пользователя по id (None, если id не задан/чужой/удалён)."""
+    if not draft_id:
+        return None
+    return session.query(Draft).filter(Draft.id == draft_id, Draft.user_id == user_id).first()
+
 async def start_post_creation(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     """
     Запускает процесс создания поста.
     """
     logger.info("Начало создания поста.")
+    _clear_post_data(context.user_data)  # новый пост не должен наследовать старые данные
     context.user_data['current_step'] = 0  # Инициализация текущего шага
     await prompt_step(update, context)
     return POST_CREATION
+
+async def start_edit_draft(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """
+    Открывает существующий черновик в редакторе (callback editdraft_<id>).
+
+    Точка входа ConversationHandler: черновик загружается в user_data,
+    показывается превью — дальше работают те же кнопки «В черновик»
+    (обновление БЕЗ создания копии) и «Отправить на согласование».
+    """
+    query = update.callback_query
+    await query.answer()
+
+    try:
+        draft_id = int(query.data[len('editdraft_'):])
+    except (TypeError, ValueError):
+        return ConversationHandler.END
+
+    session: Session = SessionLocal()
+    try:
+        draft = _find_own_draft(session, draft_id, query.from_user.id)
+        if draft is None:
+            await update.effective_message.reply_text("Черновик не найден.")
+            return ConversationHandler.END
+
+        block = edit_block_reason(session, draft_id)
+        if block is not None:
+            reasons = {
+                'assigned': 'на согласовании',
+                'approved': 'согласован и ожидает публикации',
+                'published': 'уже опубликован',
+            }
+            await update.effective_message.reply_text(
+                f"Редактирование запрещено: пост {reasons.get(block, block)}."
+            )
+            return ConversationHandler.END
+
+        _clear_post_data(context.user_data)
+        for key in DRAFT_FIELD_KEYS:
+            context.user_data[key] = getattr(draft, key)
+        photos = get_draft_photos(draft)
+        context.user_data['photos'] = photos
+        context.user_data['image'] = photos[0] if photos else None
+        context.user_data['editing_draft_id'] = draft.id
+        context.user_data['current_step'] = len(POST_STEPS)
+
+        logger.info(f"Черновик #{draft.id} открыт на редактирование пользователем {query.from_user.id}.")
+        await review_post(update, context)
+        return POST_CREATION
+    except Exception as e:
+        session.rollback()
+        logger.error(f"Ошибка открытия черновика #{draft_id}: {e}")
+        await update.effective_message.reply_text("Не удалось открыть черновик.")
+        return ConversationHandler.END
+    finally:
+        session.close()
 
 async def prompt_step(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """
@@ -153,6 +270,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     if step['optional'] and text.lower() == 'пропустить':
         if step['key'] == 'image':
             context.user_data['image'] = None
+            context.user_data['photos'] = []
+            context.user_data.pop('pending_media', None)
             logger.info("Пользователь пропустил добавление изображения.")
         else:
             context.user_data[step['key']] = 'Не указано'
@@ -168,8 +287,11 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
         if step['key'] == 'image':
             if update.effective_message.photo:
-                context.user_data['image'] = update.effective_message.photo[-1].file_id
-                await update.effective_message.reply_text("Картинка добавлена.", reply_markup=get_post_actions_keyboard())
+                file_id = update.effective_message.photo[-1].file_id
+                context.user_data['photos'] = [file_id]
+                context.user_data['image'] = file_id
+                context.user_data.pop('pending_media', None)
+                await update.effective_message.reply_text("Картинка добавлена.")
                 logger.info("Пользователь добавил изображение.")
                 context.user_data['current_step'] += 1
                 await review_post(update, context)
@@ -203,6 +325,8 @@ async def handle_skip(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int
     step = POST_STEPS[step_index]
     if step['key'] == 'image':
         context.user_data['image'] = None
+        context.user_data['photos'] = []
+        context.user_data.pop('pending_media', None)
         logger.info("Пользователь пропустил добавление изображения.")
     else:
         context.user_data[step['key']] = 'Не указано'
@@ -211,6 +335,80 @@ async def handle_skip(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int
     context.user_data['current_step'] += 1
     await prompt_step(update, context)
     return POST_CREATION
+
+async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """
+    Приём фотографий на шаге изображения.
+
+    Одиночная фотография — сразу к превью (прежнее поведение).
+    Медиа-группа (альбом) приходит отдельными сообщениями с одним
+    media_group_id: первое показывает кнопку «✅ Фото готово», остальные
+    молча добавляются в список. Шаг завершается кнопкой — без таймеров
+    и гонок с кнопками «В черновик»/«Отправить».
+    """
+    message = update.effective_message
+    if not message.photo:
+        return POST_CREATION
+
+    user_data = context.user_data
+    file_id = message.photo[-1].file_id
+    media_group_id = message.media_group_id
+    step_index = user_data.get('current_step', 0)
+    at_image_step = (
+        step_index < len(POST_STEPS) and POST_STEPS[step_index]['key'] == 'image'
+    )
+
+    # Продолжение уже начатой медиа-группы (в т.ч. запоздавшие фотографии) —
+    # добавляем молча, не спамим подтверждениями на каждое фото.
+    if media_group_id and user_data.get('pending_media') == media_group_id:
+        user_data.setdefault('photos', []).append(file_id)
+        return POST_CREATION
+
+    # Первая фотография нового альбома — начинаем сбор
+    if media_group_id and at_image_step:
+        user_data['pending_media'] = media_group_id
+        user_data['photos'] = [file_id]
+        user_data['image'] = file_id
+        await message.reply_text(
+            "📷 Получаю фотографии альбома. Отправьте остальные, затем нажмите «✅ Фото готово».",
+            reply_markup=get_media_done_keyboard(),
+        )
+        logger.info(f"Начат сбор медиа-группы {media_group_id}.")
+        return POST_CREATION
+
+    # Одиночная фотография — как раньше: сразу к превью
+    if at_image_step:
+        user_data['photos'] = [file_id]
+        user_data['image'] = file_id
+        user_data.pop('pending_media', None)
+        user_data['current_step'] += 1
+        await message.reply_text("Картинка добавлена.")
+        await review_post(update, context)
+        return POST_CREATION
+
+    # Фото вне шага изображения: повторяем текущий запрос (или ничего —
+    # на экране превью изменение фото делается через «Редактировать»).
+    if step_index < len(POST_STEPS):
+        await message.reply_text(
+            POST_STEPS[step_index]['prompt'],
+            reply_markup=get_skip_keyboard(),
+        )
+    return POST_CREATION
+
+async def _finish_media_done(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
+    """
+    Общая логика кнопки «✅ Фото готово»: фиксирует собранные фотографии.
+    Возвращает True, если фотографии есть и шаг можно завершить.
+    """
+    photos = context.user_data.get('photos') or []
+    if not photos:
+        await update.effective_message.reply_text(
+            "Фотографии не получены. Отправьте фото (альбом) или нажмите «Пропустить».",
+            reply_markup=get_skip_keyboard(),
+        )
+        return False
+    context.user_data['image'] = photos[0]
+    return True
 
 async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     """
@@ -224,6 +422,15 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
 
     if data == 'skip':
         return await handle_skip(update, context)
+    elif data == 'media_done':
+        step_index = context.user_data.get('current_step', 0)
+        if step_index < len(POST_STEPS) and POST_STEPS[step_index]['key'] == 'image':
+            if not await _finish_media_done(update, context):
+                return POST_CREATION
+            context.user_data['current_step'] += 1
+            await update.effective_message.reply_text("Фотографии добавлены.")
+        await review_post(update, context)
+        return POST_CREATION
     elif data == 'save_draft':
         await save_draft(update, context)
         return ConversationHandler.END
@@ -260,43 +467,114 @@ def build_post_summary(post_data: dict, *, heading: str) -> str:
     lines.append("")
     return "\n".join(lines)
 
+async def send_post(
+    bot,
+    chat_id,
+    post_data: dict,
+    photos: list,
+    *,
+    heading: str,
+    extra_lines: str = '',
+    reply_markup: InlineKeyboardMarkup = None,
+    markup_lead_text: str = None,
+) -> None:
+    """
+    ЕДИНАЯ отправка поста: текст / фото с подписью / медиа-группа.
+
+    Используется в превью, чате согласования, уведомлении ответственного
+    и публикации — формат сообщения везде одинаковый, без дублирования
+    логики форматирования и без повторного экранирования.
+    """
+    text = build_post_summary(post_data, heading=heading)
+    if extra_lines:
+        text += extra_lines
+
+    file_ids = [p for p in (photos or []) if p]
+
+    if not file_ids:
+        await bot.send_message(
+            chat_id=chat_id, text=text, parse_mode='MarkdownV2', reply_markup=reply_markup
+        )
+        return
+
+    if len(file_ids) == 1:
+        # Лимит подписи к фото — 1024 символа: при переполнении отправляем раздельно
+        if len(text) <= 1000:
+            await bot.send_photo(
+                chat_id=chat_id,
+                photo=file_ids[0],
+                caption=text,
+                parse_mode='MarkdownV2',
+                reply_markup=reply_markup,
+            )
+        else:
+            await bot.send_photo(chat_id=chat_id, photo=file_ids[0])
+            await bot.send_message(
+                chat_id=chat_id, text=text, parse_mode='MarkdownV2', reply_markup=reply_markup
+            )
+        return
+
+    # Медиа-группа: подпись разрешена только у первого снимка
+    media = []
+    for index, file_id in enumerate(file_ids):
+        if index == 0 and len(text) <= 1000:
+            media.append(InputMediaPhoto(media=file_id, caption=text, parse_mode='MarkdownV2'))
+        else:
+            media.append(InputMediaPhoto(media=file_id))
+    await bot.send_media_group(chat_id=chat_id, media=media)
+
+    if len(text) > 1000:
+        await bot.send_message(chat_id=chat_id, text=text, parse_mode='MarkdownV2')
+    if reply_markup is not None:
+        # sendMediaGroup не поддерживает кнопки — клавиатура отдельным сообщением
+        await bot.send_message(
+            chat_id=chat_id,
+            text=markup_lead_text or "Выберите действие:",
+            reply_markup=reply_markup,
+        )
+
 async def review_post(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """
-    Отправляет пользователю обзор созданного поста с возможностью редактирования или отправки.
+    Превью поста: фотографии + ровно тот же текст, что увидит чат публикации.
+    Кнопки действий — к этому же сообщению (для альбома — отдельным сообщением).
     """
-    logger.info("Переход к обзору поста.")
-    review_text = build_post_summary(context.user_data, heading="📋 *Обзор поста:*")
-    review_text += "Выберите действие:"
-
-    await update.effective_message.reply_text(
-        review_text,
-        parse_mode='MarkdownV2',
-        reply_markup=get_post_actions_keyboard()
+    logger.info("Переход к превью поста.")
+    await send_post(
+        context.bot,
+        update.effective_chat.id,
+        context.user_data,
+        _current_photos(context.user_data),
+        heading=POST_HEADING,
+        reply_markup=get_post_actions_keyboard(),
+        markup_lead_text="Выберите действие:",
     )
 
 async def save_draft(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """
-    Сохраняет пост в черновики.
+    Сохраняет пост в черновики: обновляет открытый черновик (editing_draft_id)
+    или создаёт новый — лишних копий не появляется.
     """
     logger.info("Сохранение поста в черновики.")
     session: Session = SessionLocal()
     try:
-        draft = Draft(
-            user_id=update.effective_user.id,
-            title=context.user_data.get('title'),
-            date=context.user_data.get('date'),
-            time_start=context.user_data.get('time_start'),
-            time_end=context.user_data.get('time_end'),
-            place_name=context.user_data.get('place_name'),
-            text=context.user_data.get('text'),
-            contact=context.user_data.get('contact'),
-            place_url=context.user_data.get('place_url'),
-            image=context.user_data.get('image'),
+        draft = _find_own_draft(
+            session, context.user_data.get('editing_draft_id'), update.effective_user.id
         )
-        session.add(draft)
+        is_update = draft is not None
+        if draft is None:
+            draft = Draft(user_id=update.effective_user.id)
+            session.add(draft)
+        _apply_fields(draft, context.user_data)
         session.commit()
-        await update.effective_message.reply_text("Пост сохранен в черновики.", reply_markup=ReplyKeyboardRemove())
-        logger.info("Пост успешно сохранен в черновики.")
+        if is_update:
+            await update.effective_message.reply_text(
+                f"Черновик {draft.id} обновлён.", reply_markup=ReplyKeyboardRemove()
+            )
+        else:
+            await update.effective_message.reply_text(
+                "Пост сохранен в черновики.", reply_markup=ReplyKeyboardRemove()
+            )
+        logger.info(f"Черновик {draft.id} сохранён (обновление={is_update}).")
     except Exception as e:
         session.rollback()
         await update.effective_message.reply_text("Произошла ошибка при сохранении черновика.", reply_markup=ReplyKeyboardRemove())
@@ -306,7 +584,9 @@ async def save_draft(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
 
 async def send_for_approval(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """
-    Отправляет пост на согласование.
+    Отправляет пост на согласование: сохраняет (или обновляет) черновик
+    и создаёт цикл согласования. Повторная отправка отклонённого поста
+    начинает НОВЫЙ цикл; уже согласованный/назначенный — не дублируется.
     """
     logger.info("Отправка поста на согласование.")
     
@@ -319,43 +599,40 @@ async def send_for_approval(update: Update, context: ContextTypes.DEFAULT_TYPE) 
 
     session: Session = SessionLocal()
     try:
-        # Создание объекта Draft (поля совпадают с моделью Draft)
-        draft = Draft(
-            user_id=update.effective_user.id,
-            title=context.user_data.get('title'),
-            date=context.user_data.get('date'),
-            time_start=context.user_data.get('time_start'),
-            time_end=context.user_data.get('time_end'),
-            place_name=context.user_data.get('place_name'),
-            text=context.user_data.get('text'),
-            contact=context.user_data.get('contact'),
-            place_url=context.user_data.get('place_url'),
-            image=context.user_data.get('image'),
+        # Обновляем открытый черновик либо создаём новый (без лишних копий)
+        draft = _find_own_draft(
+            session, context.user_data.get('editing_draft_id'), update.effective_user.id
         )
-        session.add(draft)
+        if draft is None:
+            draft = Draft(user_id=update.effective_user.id)
+            session.add(draft)
+        _apply_fields(draft, context.user_data)
         session.commit()
-        logger.info("Пост сохранен и отправлен на согласование.")
+        logger.info(f"Пост сохранён (черновик {draft.id}) и отправлен на согласование.")
+
+        # Один активный цикл согласования на пост
+        approval = get_approval(session, draft.id)
+        if approval is not None and approval.status != STATUS_DECLINED:
+            await update.effective_message.reply_text(
+                "Этот пост уже отправлен на согласование.", reply_markup=ReplyKeyboardRemove()
+            )
+            return
+        if approval is not None:
+            # Отклонён: правки внесены — начинаем новый цикл согласования
+            reset_declined(session, draft.id)
 
         # Отправка сообщения в чат согласования (уникальная логика из callbacks.py:
-        # отправка фото и клавиатура выбора ответственного)
-        review_text = build_post_summary(context.user_data, heading="📋 *Новый пост для согласования:*")
+        # отправка фото и клавиатура выбора ответственного).
+        # Формат — общий send_post (медиа-группа поддерживается).
         # Автор поста — из сохранённой записи draft.user_id
-        review_text += f"*Автор поста:* {draft.user_id}\n"
-
-        image_file_id = context.user_data.get('image')
-        if image_file_id:
-            await context.bot.send_photo(
-                chat_id=REVIEW_CHAT_ID,
-                photo=image_file_id,
-                caption=review_text,
-                parse_mode='MarkdownV2'
-            )
-        else:
-            await context.bot.send_message(
-                chat_id=REVIEW_CHAT_ID,
-                text=review_text,
-                parse_mode='MarkdownV2'
-            )
+        await send_post(
+            context.bot,
+            REVIEW_CHAT_ID,
+            draft_to_post_data(draft),
+            get_draft_photos(draft),
+            heading="📋 *Новый пост для согласования:*",
+            extra_lines=f"*Автор поста:* {draft.user_id}\n",
+        )
 
         # Клавиатура выбора ответственного: в callback_data передаём id поста,
         # чтобы ответственный и данные поста определялись из БД, а не из
@@ -452,21 +729,24 @@ async def handle_edit(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int
 async def process_edit(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     """
     Обрабатывает ввод пользователя при редактировании поля.
+    После успешного изменения показывает актуальное превью поста
+    (устаревший обзор не должен висеть после правок).
     """
     field = context.user_data.get('edit_field')
-    text = update.effective_message.text
+    text = update.effective_message.text or ''
 
     logger.info(f"Пользователь редактирует поле '{field}' с вводом: {text}")
 
     if text.lower() == 'пропустить':
         if field == 'image':
             context.user_data['image'] = None
-            await update.effective_message.reply_text("Картинка не добавлена.", reply_markup=get_post_actions_keyboard())
+            context.user_data['photos'] = []
+            context.user_data.pop('pending_media', None)
             logger.info("Пользователь пропустил добавление изображения при редактировании.")
-        else:
+        elif field:
             context.user_data[field] = 'Не указано'
-            await update.effective_message.reply_text(f"Поле '{field}' обновлено.", reply_markup=get_post_actions_keyboard())
             logger.info(f"Пользователь пропустил обновление поля '{field}'.")
+        await review_post(update, context)
         # Возвращаемся в POST_CREATION: кнопки действий должны остаться рабочими
         return POST_CREATION
 
@@ -488,8 +768,30 @@ async def process_edit(update: Update, context: ContextTypes.DEFAULT_TYPE) -> in
 
     if field == 'image':
         if update.effective_message.photo:
-            context.user_data['image'] = update.effective_message.photo[-1].file_id
-            await update.effective_message.reply_text("Картинка обновлена.", reply_markup=get_post_actions_keyboard())
+            file_id = update.effective_message.photo[-1].file_id
+            media_group_id = update.effective_message.media_group_id
+
+            # Продолжение начатого альбома — добавляем молча
+            if media_group_id and context.user_data.get('pending_media') == media_group_id:
+                context.user_data.setdefault('photos', []).append(file_id)
+                return EDIT_FIELD
+
+            # Новый альбом — собираем до нажатия «✅ Фото готово»
+            if media_group_id:
+                context.user_data['pending_media'] = media_group_id
+                context.user_data['photos'] = [file_id]
+                context.user_data['image'] = file_id
+                await update.effective_message.reply_text(
+                    "📷 Отправьте остальные фотографии альбома, затем нажмите «✅ Фото готово».",
+                    reply_markup=get_media_done_keyboard(),
+                )
+                logger.info(f"Начат сбор медиа-группы при редактировании: {media_group_id}.")
+                return EDIT_FIELD
+
+            # Одиночная фотография — как раньше: сразу обновляем и показываем превью
+            context.user_data['photos'] = [file_id]
+            context.user_data['image'] = file_id
+            context.user_data.pop('pending_media', None)
             logger.info("Пользователь обновил изображение.")
         else:
             await update.effective_message.reply_text(
@@ -510,10 +812,39 @@ async def process_edit(update: Update, context: ContextTypes.DEFAULT_TYPE) -> in
             'place_url': format_text
         }.get(field, lambda x: x)
         context.user_data[field] = formatter(text)
-        await update.effective_message.reply_text(f"Поле '{field}' обновлено.", reply_markup=get_post_actions_keyboard())
         logger.info(f"Пользователь обновил поле '{field}'.")
 
-    # Остаёмся в диалоге, чтобы пользователь мог сохранить/отправить пост после редактирования
+    # Остаёмся в диалоге: превью с актуальными значениями + кнопки действий
+    await review_post(update, context)
+    return POST_CREATION
+
+async def handle_skip_edit(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """
+    Кнопка «Пропустить» в режиме редактирования поля (callback 'skip'
+    в состоянии EDIT_FIELD — до этого она не обрабатывалась и «проваливалась»).
+    """
+    query = update.callback_query
+    await query.answer()
+    field = context.user_data.get('edit_field')
+    if field == 'image':
+        context.user_data['image'] = None
+        context.user_data['photos'] = []
+        context.user_data.pop('pending_media', None)
+    elif field:
+        context.user_data[field] = 'Не указано'
+    await review_post(update, context)
+    return POST_CREATION
+
+async def finish_photo_edit(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """
+    Кнопка «✅ Фото готово» при редактировании изображения альбомом.
+    """
+    query = update.callback_query
+    await query.answer()
+    if not await _finish_media_done(update, context):
+        return EDIT_FIELD
+    logger.info("Пользователь обновил изображения (медиа-группа).")
+    await review_post(update, context)
     return POST_CREATION
 
 async def cancel_creation(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
@@ -536,16 +867,21 @@ def post_creation_handlers() -> list:
                 # Обязательна как entry_point: только ConversationHandler умеет
                 # отслеживать состояние диалога.
                 MessageHandler(filters.Regex('^✏️ Создать пост$'), start_post_creation),
+                # Открытие существующего черновика в редакторе (кнопка в списке черновиков)
+                CallbackQueryHandler(start_edit_draft, pattern=r'^editdraft_\d+$'),
             ],
             states={
                 POST_CREATION: [
                     # Повторное нажатие кнопки mid-диалога начинает создание заново
                     MessageHandler(filters.Regex('^✏️ Создать пост$'), start_post_creation),
+                    MessageHandler(filters.PHOTO, handle_photo),
                     MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message),
-                    CallbackQueryHandler(handle_callback_query, pattern='^(skip|save_draft|send_for_approval|edit_post)$'),
+                    CallbackQueryHandler(handle_callback_query, pattern='^(skip|save_draft|send_for_approval|edit_post|media_done)$'),
                 ],
                 EDIT_FIELD: [
                     CallbackQueryHandler(handle_edit, pattern='^edit_.*$|^cancel_edit$'),
+                    CallbackQueryHandler(finish_photo_edit, pattern='^media_done$'),
+                    CallbackQueryHandler(handle_skip_edit, pattern='^skip$'),
                     MessageHandler(filters.PHOTO, process_edit),
                     MessageHandler(filters.TEXT & ~filters.COMMAND, process_edit),
                 ],

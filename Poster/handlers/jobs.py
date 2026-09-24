@@ -5,7 +5,7 @@ from datetime import time, timedelta, datetime
 from telegram.ext import ContextTypes
 from sqlalchemy.orm import Session
 from database import SessionLocal
-from models import Draft
+from models import Draft, PostApproval
 
 logger = logging.getLogger(__name__)
 
@@ -15,6 +15,10 @@ def sync_remove_old_drafts():
         cutoff = datetime.utcnow() - timedelta(days=30)
         old = session.query(Draft).filter(Draft.created_at < cutoff).all()
         for draft in old:
+            # Удаляем и запись согласования — иначе она «осиротеет» без поста
+            approval = session.query(PostApproval).filter(PostApproval.draft_id == draft.id).first()
+            if approval is not None:
+                session.delete(approval)
             session.delete(draft)
         session.commit()
         logger.info(f"Удалено {len(old)} старых черновиков.")

@@ -7,6 +7,7 @@ from telegram.ext import CallbackQueryHandler, ContextTypes
 from sqlalchemy.orm import Session
 from database import SessionLocal
 from models import Draft
+from approval import remove_draft
 
 def _h(value) -> str:
     """HTML-экранирование значения с защитой от None (поля в БД nullable)."""
@@ -25,6 +26,9 @@ def build_drafts_message(drafts: list) -> (str, InlineKeyboardMarkup):
             f"⏰ {_h(draft.time_start)} - {_h(draft.time_end)}\n"
             f"📍 {_h(draft.place_name)}\n\n"
         )
+        # editdraft_<id> — точка входа ConversationHandler (handlers/post_creation.py):
+        # черновик открывается в редакторе и обновляется без создания копии
+        keyboard.append([InlineKeyboardButton(f"✏️ Редактировать черновик {draft.id}", callback_data=f'editdraft_{draft.id}')])
         keyboard.append([InlineKeyboardButton(f"❌ Удалить черновик {draft.id}", callback_data=f'delete_{draft.id}')])
     keyboard.append([InlineKeyboardButton("↩️ Главное меню", callback_data='main_menu')])
     return message_text, InlineKeyboardMarkup(keyboard)
@@ -39,18 +43,29 @@ async def view_drafts(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     await message.reply_text(text, parse_mode='HTML', reply_markup=markup)
 
 async def delete_draft(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """
+    Удаление черновика. Активное согласование (assigned/approved/published)
+    запрещает удаление — иначе «осиротеют» записи и уведомления ответственного.
+    Отклонённый пост удаляется вместе со своей записью согласования.
+    """
     query = update.callback_query
     await query.answer()
     draft_id = int(query.data.split('_')[1])
     session: Session = SessionLocal()
-    draft = session.query(Draft).filter(Draft.id == draft_id, Draft.user_id == query.from_user.id).first()
-    if draft:
-        session.delete(draft)
-        session.commit()
-        text = f"Черновик {draft_id} удалён."
-    else:
-        text = "Черновик не найден."
-    session.close()
+    draft = session.query(Draft).filter(Draft.id == draft_id).first()
+    try:
+        outcome = remove_draft(session, draft, query.from_user.id)
+        texts = {
+            'ok': f"Черновик {draft_id} удалён.",
+            'not_found': "Черновик не найден.",
+            'blocked': "Черновик нельзя удалить: пост находится на согласовании.",
+        }
+        text = texts.get(outcome, "Черновик не найден.")
+    except Exception as e:
+        session.rollback()
+        text = "Ошибка при удалении черновика."
+    finally:
+        session.close()
     await query.edit_message_text(text)
     await view_drafts(update, context)
 
