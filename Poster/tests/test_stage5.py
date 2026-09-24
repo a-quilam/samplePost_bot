@@ -14,7 +14,8 @@
   дедупликация промптов альбома, единая клавиатура главного меню;
 - errors.py: уведомление пользователя об ошибке + троттлинг,
   подавление «message is not modified»;
-- порядок регистрации обработчиков (build_application).
+- порядок регистрации обработчиков (build_application);
+- список черновиков: сортировка, лимит страницы, пагинация draftpage_.
 
 Запуск из каталога Poster:
     python -m unittest discover -s tests -v
@@ -51,6 +52,12 @@ try:
     import bot as bot_module
     import handlers.post_creation as post_creation_module
     from handlers.approval import notify_responsible
+    from handlers.drafts import (
+        DRAFTS_PAGE_SIZE,
+        build_drafts_message,
+        fetch_user_drafts,
+        handle_drafts_page,
+    )
     from handlers.main_menu import help_command, main_menu_keyboard
     from handlers.post_creation import (
         POST_CREATION,
@@ -873,6 +880,162 @@ class HandlerOrderTests(unittest.TestCase):
                 "view_drafts_and_exit",
                 f"в состоянии {state} «Черновики» перехватывает {matched[0].callback}",
             )
+
+
+@unittest.skipIf(
+    HANDLERS_IMPORT_ERROR is not None,
+    f"импорт обработчиков недоступен: {HANDLERS_IMPORT_ERROR}",
+)
+class DraftsPaginationTests(unittest.TestCase):
+    """Список черновиков: сортировка, лимит страницы, навигация."""
+
+    def _seed(self, count: int, user_id: int = 111):
+        session_factory, engine = make_session_factory()
+        session = session_factory()
+        try:
+            for i in range(count):
+                session.add(Draft(user_id=user_id, title=f"Пост {i}"))
+            session.commit()
+        finally:
+            session.close()
+        return session_factory, engine
+
+    @staticmethod
+    def _make_draft(draft_id: int):
+        return SimpleNamespace(
+            id=draft_id,
+            title=f"Заголовок {draft_id}",
+            date="01.01.2026",
+            time_start="10:00",
+            time_end="12:00",
+            place_name="Зал",
+        )
+
+    def test_first_page_newest_first_and_limited(self):
+        session_factory, engine = self._seed(20)
+        session = session_factory()
+        try:
+            drafts, total = fetch_user_drafts(session, 111, 0)
+            self.assertEqual(total, 20)
+            self.assertEqual(len(drafts), DRAFTS_PAGE_SIZE)
+            # Новые сверху: id 20..6
+            self.assertEqual([d.id for d in drafts], list(range(20, 5, -1)))
+        finally:
+            session.close()
+            engine.dispose()
+
+    def test_second_page_returns_rest(self):
+        session_factory, engine = self._seed(20)
+        session = session_factory()
+        try:
+            drafts, total = fetch_user_drafts(session, 111, DRAFTS_PAGE_SIZE)
+            self.assertEqual(total, 20)
+            self.assertEqual([d.id for d in drafts], [5, 4, 3, 2, 1])
+        finally:
+            session.close()
+            engine.dispose()
+
+    def test_out_of_range_page_is_empty(self):
+        session_factory, engine = self._seed(3)
+        session = session_factory()
+        try:
+            drafts, total = fetch_user_drafts(session, 111, 100)
+            self.assertEqual(drafts, [])
+            self.assertEqual(total, 3)
+        finally:
+            session.close()
+            engine.dispose()
+
+    def test_other_users_drafts_not_counted(self):
+        session_factory, engine = make_session_factory()
+        session = session_factory()
+        try:
+            session.add(Draft(user_id=111, title="Свой 1"))
+            session.add(Draft(user_id=111, title="Свой 2"))
+            session.add(Draft(user_id=999, title="Чужой"))
+            session.commit()
+            drafts, total = fetch_user_drafts(session, 111, 0)
+            self.assertEqual(total, 2)
+            self.assertEqual({d.user_id for d in drafts}, {111})
+        finally:
+            session.close()
+            engine.dispose()
+
+    def test_build_message_note_and_forward_button(self):
+        drafts = [self._make_draft(i) for i in range(1, DRAFTS_PAGE_SIZE + 1)]
+        text, markup = build_drafts_message(drafts, offset=0, total=20)
+        datas = [b.callback_data for row in markup.inline_keyboard for b in row]
+        self.assertIn("из 20", text)
+        self.assertIn("draftpage_15", datas)  # вперёд на вторую страницу
+        self.assertNotIn("draftpage_0", datas)  # «назад» с первой страницы не нужно
+        self.assertIn("main_menu", datas)
+
+    def test_build_message_back_button_on_later_page(self):
+        drafts = [self._make_draft(i) for i in range(16, 21)]
+        text, markup = build_drafts_message(drafts, offset=15, total=20)
+        datas = [b.callback_data for row in markup.inline_keyboard for b in row]
+        self.assertIn("draftpage_0", datas)  # назад — на первую страницу
+        self.assertNotIn("draftpage_20", datas)  # вперёд за конец списка не нужно
+
+    def test_build_without_total_has_no_navigation(self):
+        # Обратная совместимость: вызов без total — страница единственная
+        drafts = [self._make_draft(1), self._make_draft(2)]
+        text, markup = build_drafts_message(drafts)
+        datas = [b.callback_data for row in markup.inline_keyboard for b in row]
+        self.assertFalse(any(d.startswith("draftpage_") for d in datas))
+        self.assertNotIn("листайте", text)
+
+    def test_page_handler_renders_requested_page(self):
+        session_factory, engine = self._seed(20)
+        import handlers.drafts as drafts_module
+
+        orig = drafts_module.SessionLocal
+        drafts_module.SessionLocal = session_factory
+        try:
+            query = SimpleNamespace(
+                data="draftpage_15",
+                answer=AsyncMock(),
+                from_user=SimpleNamespace(id=111),
+                edit_message_text=AsyncMock(),
+            )
+            update = SimpleNamespace(callback_query=query)
+
+            asyncio.run(handle_drafts_page(update, SimpleNamespace(user_data={})))
+
+            query.answer.assert_awaited()
+            query.edit_message_text.assert_awaited()
+            text_sent = query.edit_message_text.await_args.args[0]
+            self.assertIn("из 20", text_sent)
+            markup = query.edit_message_text.await_args.kwargs["reply_markup"]
+            datas = [b.callback_data for row in markup.inline_keyboard for b in row]
+            self.assertIn("draftpage_0", datas)
+        finally:
+            drafts_module.SessionLocal = orig
+            engine.dispose()
+
+    def test_page_handler_clamps_to_first_when_page_emptied(self):
+        session_factory, engine = self._seed(20)
+        import handlers.drafts as drafts_module
+
+        orig = drafts_module.SessionLocal
+        drafts_module.SessionLocal = session_factory
+        try:
+            query = SimpleNamespace(
+                data="draftpage_100",
+                answer=AsyncMock(),
+                from_user=SimpleNamespace(id=111),
+                edit_message_text=AsyncMock(),
+            )
+            update = SimpleNamespace(callback_query=query)
+
+            asyncio.run(handle_drafts_page(update, SimpleNamespace(user_data={})))
+
+            text_sent = query.edit_message_text.await_args.args[0]
+            # Страница опустела → возврат к первой (новейшие черновики сверху)
+            self.assertIn("Пост 19", text_sent)
+        finally:
+            drafts_module.SessionLocal = orig
+            engine.dispose()
 
 
 if __name__ == "__main__":
