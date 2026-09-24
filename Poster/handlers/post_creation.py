@@ -206,16 +206,67 @@ def _find_own_draft(session: Session, draft_id, user_id: int):
     )
 
 
+def _persist_wip(user_data: dict, user_id: int) -> int | None:
+    """
+    Сохраняет незавершённый пост (work-in-progress) в черновик перед выходом
+    из диалога: обновляет открытый черновик или создаёт новый.
+
+    Пустой пост не сохраняется. Возвращает id черновика либо None при сбое БД.
+    """
+    if is_post_empty(_post_fields(user_data)):
+        return None
+    session: Session = SessionLocal()
+    try:
+        draft = _find_own_draft(session, user_data.get("editing_draft_id"), user_id)
+        if draft is None:
+            draft = Draft(user_id=user_id)
+            session.add(draft)
+        _apply_fields(draft, user_data)
+        session.commit()
+        logger.info(f"Незавершённый пост сохранён в черновик #{draft.id}.")
+        return draft.id
+    except Exception as e:
+        session.rollback()
+        logger.error(f"Не удалось сохранить незавершённый пост: {e}")
+        return None
+    finally:
+        session.close()
+
+
+async def _save_wip_before_exit(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> None:
+    """
+    Выход из диалога без потери данных: если пост не пуст — сохраняем его
+    в черновики и очищаем user_data; при сбое БД данные остаются в памяти,
+    чтобы их можно было сохранить вручную.
+    """
+    user_data = ctx.data(context)
+    if is_post_empty(_post_fields(user_data)):
+        _clear_post_data(user_data)
+        return
+    draft_id = _persist_wip(user_data, ctx.user(update).id)
+    if draft_id is None:
+        await ctx.message(update).reply_text(
+            "Не удалось сохранить незавершённый пост автоматически — "
+            "кнопка «📄 Сохранить в черновики» сохранит его вручную."
+        )
+        return
+    await ctx.message(update).reply_text(
+        f"Незавершённый пост сохранён в черновики (№{draft_id})."
+    )
+    _clear_post_data(user_data)
+
+
 async def start_post_creation(
     update: Update, context: ContextTypes.DEFAULT_TYPE
 ) -> int:
     """
-    Запускает процесс создания поста.
+    Запускает процесс создания поста. Если в user_data остался незавершённый
+    пост (предыдущий диалог не завершён) — он сохраняется в черновики.
     """
     logger.info("Начало создания поста.")
-    _clear_post_data(
-        ctx.data(context)
-    )  # новый пост не должен наследовать старые данные
+    await _save_wip_before_exit(update, context)
     ctx.data(context)["current_step"] = 0  # Инициализация текущего шага
     await prompt_step(update, context)
     return POST_CREATION
@@ -236,6 +287,9 @@ async def start_edit_draft(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         draft_id = int((query.data or "")[len("editdraft_") :])
     except (TypeError, ValueError):
         return ConversationHandler.END
+
+    # Открытие другого черновика: незавершённый пост не теряем
+    await _save_wip_before_exit(update, context)
 
     session: Session = SessionLocal()
     try:
@@ -433,8 +487,7 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> in
         await review_post(update, context)
         return POST_CREATION
 
-    # Фото вне шага изображения: повторяем текущий запрос (или ничего —
-    # на экране превью изменение фото делается через «Редактировать»).
+    # Фото вне шага изображения: НЕ теряем молча — объясняем, где менять фото.
     # Альбом отвечаем ОДНИМ сообщением: без дедупликации каждое фото
     # альбома породило бы свой промпт (спам в чат).
     if media_group_id:
@@ -442,9 +495,17 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> in
             return POST_CREATION
         user_data["last_rejected_media"] = media_group_id
     if step_index < len(POST_STEPS):
+        step = POST_STEPS[step_index]
         await message.reply_text(
-            POST_STEPS[step_index]["prompt"],
+            f"Фото можно добавить на шаге «Изображение». "
+            f"Сейчас — шаг {step_index + 1} из {len(POST_STEPS)} ({step['label']}): "
+            f"{step['prompt']}",
             reply_markup=get_skip_keyboard(),
+        )
+    else:
+        # На экране превью — путь к замене фото понятен
+        await message.reply_text(
+            "Изображение можно заменить через «✏️ Редактировать» → «Изображение»."
         )
     return POST_CREATION
 
@@ -711,6 +772,9 @@ async def save_draft(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
             session.add(draft)
         _apply_fields(draft, ctx.data(context))
         session.commit()
+        # После успешного сохранения данные чистим: повторные выходы не создадут
+        # дубль-черновик, а пост уже надёжно в БД
+        _clear_post_data(ctx.data(context))
         if is_update:
             await ctx.message(update).reply_text(
                 f"Черновик {draft.id} обновлён.", reply_markup=main_menu_keyboard()
@@ -873,6 +937,15 @@ async def process_edit(update: Update, context: ContextTypes.DEFAULT_TYPE) -> in
         await review_post(update, context)
         return POST_CREATION
 
+    if ctx.message(update).photo and field != "image":
+        # Фото прислали, пока редактировали другое поле: значение НЕ трогаем
+        # (иначе поле стёрлось бы пустой строкой) — объясняем порядок действий
+        await ctx.message(update).reply_text(
+            "Здесь ожидается текст. Изображение меняется в поле «Изображение».",
+            reply_markup=get_skip_keyboard(),
+        )
+        return EDIT_FIELD
+
     if text.lower() == "пропустить":
         if field == "image":
             ctx.data(context)["image"] = None
@@ -995,8 +1068,9 @@ async def finish_photo_edit(update: Update, context: ContextTypes.DEFAULT_TYPE) 
 
 async def cancel_creation(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     """
-    Отменяет процесс создания поста.
+    Отменяет процесс создания поста (незавершённый пост сохраняется).
     """
+    await _save_wip_before_exit(update, context)
     await ctx.message(update).reply_text(
         "Создание поста отменено.", reply_markup=main_menu_keyboard()
     )
@@ -1008,11 +1082,12 @@ async def view_drafts_and_exit(
     update: Update, context: ContextTypes.DEFAULT_TYPE
 ) -> int:
     """
-    Reply-кнопка «📝 Черновики» ВНУТРИ диалога: показывает список черновиков
-    и завершает диалог — состояние не должно «висеть» после перехода
-    в другой раздел (иначе следующий текст пользователя уходил бы
-    на шаг диалога, который пользователь уже покинул).
+    Reply-кнопка «📝 Черновики» ВНУТРИ диалога: незавершённый пост сохраняется,
+    показывается список черновиков и диалог завершается — состояние не должно
+    «висеть» после перехода в другой раздел (иначе следующий текст пользователя
+    уходил бы на шаг диалога, который пользователь уже покинул).
     """
+    await _save_wip_before_exit(update, context)
     await view_drafts(update, context)
     return ConversationHandler.END
 

@@ -8,7 +8,12 @@
 - сбой отправки не теряет введённые данные;
 - в проекте больше нет активных путей отправки поста
   в review/publication chat (поиск источников + маршрутизация кнопок);
-- callback'и диалога и глобальных кнопок не перехватывают друг друга.
+- callback'и диалога и глобальных кнопок не перехватывают друг друга;
+- пропуск полей: пустые поля не видны в сводке, заглушек нет;
+- редактирование: русские названия полей в меню и промпте;
+- черновики: незавершённый пост сохраняется при выходах, открытие
+  другого черновика не теряет правки, обновление без копий;
+- фото: подсказка вне шага изображения, защита поля от фото.
 
 Запуск из каталога Poster:
     python -m unittest discover -s tests -v
@@ -22,6 +27,9 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
+from sqlalchemy import create_engine
+from sqlalchemy.orm import sessionmaker
+
 POSTER_DIR = Path(__file__).resolve().parent.parent
 
 # Импорт обработчиков требует config (.env с токеном) и telegram —
@@ -31,15 +39,23 @@ try:
 
     import bot as bot_module
     import config
+    from base import Base
     from handlers.post_creation import (
         EDIT_FIELD,
+        POST_CREATION,
         POST_STEPS,
+        cancel_creation,
         finish_post,
         handle_callback_query,
         handle_edit,
         handle_message,
         handle_photo,
+        process_edit,
+        start_edit_draft,
+        start_post_creation,
+        view_drafts_and_exit,
     )
+    from models import Draft
     from utils.formatter import escape_markdown
 
     HANDLERS_IMPORT_ERROR = None
@@ -123,6 +139,13 @@ def drive_wizard(user_data, bot):
     photo_update = make_message_update(photo=[SimpleNamespace(file_id="photo-1")])
     asyncio.run(handle_photo(photo_update, context))
     return context
+
+
+def make_session_factory():
+    """Сессия над БД в памяти (отдельный engine, к post_bot.db не подключается)."""
+    engine = create_engine("sqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    return sessionmaker(bind=engine), engine
 
 
 @unittest.skipIf(
@@ -295,6 +318,217 @@ class EditFlowTests(unittest.TestCase):
         self.assertIn("«Время начала»", prompt)
         self.assertNotIn("time_start", prompt)  # внутренний ключ не показывается
         self.assertEqual(result, EDIT_FIELD)  # остаёмся в режиме редактирования
+
+
+@unittest.skipIf(
+    HANDLERS_IMPORT_ERROR is not None,
+    f"импорт обработчиков недоступен: {HANDLERS_IMPORT_ERROR}",
+)
+class DraftLifecycleTests(unittest.TestCase):
+    """Черновики: сохранение при выходах, открытие, обновление без копий."""
+
+    def setUp(self):
+        import handlers.drafts as drafts_module
+        import handlers.post_creation as post_creation_module
+
+        self.drafts_module = drafts_module
+        self.post_creation_module = post_creation_module
+        self._orig_session_local = (
+            post_creation_module.SessionLocal,
+            drafts_module.SessionLocal,
+        )
+        self.session_factory, self.engine = make_session_factory()
+        post_creation_module.SessionLocal = self.session_factory
+        drafts_module.SessionLocal = self.session_factory
+
+    def tearDown(self):
+        self.post_creation_module.SessionLocal = self._orig_session_local[0]
+        self.drafts_module.SessionLocal = self._orig_session_local[1]
+        self.engine.dispose()
+
+    def _all_drafts(self):
+        session = self.session_factory()
+        try:
+            return session.query(Draft).order_by(Draft.id).all()
+        finally:
+            session.close()
+
+    @staticmethod
+    def _replies(update):
+        return [
+            call.args[0] for call in update.effective_message.reply_text.await_args_list
+        ]
+
+    def test_drafts_button_saves_work_in_progress(self):
+        user_data = {
+            "current_step": 3,
+            "title": "Недописанный пост",
+            "date": "25.12.2026",
+        }
+        context = SimpleNamespace(user_data=user_data, bot=RecordingBot())
+        update = make_message_update("")
+
+        result = asyncio.run(view_drafts_and_exit(update, context))
+
+        self.assertEqual(result, ConversationHandler.END)
+        drafts = self._all_drafts()
+        self.assertEqual(len(drafts), 1, "незавершённый пост должен быть сохранён")
+        self.assertEqual(drafts[0].user_id, 7)
+        self.assertEqual(drafts[0].title, "Недописанный пост")
+        self.assertEqual(drafts[0].date, "25.12.2026")
+        # данные очищены, пользователь предупреждён
+        self.assertNotIn("title", user_data)
+        self.assertTrue(
+            any("сохранён в черновики" in text for text in self._replies(update))
+        )
+
+    def test_cancel_saves_work_in_progress(self):
+        user_data = {"current_step": 1, "title": "Отменённый пост"}
+        context = SimpleNamespace(user_data=user_data, bot=RecordingBot())
+
+        result = asyncio.run(cancel_creation(make_message_update(""), context))
+
+        self.assertEqual(result, ConversationHandler.END)
+        drafts = self._all_drafts()
+        self.assertEqual(len(drafts), 1)
+        self.assertEqual(drafts[0].title, "Отменённый пост")
+        self.assertNotIn("title", user_data)
+
+    def test_restart_create_saves_previous_wip(self):
+        user_data = {"current_step": 1, "title": "Прежний ВИП"}
+        context = SimpleNamespace(user_data=user_data, bot=RecordingBot())
+
+        asyncio.run(start_post_creation(make_message_update(""), context))
+
+        drafts = self._all_drafts()
+        self.assertEqual(len(drafts), 1)
+        self.assertEqual(drafts[0].title, "Прежний ВИП")
+        # новый пост начат с чистого листа
+        self.assertEqual(user_data.get("current_step"), 0)
+        self.assertNotIn("title", user_data)
+
+    def test_empty_wip_is_not_saved(self):
+        user_data = {"current_step": 0}
+        context = SimpleNamespace(user_data=user_data, bot=RecordingBot())
+        update = make_message_update("")
+
+        asyncio.run(view_drafts_and_exit(update, context))
+
+        self.assertEqual(self._all_drafts(), [])
+        self.assertFalse(
+            any("сохранён" in text for text in self._replies(update)),
+            "о пустом посте нечего сообщать",
+        )
+
+    def test_opening_another_draft_saves_previous_wip(self):
+        session = self.session_factory()
+        try:
+            draft_a = Draft(user_id=7, title="Черновик A")
+            draft_b = Draft(user_id=7, title="Черновик B")
+            session.add_all([draft_a, draft_b])
+            session.commit()
+            a_id, b_id = draft_a.id, draft_b.id
+        finally:
+            session.close()
+
+        # открыт черновик A, в нём есть несохранённые правки
+        user_data = {
+            "current_step": 9,
+            "editing_draft_id": a_id,
+            "title": "Правки в A",
+            "date": None,
+        }
+        context = SimpleNamespace(user_data=user_data, bot=RecordingBot())
+
+        result = asyncio.run(
+            start_edit_draft(make_callback_update(f"editdraft_{b_id}"), context)
+        )
+
+        self.assertEqual(result, POST_CREATION)
+        drafts = {d.id: d for d in self._all_drafts()}
+        self.assertEqual(len(drafts), 2, "копий быть не должно")
+        self.assertEqual(drafts[a_id].title, "Правки в A", "правки A потеряны")
+        # user_data показывает черновик B
+        self.assertEqual(user_data.get("title"), "Черновик B")
+        self.assertEqual(user_data.get("editing_draft_id"), b_id)
+
+    def test_legacy_placeholder_opens_as_empty_field(self):
+        session = self.session_factory()
+        try:
+            draft = Draft(user_id=7, title="Не указано", date="15.09.2026")
+            session.add(draft)
+            session.commit()
+            draft_id = draft.id
+        finally:
+            session.close()
+
+        user_data = {}
+        context = SimpleNamespace(user_data=user_data, bot=RecordingBot())
+
+        asyncio.run(
+            start_edit_draft(make_callback_update(f"editdraft_{draft_id}"), context)
+        )
+
+        self.assertIsNone(user_data.get("title"), "«Не указано» = пустое поле")
+        self.assertEqual(user_data.get("date"), "15.09.2026")
+
+    def test_save_draft_clears_data_and_no_duplicate_on_exit(self):
+        user_data = {"current_step": 9, "title": "Готовый черновик"}
+        context = SimpleNamespace(user_data=user_data, bot=RecordingBot())
+
+        asyncio.run(handle_callback_query(make_callback_update("save_draft"), context))
+
+        self.assertEqual(len(self._all_drafts()), 1)
+        self.assertNotIn("title", user_data, "после сохранения данные чистятся")
+
+        # повторный выход из диалога не создаёт второй (пустой) черновик
+        asyncio.run(view_drafts_and_exit(make_message_update(""), context))
+        self.assertEqual(len(self._all_drafts()), 1)
+
+
+@unittest.skipIf(
+    HANDLERS_IMPORT_ERROR is not None,
+    f"импорт обработчиков недоступен: {HANDLERS_IMPORT_ERROR}",
+)
+class PhotoGuardTests(unittest.TestCase):
+    """Фото вне шага — подсказка; фото при правке другого поля — не стирает."""
+
+    def test_photo_outside_image_step_gives_hint(self):
+        user_data = {"current_step": 0, "title": "Концерт"}  # шаг «Заголовок»
+        context = SimpleNamespace(user_data=user_data, bot=RecordingBot())
+        update = make_message_update(photo=[SimpleNamespace(file_id="f1")])
+
+        result = asyncio.run(handle_photo(update, context))
+
+        self.assertEqual(result, POST_CREATION)
+        reply = update.effective_message.reply_text.await_args.args[0]
+        self.assertIn("Изображение", reply)
+        # поле не тронуто, шаг не продвинут, фото не потеряно молча
+        self.assertEqual(user_data["title"], "Концерт")
+        self.assertEqual(user_data["current_step"], 0)
+        self.assertNotIn("photos", user_data)
+
+    def test_photo_at_preview_points_to_edit_button(self):
+        user_data = {"current_step": len(POST_STEPS)}
+        context = SimpleNamespace(user_data=user_data, bot=RecordingBot())
+        update = make_message_update(photo=[SimpleNamespace(file_id="f1")])
+
+        asyncio.run(handle_photo(update, context))
+
+        reply = update.effective_message.reply_text.await_args.args[0]
+        self.assertIn("Редактировать", reply)
+
+    def test_photo_during_other_field_edit_keeps_value(self):
+        user_data = {"edit_field": "title", "title": "Концерт"}
+        context = SimpleNamespace(user_data=user_data, bot=RecordingBot())
+        update = make_message_update(photo=[SimpleNamespace(file_id="f1")])
+
+        result = asyncio.run(process_edit(update, context))
+
+        self.assertEqual(result, EDIT_FIELD)
+        self.assertEqual(user_data["title"], "Концерт", "поле не должно стираться")
+        reply = update.effective_message.reply_text.await_args.args[0]
+        self.assertIn("Изображение", reply)
 
 
 @unittest.skipIf(
