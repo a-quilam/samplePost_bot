@@ -265,7 +265,7 @@ class PostSummaryTests(unittest.TestCase):
 
 
 class MigrationTests(unittest.TestCase):
-    """_migrate: добавление колонки photos в существующую таблицу без потери данных."""
+    """_migrate: добавление колонок photos и updated_at без потери данных."""
 
     OLD_DRAFTS_DDL = """
         CREATE TABLE drafts (
@@ -324,6 +324,24 @@ class MigrationTests(unittest.TestCase):
             _migrate(engine)  # повторный вызов не должен падать
             columns = {c["name"] for c in inspect(engine).get_columns("drafts")}
             self.assertIn("photos", columns)
+            self.assertIn("updated_at", columns)
+        finally:
+            engine.dispose()
+
+    def test_migrate_adds_updated_at_column(self):
+        # A2: у существующих записей колонка появляется как NULL —
+        # TTL для них продолжает считать срок по created_at
+        engine = self.make_old_db()
+        try:
+            _migrate(engine)
+            columns = {c["name"] for c in inspect(engine).get_columns("drafts")}
+            self.assertIn("updated_at", columns)
+            with engine.connect() as connection:
+                row = connection.execute(
+                    text("SELECT title, updated_at FROM drafts WHERE id = 1")
+                ).fetchone()
+            self.assertEqual(row.title, "Старый пост")
+            self.assertIsNone(row.updated_at)
         finally:
             engine.dispose()
 

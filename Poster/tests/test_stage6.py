@@ -110,12 +110,12 @@ class RecordingBot:
         self._record("media_group", kwargs)
 
 
-def make_message_update(text=None, *, photo=None):
+def make_message_update(text=None, *, photo=None, media_group_id=None):
     """Update, имитирующий сообщение пользователя (текст или фото)."""
     message = SimpleNamespace(
         text=text,
         photo=photo,
-        media_group_id=None,
+        media_group_id=media_group_id,
         reply_text=AsyncMock(),
     )
     return SimpleNamespace(
@@ -622,6 +622,100 @@ class PhotoGuardTests(unittest.TestCase):
         self.assertEqual(user_data["title"], "Концерт", "поле не должно стираться")
         reply = update.effective_message.reply_text.await_args.args[0]
         self.assertIn("Изображение", reply)
+
+
+@unittest.skipIf(
+    HANDLERS_IMPORT_ERROR is not None,
+    f"импорт обработчиков недоступен: {HANDLERS_IMPORT_ERROR}",
+)
+class AlbumRaceTests(unittest.TestCase):
+    """
+    A1 — гонка альбома: фотографии принимаются только пока активен шаг
+    изображения; после «✅ Фото готово» запоздавшие фото не меняют данные
+    поста, поэтому превью показывает ровно те фото, что уйдут в готовый пост.
+    """
+
+    @staticmethod
+    def _image_step() -> int:
+        return next(
+            index for index, step in enumerate(POST_STEPS) if step["key"] == "image"
+        )
+
+    @staticmethod
+    def _photo(file_id, media_group_id):
+        return make_message_update(
+            photo=[SimpleNamespace(file_id=file_id)], media_group_id=media_group_id
+        )
+
+    @staticmethod
+    def _calls_of(bot, kind):
+        return [call for call in bot.calls if call["type"] == kind]
+
+    def test_album_collects_all_photos_until_done(self):
+        # Нормальный альбом: все фото ДО «Фото готово» — в посте, шаг завершён
+        bot = RecordingBot()
+        user_data = {"current_step": self._image_step()}
+        context = SimpleNamespace(user_data=user_data, bot=bot)
+
+        first = self._photo("a-1", "mg-1")
+        second = self._photo("a-2", "mg-1")
+        third = self._photo("a-3", "mg-1")
+        asyncio.run(handle_photo(first, context))
+        asyncio.run(handle_photo(second, context))
+        asyncio.run(handle_photo(third, context))
+
+        self.assertEqual(user_data["photos"], ["a-1", "a-2", "a-3"])
+        # подтверждение сбора — одно на альбом, без спама на каждое фото
+        first_reply = first.effective_message.reply_text
+        first_reply.assert_awaited_once()
+        second.effective_message.reply_text.assert_not_awaited()
+        third.effective_message.reply_text.assert_not_awaited()
+
+        asyncio.run(handle_callback_query(make_callback_update("media_done"), context))
+
+        self.assertEqual(user_data["current_step"], self._image_step() + 1)
+        previews = self._calls_of(bot, "media_group")
+        self.assertEqual(len(previews), 1, "превью должно быть отправлено")
+        self.assertEqual(
+            [media.media for media in previews[0]["media"]],
+            ["a-1", "a-2", "a-3"],
+        )
+
+    def test_late_album_photo_after_done_does_not_change_post(self):
+        # Гонка: пользователь нажал «Фото готово», превью уже показано,
+        # а фото альбома ещё доходят — запоздавшие НЕ меняют данные поста.
+        bot = RecordingBot()
+        user_data = {"current_step": self._image_step(), "title": "Концерт"}
+        context = SimpleNamespace(user_data=user_data, bot=bot)
+
+        asyncio.run(handle_photo(self._photo("a-1", "mg-1"), context))
+        asyncio.run(handle_callback_query(make_callback_update("media_done"), context))
+        self.assertEqual(len(self._calls_of(bot, "photo")), 1, "превью с одним фото")
+
+        late = self._photo("a-2", "mg-1")
+        asyncio.run(handle_photo(late, context))
+        late_again = self._photo("a-3", "mg-1")
+        asyncio.run(handle_photo(late_again, context))
+
+        self.assertEqual(
+            user_data["photos"], ["a-1"], "запоздавшие фото не попадают в пост"
+        )
+        # пользователь не получает тишины: подсказка + дедуп по альбому
+        late_reply = late.effective_message.reply_text
+        late_reply.assert_awaited_once()
+        self.assertIn("Редактировать", late_reply.await_args.args[0])
+        late_again.effective_message.reply_text.assert_not_awaited()
+
+        asyncio.run(handle_callback_query(make_callback_update("finish"), context))
+
+        photo_calls = self._calls_of(bot, "photo")
+        self.assertEqual(len(photo_calls), 2, "превью и готовый пост")
+        preview, final = photo_calls
+        self.assertEqual(preview["photo"], final["photo"], "preview == final: фото")
+        self.assertEqual(
+            preview["caption"], final["caption"], "preview == final: текст"
+        )
+        self.assertEqual(preview["parse_mode"], final["parse_mode"])
 
 
 class _InMemoryDbMixin:

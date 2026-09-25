@@ -458,9 +458,16 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> in
         step_index < len(POST_STEPS) and POST_STEPS[step_index]["key"] == "image"
     )
 
-    # Продолжение уже начатой медиа-группы (в т.ч. запоздавшие фотографии) —
-    # добавляем молча, не спамим подтверждениями на каждое фото.
-    if media_group_id and user_data.get("pending_media") == media_group_id:
+    # Продолжение уже начатой медиа-группы — только пока активен шаг
+    # изображения: добавляем молча, не спамим подтверждениями на каждое фото.
+    # После «✅ Фото готово» (шаг завершён) запоздавшие фото того же альбома
+    # НЕ меняют данные поста — иначе финальный пост содержал бы больше фото,
+    # чем показано в превью. Такие фото уходят в общую ветку отклонения ниже.
+    if (
+        media_group_id
+        and at_image_step
+        and user_data.get("pending_media") == media_group_id
+    ):
         user_data.setdefault("photos", []).append(message.photo[-1].file_id)
         return POST_CREATION
 

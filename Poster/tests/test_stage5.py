@@ -74,8 +74,14 @@ def make_session_factory():
 
 
 def make_old_draft(session, user_id=111, age_days=40, title="Старый пост"):
+    created = utcnow() - timedelta(days=age_days)
     draft = Draft(
-        user_id=user_id, title=title, created_at=utcnow() - timedelta(days=age_days)
+        user_id=user_id,
+        title=title,
+        created_at=created,
+        # «создан давно и с тех пор не правился»: TTL считается от updated_at
+        # (у настоящих старых записей он равен created_at или NULL)
+        updated_at=created,
     )
     session.add(draft)
     session.commit()
@@ -105,6 +111,23 @@ class UtcnowTests(unittest.TestCase):
             session.add(draft)
             session.commit()
             self.assertIsNone(draft.created_at.tzinfo)
+        finally:
+            session.close()
+            engine.dispose()
+
+    def test_new_draft_gets_updated_at(self):
+        # A2: новые черновики корректно получают дату последнего изменения
+        session_factory, engine = make_session_factory()
+        session = session_factory()
+        try:
+            draft = Draft(user_id=1, title="Пост")
+            session.add(draft)
+            session.commit()
+            self.assertIsNotNone(draft.updated_at)
+            self.assertIsNone(draft.updated_at.tzinfo)
+            self.assertLess(
+                abs((datetime_now_utc() - draft.updated_at).total_seconds()), 5
+            )
         finally:
             session.close()
             engine.dispose()
@@ -186,6 +209,95 @@ class RemoveOldDraftsTests(unittest.TestCase):
         finally:
             session.close()
         self.assertEqual(titles, {"Свежий"})
+
+    def _titles_after_cleanup(self):
+        self.jobs.sync_remove_old_drafts()
+        session = self.session_factory()
+        try:
+            return {d.title for d in session.query(Draft).all()}
+        finally:
+            session.close()
+
+    def test_fresh_edit_of_old_draft_survives_ttl(self):
+        # A2: created_at старше TTL, но черновик правился недавно — живёт
+        session = self.session_factory()
+        try:
+            session.add(
+                Draft(
+                    user_id=111,
+                    title="Правленный сегодня",
+                    created_at=utcnow() - timedelta(days=40),
+                    updated_at=utcnow(),
+                )
+            )
+            session.commit()
+        finally:
+            session.close()
+
+        self.assertEqual(self._titles_after_cleanup(), {"Правленный сегодня"})
+
+    def test_removes_draft_with_both_dates_older_than_ttl(self):
+        # A2: created_at И updated_at старше TTL — удаляется
+        session = self.session_factory()
+        try:
+            session.add(
+                Draft(
+                    user_id=111,
+                    title="Не правился давно",
+                    created_at=utcnow() - timedelta(days=40),
+                    updated_at=utcnow() - timedelta(days=35),
+                )
+            )
+            session.commit()
+        finally:
+            session.close()
+
+        self.assertEqual(self._titles_after_cleanup(), set())
+
+    def test_removes_legacy_draft_without_updated_at(self):
+        # A2: записи до миграции (updated_at IS NULL) — срок по created_at.
+        # NULL ставим сырой вставкой: ORM при вставке подставляет default.
+        session = self.session_factory()
+        try:
+            session.add(
+                Draft(
+                    user_id=111,
+                    title="До миграции",
+                    created_at=utcnow() - timedelta(days=40),
+                )
+            )
+            session.commit()
+            session.execute(
+                text("UPDATE drafts SET updated_at = NULL WHERE title = :title"),
+                {"title": "До миграции"},
+            )
+            session.commit()
+        finally:
+            session.close()
+
+        self.assertEqual(self._titles_after_cleanup(), set())
+
+    def test_update_refreshes_updated_at(self):
+        # A2: правка существующего черновика обновляет updated_at (onupdate)
+        session = self.session_factory()
+        try:
+            created = utcnow() - timedelta(days=40)
+            draft = Draft(user_id=111, title="Старый", created_at=created)
+            draft.updated_at = created  # не правился с момента создания
+            session.add(draft)
+            session.commit()
+
+            draft.title = "Новое название"  # правка
+            session.commit()
+            session.refresh(draft)
+
+            self.assertGreater(
+                draft.updated_at,
+                utcnow() - timedelta(days=1),
+                "после правки updated_at должен стать свежим",
+            )
+        finally:
+            session.close()
 
 
 class SplitLongTextTests(unittest.TestCase):

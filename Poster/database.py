@@ -65,9 +65,15 @@ def _migrate(bind) -> None:
     inspector = inspect(bind)
     if "drafts" in inspector.get_table_names():
         columns = {column["name"] for column in inspector.get_columns("drafts")}
-        if "photos" not in columns:
-            with bind.begin() as connection:
+        with bind.begin() as connection:
+            if "photos" not in columns:
                 connection.execute(text("ALTER TABLE drafts ADD COLUMN photos TEXT"))
+            if "updated_at" not in columns:
+                # NULL у существующих записей — TTL для них считает срок
+                # по created_at (см. handlers.jobs.sync_remove_old_drafts).
+                connection.execute(
+                    text("ALTER TABLE drafts ADD COLUMN updated_at DATETIME")
+                )
 
 
 def init_db():

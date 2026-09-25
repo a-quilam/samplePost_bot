@@ -3,6 +3,7 @@
 import logging
 from datetime import time, timedelta
 
+from sqlalchemy import func
 from sqlalchemy.orm import Session
 from telegram.ext import Application, ContextTypes
 
@@ -22,9 +23,11 @@ def sync_remove_old_drafts() -> None:
     session: Session = SessionLocal()
     try:
         cutoff = utcnow() - timedelta(days=DRAFT_TTL_DAYS)
+        # Срок жизни — от последнего изменения (недавно правленный старый
+        # черновик не удаляется); у записей без updated_at (NULL) — от создания.
         removed = (
             session.query(Draft)
-            .filter(Draft.created_at < cutoff)
+            .filter(func.coalesce(Draft.updated_at, Draft.created_at) < cutoff)
             .delete(synchronize_session=False)
         )
         session.commit()

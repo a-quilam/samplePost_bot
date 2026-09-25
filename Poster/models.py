@@ -42,6 +42,12 @@ class Draft(Base):
     created_at: Mapped[datetime] = mapped_column(
         DateTime, default=utcnow, nullable=False
     )
+    # Последнее изменение: TTL считает срок жизни от него, чтобы недавно
+    # правленный старый черновик не удалялся. У старых записей (миграция
+    # добавила колонку без данных) NULL — тогда срок считается по created_at.
+    updated_at: Mapped[datetime | None] = mapped_column(
+        DateTime, default=utcnow, onupdate=utcnow, nullable=True
+    )
 
     def __repr__(self) -> str:
         return f"<Draft(id={self.id}, user_id={self.user_id}, title={self.title})>"
