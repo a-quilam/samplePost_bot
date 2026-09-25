@@ -20,6 +20,7 @@ from telegram.ext import (
 )
 
 from database import SessionLocal
+from handlers.callbacks import handle_main_menu_selection
 from handlers.drafts import view_drafts
 from handlers.main_menu import help_command, main_menu_keyboard, start
 from models import Draft, get_draft_photos, photos_to_json
@@ -263,9 +264,12 @@ async def _save_wip_before_exit(
         return
     draft_id = _persist_wip(user_data, ctx.user(update).id)
     if draft_id is None:
+        # Ошибка БД: кнопка «Сохранить в черновики» после завершения диалога
+        # уже недоступна — подсказываем реально работающий следующий шаг
+        # (повторное «Создать пост» сохранит данные ещё раз)
         await ctx.message(update).reply_text(
-            "Не удалось сохранить незавершённый пост автоматически — "
-            "кнопка «📄 Сохранить в черновики» сохранит его вручную."
+            "Не удалось сохранить незавершённый пост: ошибка базы данных. "
+            "Нажмите «✏️ Создать пост» ещё раз — я повторю попытку сохранения."
         )
         return
     await ctx.message(update).reply_text(
@@ -386,7 +390,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     else:
         if step["validator"] and not step["validator"](text):
             await ctx.message(update).reply_text(
-                "Некорректный формат. Пожалуйста, используйте правильный формат или нажмите 'Пропустить'.",
+                f"Некорректный формат. {step['prompt']}",
                 reply_markup=get_skip_keyboard(),
             )
             logger.warning(f"Некорректный ввод для поля '{step['key']}'.")
@@ -395,7 +399,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         if step["key"] == "image":
             if ctx.message(update).photo:
                 _store_photo(ctx.data(context), ctx.message(update))
-                await ctx.message(update).reply_text("Картинка добавлена.")
+                await ctx.message(update).reply_text("Фото добавлено.")
                 logger.info("Пользователь добавил изображение.")
                 ctx.data(context)["current_step"] += 1
                 await review_post(update, context)
@@ -507,7 +511,7 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> in
     if state == "single":
         # Одиночная фотография — как раньше: сразу к превью
         user_data["current_step"] += 1
-        await message.reply_text("Картинка добавлена.")
+        await message.reply_text("Фото добавлено.")
         await review_post(update, context)
     # "continued" — запоздавшее фото альбома уже добавлено в список
     return POST_CREATION
@@ -581,17 +585,25 @@ def build_post_summary(post_data: dict, *, heading: str) -> str:
     пользователя экранируются.
     """
     lines = [heading, ""]
+    has_fields = False
     for step in POST_STEPS:
         key = step["key"]
         if key == "image":
             if post_data.get("image") or post_data.get("photos"):
                 lines.append(f"• *{step['label']}*: Добавлено")
+                has_fields = True
             continue
         value = post_data.get(key)
         # «Не указано» — легаси-запись старых черновиков, для сводки это пусто
         if value in (None, "", "Не указано"):
             continue
         lines.append(f"• *{step['label']}*: {escape_markdown(str(value))}")
+        has_fields = True
+    if not has_fields:
+        # Превью ещё ничего не заполнено: без этой строки пользователь видит
+        # только заголовок и не понимает, что происходит. Точка экранируется —
+        # сообщение уходит с parse_mode=MarkdownV2
+        lines.append(escape_markdown("Пока ни одно поле не заполнено."))
     lines.append("")
     return "\n".join(lines)
 
@@ -784,7 +796,7 @@ async def save_draft(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
             )
         else:
             await ctx.message(update).reply_text(
-                "Пост сохранен в черновики.", reply_markup=main_menu_keyboard()
+                "Пост сохранён в черновики.", reply_markup=main_menu_keyboard()
             )
         logger.info(f"Черновик {draft.id} сохранён (обновление={is_update}).")
     except Exception as e:
@@ -981,7 +993,7 @@ async def process_edit(update: Update, context: ContextTypes.DEFAULT_TYPE) -> in
 
     if step["validator"] and not step["validator"](text):
         await message.reply_text(
-            "Некорректный формат. Пожалуйста, введите корректные данные или нажмите 'Пропустить'.",
+            f"Некорректный формат. {step['prompt']}",
             reply_markup=get_skip_keyboard(),
         )
         logger.warning(f"Некорректный ввод при редактировании поля '{field}': {text}")
@@ -1101,6 +1113,44 @@ async def view_drafts_and_exit(
     return ConversationHandler.END
 
 
+async def main_menu_during_creation(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> int:
+    """
+    Кнопка «↩️ Главное меню» ВНУТРИ диалога: незавершённый пост сохраняется,
+    диалог завершается — пользователь действительно оказывается в главном
+    меню. Раньше кнопку обслуживал глобальный хендлер, и диалог оставался
+    активным «поверх» главного меню (следующий текст уходил бы в поле поста).
+    """
+    await _save_wip_before_exit(update, context)
+    await handle_main_menu_selection(update, context)
+    return ConversationHandler.END
+
+
+# Кнопки состояний диалога, нажатые когда диалог уже не активен.
+# Глобальные callback'и (main_menu, delete_, draftpage_, editdraft_) сюда
+# НЕ входят — ими занимаются свои хендлеры.
+STALE_DIALOG_CALLBACK_PATTERN = (
+    r"^(?:skip|media_done|save_draft|finish|cancel_edit|edit_[a-z_]+)$"
+)
+
+
+async def stale_dialog_action(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> None:
+    """
+    Ответ на устаревшую кнопку диалога («Пропустить», «Готово», поля
+    редактирования…), нажатую после завершения диалога: раньше Telegram
+    показывал спиннер, а ответа не было.
+
+    Регистрируется СРАЗУ ПОСЛЕ ConversationHandler: при активном диалоге
+    кнопку обслуживает состояние/entry/fallback, этот хендлер отвечает
+    только когда диалога уже нет (или кнопка не относится к текущему
+    состоянию).
+    """
+    await ctx.query(update).answer("Кнопка устарела: диалог уже завершён.")
+
+
 def post_creation_handlers() -> list[BaseHandler]:
     """
     Возвращает список обработчиков для создания поста.
@@ -1165,7 +1215,17 @@ def post_creation_handlers() -> list[BaseHandler]:
                 CommandHandler("start", start_during_creation),
                 CommandHandler("help", help_during_creation),
                 CommandHandler("drafts", view_drafts_and_exit),
+                # «Главное меню» во время диалога: WIP сохраняется, диалог
+                # завершается — иначе состояние оставалось бы активным
+                # «поверх» главного меню
+                CallbackQueryHandler(main_menu_during_creation, pattern=r"^main_menu$"),
             ],
             allow_reentry=True,
-        )
+        ),
+        # Кнопки состояний диалога после его завершения: раньше повторное
+        # нажатие оставляло пользователя со спиннером. Стоит ПОСЛЕ
+        # ConversationHandler: активный диалог обслуживает свои состояния
+        CallbackQueryHandler(
+            stale_dialog_action, pattern=STALE_DIALOG_CALLBACK_PATTERN
+        ),
     ]

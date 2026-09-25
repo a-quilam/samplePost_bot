@@ -18,7 +18,7 @@ import models  # noqa: F401  — регистрация таблиц в Base.met
 from base import Base
 from database import _migrate
 from models import Draft, get_draft_photos, photos_to_json
-from utils.formatter import escape_markdown, format_text
+from utils.formatter import escape_markdown, format_text, replace_quotes
 
 # Импорт обработчиков требует config (.env с токеном) и telegram —
 # при недоступности соответствующие тесты пропускаются, а не падают.
@@ -225,6 +225,35 @@ class FormatterGuardTests(unittest.TestCase):
         self.assertEqual(escape_markdown("5.00"), "5\\.00")
 
 
+class QuoteTypoTests(unittest.TestCase):
+    """B7: replace_quotes — все пары кавычек последовательно превращаются в «ёлочки»."""
+
+    def test_single_pair(self):
+        self.assertEqual(
+            replace_quotes('Встреча "в 12.00" начнётся'),
+            "Встреча «в 12.00» начнётся",
+        )
+
+    def test_multiple_pairs_all_converted(self):
+        self.assertEqual(
+            replace_quotes('"Первая" и "Вторая"'),
+            "«Первая» и «Вторая»",
+        )
+
+    def test_three_pairs(self):
+        self.assertEqual(
+            replace_quotes('"раз", "два", "три"'),
+            "«раз», «два», «три»",
+        )
+
+    def test_odd_quotes_alternate(self):
+        # нечётное число кавычек: последовательность не сбивается
+        self.assertEqual(replace_quotes('"а" и "б'), "«а» и «б")
+
+    def test_text_without_quotes_unchanged(self):
+        self.assertEqual(replace_quotes("Без кавычек"), "Без кавычек")
+
+
 @unittest.skipIf(
     HANDLERS_IMPORT_ERROR is not None,
     f"импорт обработчиков недоступен: {HANDLERS_IMPORT_ERROR}",
@@ -262,6 +291,15 @@ class PostSummaryTests(unittest.TestCase):
         summary = build_post_summary({}, heading="h")
         self.assertNotIn("•", summary)
         self.assertNotIn("Не указано", summary)
+
+    def test_empty_summary_shows_hint(self):
+        # B5: пустое превью явно говорит, что пока ничего не заполнено
+        summary = build_post_summary({}, heading="h")
+        self.assertIn("Пока ни одно поле не заполнено", summary)
+
+    def test_filled_summary_has_no_empty_hint(self):
+        summary = build_post_summary({"title": "Концерт"}, heading="h")
+        self.assertNotIn("Пока ни одно поле не заполнено", summary)
 
 
 class MigrationTests(unittest.TestCase):

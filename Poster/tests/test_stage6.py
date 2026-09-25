@@ -46,6 +46,7 @@ try:
         Chat,
         Message,
         MessageEntity,
+        PhotoSize,
         Update,
         User,
     )
@@ -54,6 +55,7 @@ try:
     import bot as bot_module
     import config
     from base import Base
+    from handlers.main_menu import cancel_without_dialog, outside_dialog_hint
     from handlers.post_creation import (
         EDIT_FIELD,
         POST_CREATION,
@@ -67,7 +69,10 @@ try:
         handle_photo,
         handle_stale_preview_action,
         help_during_creation,
+        main_menu_during_creation,
         process_edit,
+        save_draft,
+        stale_dialog_action,
         start_during_creation,
         start_edit_draft,
         start_post_creation,
@@ -164,6 +169,19 @@ def make_text_update(text):
     )
     message.set_bot(ROUTING_TEST_BOT)
     return Update(update_id=1, message=message)
+
+
+def make_photo_message_update():
+    """Настоящий Update с фото-сообщением — для проверки фильтров вне диалога."""
+    message = Message(
+        message_id=3,
+        date=datetime(2026, 1, 1),
+        chat=Chat(id=777, type="private"),
+        from_user=User(id=7, first_name="Тест", is_bot=False),
+        photo=[PhotoSize(file_id="f1", file_unique_id="u1", width=1, height=1)],
+    )
+    message.set_bot(ROUTING_TEST_BOT)
+    return Update(update_id=3, message=message)
 
 
 def make_callback_route_update(data):
@@ -924,6 +942,314 @@ class CommandDuringCreationTests(_InMemoryDbMixin, unittest.TestCase):
     HANDLERS_IMPORT_ERROR is not None,
     f"импорт обработчиков недоступен: {HANDLERS_IMPORT_ERROR}",
 )
+class OutsideDialogTests(unittest.TestCase):
+    """B1/B2: вне диалога текст/фото и /cancel получают внятный ответ."""
+
+    @staticmethod
+    def _group():
+        application = bot_module.build_application()
+        group = application.handlers[0]
+        conv = next(h for h in group if isinstance(h, ConversationHandler))
+        return group, conv
+
+    @staticmethod
+    def _first_outside_claim(group, conv, update):
+        """
+        Первый хендлер, обслуживающий update ВНЕ диалога: диалог без
+        состояния берёт только entry-точки — для текста/фото их нет.
+        """
+        assert not conv.check_update(update), "диалог не должен claim'ить без состояния"
+        for handler in group:
+            if isinstance(handler, ConversationHandler):
+                continue
+            if handler.check_update(update):
+                return handler
+        return None
+
+    def test_text_outside_dialog_gets_hint(self):
+        group, conv = self._group()
+        update = make_text_update("просто сообщение")
+
+        handler = self._first_outside_claim(group, conv, update)
+
+        self.assertIsNotNone(
+            handler, "текст вне диалога не должен оставаться без ответа"
+        )
+        self.assertEqual(handler.callback.__name__, "outside_dialog_hint")
+
+    def test_photo_outside_dialog_gets_hint(self):
+        group, conv = self._group()
+        update = make_photo_message_update()
+
+        handler = self._first_outside_claim(group, conv, update)
+
+        self.assertIsNotNone(
+            handler, "фото вне диалога не должно оставаться без ответа"
+        )
+        self.assertEqual(handler.callback.__name__, "outside_dialog_hint")
+
+    def test_text_inside_dialog_stays_with_dialog(self):
+        # Подсказка НЕ вмешивается в состояния диалога: ConversationHandler
+        # зарегистрирован первым и текст в своём состоянии обслуживает сам
+        _, conv = self._group()
+        update = make_text_update("текст в диалоге")
+
+        handler = resolve_dialog_handler(conv, POST_CREATION, update)
+
+        self.assertIsNotNone(handler)
+        self.assertEqual(handler.callback.__name__, "handle_message")
+
+    def test_cancel_without_dialog_answered_not_unknown(self):
+        group, conv = self._group()
+        update = make_text_update("/cancel")
+
+        self.assertFalse(conv.check_update(update), "/cancel — не fallback без диалога")
+        first = next(
+            h
+            for h in group
+            if not isinstance(h, ConversationHandler) and h.check_update(update)
+        )
+        self.assertEqual(first.callback.__name__, "cancel_without_dialog")
+
+        # поведение: понятный ответ, а не «Неизвестная команда»
+        reply = AsyncMock()
+        stub_update = SimpleNamespace(
+            effective_message=SimpleNamespace(reply_text=reply, photo=None),
+            effective_user=SimpleNamespace(id=7),
+        )
+        asyncio.run(cancel_without_dialog(stub_update, SimpleNamespace(user_data={})))
+        text = reply.await_args.args[0]
+        self.assertIn("нет активного создания поста", text)
+
+    def test_outside_hint_texts_explain_next_step(self):
+        # текст — про меню/справку; фото — про шаг «Изображение»
+        for message, expected in (
+            (SimpleNamespace(text="привет", photo=None), "меню"),
+            (SimpleNamespace(text=None, photo=[object()]), "Изображение"),
+        ):
+            with self.subTest(photo=bool(message.photo)):
+                reply = AsyncMock()
+                stub_update = SimpleNamespace(
+                    effective_message=SimpleNamespace(
+                        reply_text=reply, text=message.text, photo=message.photo
+                    ),
+                    effective_user=SimpleNamespace(id=7),
+                )
+                asyncio.run(
+                    outside_dialog_hint(stub_update, SimpleNamespace(user_data={}))
+                )
+                self.assertIn(expected, reply.await_args.args[0])
+
+
+@unittest.skipIf(
+    HANDLERS_IMPORT_ERROR is not None,
+    f"импорт обработчиков недоступен: {HANDLERS_IMPORT_ERROR}",
+)
+class StaleDialogButtonTests(unittest.TestCase):
+    """B3: устаревшие кнопки диалога — короткий ответ, приоритет состояний."""
+
+    def test_stale_handler_registered_right_after_conversation(self):
+        application = bot_module.build_application()
+        group = application.handlers[0]
+        conv_index = next(
+            i for i, h in enumerate(group) if isinstance(h, ConversationHandler)
+        )
+        stale_index = next(
+            i
+            for i, h in enumerate(group)
+            if isinstance(h, CallbackQueryHandler)
+            and getattr(h.callback, "__name__", "") == "stale_dialog_action"
+        )
+        self.assertEqual(stale_index, conv_index + 1)
+
+    def test_stale_answer_reported(self):
+        query = SimpleNamespace(answer=AsyncMock(), data="finish")
+        update = SimpleNamespace(
+            callback_query=query,
+            effective_message=SimpleNamespace(text=None, photo=None),
+        )
+        asyncio.run(stale_dialog_action(update, SimpleNamespace(user_data={})))
+        query.answer.assert_awaited_once()
+        self.assertIn("устарела", query.answer.await_args.args[0])
+
+    def test_active_dialog_claims_its_buttons_before_stale(self):
+        application = bot_module.build_application()
+        conv = next(
+            h for h in application.handlers[0] if isinstance(h, ConversationHandler)
+        )
+        for state, data, handler_name in (
+            (POST_CREATION, "skip", "handle_callback_query"),
+            (POST_CREATION, "finish", "handle_callback_query"),
+            (POST_CREATION, "media_done", "handle_callback_query"),
+            (EDIT_FIELD, "finish", "handle_stale_preview_action"),
+            (EDIT_FIELD, "edit_title", "handle_edit"),
+            (EDIT_FIELD, "skip", "handle_skip_edit"),
+        ):
+            with self.subTest(state=state, data=data):
+                handler = resolve_dialog_handler(
+                    conv, state, make_callback_route_update(data)
+                )
+                self.assertIsNotNone(handler, "активный диалог обязан обслужить кнопку")
+                self.assertEqual(handler.callback.__name__, handler_name)
+
+
+@unittest.skipIf(
+    HANDLERS_IMPORT_ERROR is not None,
+    f"импорт обработчиков недоступен: {HANDLERS_IMPORT_ERROR}",
+)
+class MainMenuDuringCreationTests(_InMemoryDbMixin, unittest.TestCase):
+    """B4: «Главное меню» в диалоге — WIP сохраняется, диалог завершается."""
+
+    def test_fallback_routed_and_ends_with_wip_saved(self):
+        application = bot_module.build_application()
+        conv = next(
+            h for h in application.handlers[0] if isinstance(h, ConversationHandler)
+        )
+        for state in (POST_CREATION, EDIT_FIELD):
+            with self.subTest(state=state):
+                handler = resolve_dialog_handler(
+                    conv, state, make_callback_route_update("main_menu")
+                )
+                self.assertIsNotNone(handler)
+                self.assertEqual(handler.callback.__name__, "main_menu_during_creation")
+
+        user_data = {"current_step": 2, "title": "Начатый пост"}
+        context = SimpleNamespace(user_data=user_data, bot=RecordingBot())
+        update = make_callback_update("main_menu")
+
+        result = asyncio.run(main_menu_during_creation(update, context))
+
+        self.assertEqual(result, ConversationHandler.END)
+        drafts = self._all_drafts()
+        self.assertEqual(len(drafts), 1, "незавершённый пост должен сохраниться")
+        self.assertEqual(drafts[0].title, "Начатый пост")
+        self.assertNotIn("title", user_data)
+        update.callback_query.edit_message_text.assert_awaited()
+        self.assertIn(
+            "Здравствуйте",
+            update.callback_query.edit_message_text.await_args.args[0],
+            "пользователь должен реально оказаться в главном меню",
+        )
+        self.assertTrue(
+            any(
+                "Выберите действие" in call.args[0]
+                for call in update.effective_message.reply_text.await_args_list
+            ),
+            "должна появиться reply-клавиатура главного меню",
+        )
+
+    def test_main_menu_without_dialog_not_claimed_by_conversation(self):
+        # Вне диалога fallback не работает — кнопку обслуживает глобальный
+        # хендлер, как и раньше (единичность проверяет HandlerRoutingTests)
+        application = bot_module.build_application()
+        conv = next(
+            h for h in application.handlers[0] if isinstance(h, ConversationHandler)
+        )
+        self.assertFalse(conv.check_update(make_callback_route_update("main_menu")))
+
+
+@unittest.skipIf(
+    HANDLERS_IMPORT_ERROR is not None,
+    f"импорт обработчиков недоступен: {HANDLERS_IMPORT_ERROR}",
+)
+class EmptyPreviewTests(unittest.TestCase):
+    """B5: превью без единого заполненного поля объясняет, что заполнять."""
+
+    def test_all_skips_preview_says_nothing_filled(self):
+        bot = RecordingBot()
+        user_data = {"current_step": 0}
+        context = SimpleNamespace(user_data=user_data, bot=bot)
+        for _ in range(len(POST_STEPS)):
+            asyncio.run(handle_message(make_message_update("Пропустить"), context))
+
+        message_calls = [c for c in bot.calls if c["type"] == "message"]
+        self.assertEqual(len(message_calls), 1, "превью отправлено ровно один раз")
+        self.assertIn("Пока ни одно поле не заполнено", message_calls[0]["text"])
+        self.assertNotIn("•", message_calls[0]["text"], "строк полей не должно быть")
+
+
+@unittest.skipIf(
+    HANDLERS_IMPORT_ERROR is not None,
+    f"импорт обработчиков недоступен: {HANDLERS_IMPORT_ERROR}",
+)
+class WipSaveFailureTests(unittest.TestCase):
+    """B6: сбой БД при сохранении WIP — подсказка рабочего следующего шага."""
+
+    def test_db_failure_offers_working_next_step(self):
+        import handlers.post_creation as post_creation_module
+
+        original_persist = post_creation_module._persist_wip
+        post_creation_module._persist_wip = lambda user_data, user_id: None
+        try:
+            user_data = {"current_step": 2, "title": "Начатый пост"}
+            context = SimpleNamespace(user_data=user_data, bot=RecordingBot())
+            update = make_message_update("/cancel")
+            result = asyncio.run(cancel_creation(update, context))
+        finally:
+            post_creation_module._persist_wip = original_persist
+
+        self.assertEqual(result, ConversationHandler.END)
+        replies = [
+            call.args[0] for call in update.effective_message.reply_text.await_args_list
+        ]
+        failure = next(t for t in replies if "Не удалось сохранить" in t)
+        # больше никаких обещаний мёртвый кнопке «Сохранить в черновики»
+        self.assertNotIn("Сохранить в черновики", failure)
+        self.assertIn("Создать пост", failure, "нужен реально работающий шаг")
+        # данные не потеряны — остались в памяти для повторной попытки
+        self.assertEqual(user_data.get("title"), "Начатый пост")
+
+
+@unittest.skipIf(
+    HANDLERS_IMPORT_ERROR is not None,
+    f"импорт обработчиков недоступен: {HANDLERS_IMPORT_ERROR}",
+)
+class UserFacingTextTests(_InMemoryDbMixin, unittest.TestCase):
+    """B8: точечная унификация текстов — формат валидации, «сохранён»."""
+
+    def test_wizard_validation_repeats_expected_format(self):
+        user_data = {"current_step": 1}  # «Дата» — поле с валидатором
+        context = SimpleNamespace(user_data=user_data, bot=RecordingBot())
+        update = make_message_update("не дата")
+
+        result = asyncio.run(handle_message(update, context))
+
+        self.assertEqual(result, POST_CREATION)
+        reply = update.effective_message.reply_text.await_args.args[0]
+        self.assertIn("ДД.ММ.ГГГГ", reply, "валидация должна подсказывать формат")
+        self.assertEqual(user_data["current_step"], 1, "шаг не должен продвинуться")
+
+    def test_edit_validation_repeats_expected_format(self):
+        user_data = {
+            "current_step": len(POST_STEPS),
+            "edit_field": "date",
+            "date": "25.12.2026",
+        }
+        context = SimpleNamespace(user_data=user_data, bot=RecordingBot())
+        update = make_message_update("не дата")
+
+        result = asyncio.run(process_edit(update, context))
+
+        self.assertEqual(result, EDIT_FIELD)
+        reply = update.effective_message.reply_text.await_args.args[0]
+        self.assertIn("ДД.ММ.ГГГГ", reply, "валидация должна подсказывать формат")
+        self.assertEqual(user_data["date"], "25.12.2026", "поле не стирается")
+
+    def test_save_draft_reply_spelling(self):
+        user_data = {"current_step": len(POST_STEPS), "title": "Тест"}
+        context = SimpleNamespace(user_data=user_data, bot=RecordingBot())
+        update = make_message_update("")
+
+        asyncio.run(save_draft(update, context))
+
+        reply = update.effective_message.reply_text.await_args.args[0]
+        self.assertIn("Пост сохранён в черновики", reply)
+
+
+@unittest.skipIf(
+    HANDLERS_IMPORT_ERROR is not None,
+    f"импорт обработчиков недоступен: {HANDLERS_IMPORT_ERROR}",
+)
 class NoWorkflowTests(unittest.TestCase):
     """В проекте не должно оставаться путей отправки в review/publication chat."""
 
@@ -1038,14 +1364,27 @@ class HandlerRoutingTests(unittest.TestCase):
                     conv_patterns.append(h.pattern)
         return conv_patterns, others
 
-    def test_dialog_callbacks_not_claimed_outside_dialog(self):
+    def test_dialog_callbacks_outside_dialog_answered_once_by_stale(self):
+        """
+        Вне диалога кнопки состояний обслуживает stale-хендлер («Кнопка
+        устарела») — раньше повторное нажатие оставляло спиннер без ответа.
+        Entry-кнопка открытия черновика — зона ConversationHandler: её stale
+        не перехватывает.
+        """
         application = bot_module.build_application()
         _, others = self._parts(application)
         for data in self.DIALOG_CALLBACKS:
-            hits = [h for h in others if h.pattern and h.pattern.search(data)]
-            self.assertEqual(
-                hits, [], f"callback '{data}' перехватывается вне диалога: {hits}"
-            )
+            with self.subTest(data=data):
+                hits = [h for h in others if h.pattern and h.pattern.search(data)]
+                if data == "editdraft_1":
+                    self.assertEqual(
+                        hits, [], "entry-кнопка не должна уходить stale-хендлеру"
+                    )
+                else:
+                    self.assertEqual(
+                        len(hits), 1, f"callback '{data}' вне диалога: {hits}"
+                    )
+                    self.assertEqual(hits[0].callback.__name__, "stale_dialog_action")
 
     def test_global_callbacks_not_claimed_by_dialog_and_served_once(self):
         application = bot_module.build_application()

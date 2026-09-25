@@ -481,6 +481,11 @@ class MainMenuKeyboardTests(unittest.TestCase):
         text = reply.await_args.args[0]
         for command in ("/start", "/create_post", "/drafts", "/cancel", "/help"):
             self.assertIn(command, text)
+        # B8: сценарий работы — разница кнопок и автосохранение при выходе
+        self.assertIn("Готово — получить пост", text)
+        self.assertIn("Сохранить в черновики", text)
+        self.assertIn("автоматически сохраняется", text)
+        self.assertIn("Черновики", text, "возврат к работе через «Черновики»")
 
 
 class ErrorNoticeTests(unittest.TestCase):

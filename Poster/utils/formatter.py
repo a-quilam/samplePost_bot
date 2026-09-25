@@ -46,13 +46,19 @@ def replace_hyphens(text: str) -> str:
 
 def replace_quotes(text: str) -> str:
     """
-    Заменяет внешние кавычки на ёлочки («»), а внутренние на английские (" ").
+    Заменяет двойные кавычки на «ёлочки», последовательно чередуя « и »:
+    каждая следующая кавычка в тексте — то открывающая, то закрывающая,
+    поэтому обрабатываются ВСЕ пары, а не только первая.
     """
-    # Сначала заменим все двойные кавычки на маркеры
-    text = re.sub(r'"', "«", text, count=1)  # Первая кавычка в строке
-    text = re.sub(r'"', "»", text, count=1)  # Вторая кавычка в строке
-
-    return text
+    result: list[str] = []
+    opening = True
+    for char in text:
+        if char == '"':
+            result.append("«" if opening else "»")
+            opening = not opening
+        else:
+            result.append(char)
+    return "".join(result)
 
 
 def format_text(text: str) -> str:
