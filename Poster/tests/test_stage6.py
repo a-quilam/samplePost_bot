@@ -1278,7 +1278,14 @@ class NoWorkflowTests(unittest.TestCase):
     def test_no_workflow_symbols_in_source(self):
         offenders = []
         for path in sorted(POSTER_DIR.rglob("*.py")):
-            if "tests" in path.parts or "__pycache__" in path.parts:
+            # .venv — сторонний код: PTB 22+ содержит собственный класс
+            # PostApproval (suggested posts). Скан проверяет исходники
+            # ПРОЕКТА, библиотеки исключаются.
+            if (
+                "tests" in path.parts
+                or "__pycache__" in path.parts
+                or ".venv" in path.parts
+            ):
                 continue
             content = path.read_text(encoding="utf-8")
             for token in self.FORBIDDEN_TOKENS:
