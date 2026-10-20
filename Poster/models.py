@@ -57,6 +57,39 @@ class Draft(Base):
         return f"<Draft(id={self.id}, user_id={self.user_id}, title={self.title})>"
 
 
+class UserState(Base):
+    """
+    Состояние интерфейса одного пользователя (Stage 11).
+
+    Одна строка на пользователя: message_id постоянного экрана и JSON-снимок
+    незавершённого поста (WIP). Выживает при рестарте процесса — Telegram
+    хранит только last_update, поэтому после перезапуска именно отсюда
+    восстанавливаются идентификатор экрана и незавершённые данные.
+
+    user_data (PTB) остаётся «горячим» источником во время диалога; таблица —
+    долговременный снимок для восстановления, а не источник истины.
+    """
+
+    __tablename__ = "user_states"
+
+    user_id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    chat_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    # message_id постоянного экрана управления (NULL — экрана ещё не было)
+    screen_message_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    # JSON-снимок WIP: поля поста, formats, photos, current_step и т.п.
+    # (NULL — незавершённого поста нет)
+    payload: Mapped[str | None] = mapped_column(Text, nullable=True)
+    updated_at: Mapped[datetime | None] = mapped_column(
+        DateTime, default=utcnow, onupdate=utcnow, nullable=True
+    )
+
+    def __repr__(self) -> str:
+        return (
+            f"<UserState(user_id={self.user_id}, "
+            f"screen_message_id={self.screen_message_id})>"
+        )
+
+
 # --- Фотографии поста (медиа-группы) -----------------------------------------
 
 

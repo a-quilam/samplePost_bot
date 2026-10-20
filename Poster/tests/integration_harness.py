@@ -46,9 +46,10 @@ try:
     import handlers.jobs as jobs_module
     import handlers.post_creation as post_creation_module
     import utils.parsers as parsers_module
+    import utils.screen as screen_module
     from base import Base
     from handlers.post_creation import POST_STEPS
-    from models import Draft
+    from models import Draft, UserState
 
     HARNESS_IMPORT_ERROR = None
 except Exception as e:  # noqa: BLE001 — причина попадает в сообщение пропуска
@@ -70,6 +71,11 @@ class FakeBot:
     - записи хранятся в self.calls в порядке вызовов;
     - fail_types — типы вызовов, падающие RuntimeError (имитация сбоя
       Telegram API для проверки устойчивости диалога);
+    - errors_by_type — тип вызова -> исключение, которое БУДЕТ брошено
+      (например BadRequest «Message to edit not found» для проверки
+      восстановления экрана);
+    - send_* возвращают фиктивные Message с растущим message_id — так
+      продукт запоминает id экрана/превью (как от настоящего Telegram);
     - атрибута defaults нет намеренно: Message.reply_text проверяет его
       через hasattr и без него корректно обходится.
     """
@@ -82,11 +88,35 @@ class FakeBot:
     def __init__(self) -> None:
         self.calls: list[dict[str, Any]] = []
         self.fail_types: set[str] = set()
+        self.errors_by_type: dict[str, Exception] = {}
+        self._next_message_id = 100
 
     def _record(self, kind: str, args: tuple, kwargs: dict) -> None:
         if kind in self.fail_types:
             raise RuntimeError(f"имитация сбоя Telegram API: {kind}")
+        if kind in self.errors_by_type:
+            raise self.errors_by_type[kind]
         self.calls.append({"type": kind, "args": args, **kwargs})
+
+    def _make_message(self, kwargs: dict) -> Any:
+        """Фиктивное сообщение бота (для возврата send_message/send_photo)."""
+        self._next_message_id += 1
+        pos_args: tuple = tuple(kwargs.get("args") or ())
+        chat_id = kwargs.get("chat_id")
+        if chat_id is None:
+            chat_id = pos_args[0] if pos_args else DEFAULT_CHAT_ID
+        text = kwargs.get("text")
+        if text is None:
+            text = pos_args[1] if len(pos_args) > 1 else kwargs.get("caption")
+        message = Message(
+            message_id=self._next_message_id,
+            date=FIXTURE_DATE,
+            chat=Chat(id=chat_id, type="private"),
+            from_user=User(id=self.id, first_name=self.first_name, is_bot=True),
+            text=text,
+        )
+        message.set_bot(self)  # type: ignore[arg-type]
+        return message
 
     # —— жизненный цикл (Application.initialize/shutdown) ——
     async def initialize(self) -> bool:
@@ -104,14 +134,17 @@ class FakeBot:
         )
 
     # —— методы, которые реально зовут обработчики ——
-    async def send_message(self, *args: Any, **kwargs: Any) -> None:
+    async def send_message(self, *args: Any, **kwargs: Any) -> Any:
         self._record("message", args, kwargs)
+        return self._make_message({**kwargs, "args": args})
 
-    async def send_photo(self, *args: Any, **kwargs: Any) -> None:
+    async def send_photo(self, *args: Any, **kwargs: Any) -> Any:
         self._record("photo", args, kwargs)
+        return self._make_message({**kwargs, "args": args})
 
-    async def send_media_group(self, *args: Any, **kwargs: Any) -> None:
+    async def send_media_group(self, *args: Any, **kwargs: Any) -> list:
         self._record("media_group", args, kwargs)
+        return [self._make_message({"chat_id": kwargs.get("chat_id")})]
 
     async def answer_callback_query(self, *args: Any, **kwargs: Any) -> None:
         self._record("callback_answer", args, kwargs)
@@ -242,6 +275,21 @@ POST_MESSAGE_KEYS = frozenset(
     {"type", "args", "chat_id", "text", "parse_mode", "reply_markup"}
 )
 
+# ЭКРАН (utils/screen.render_screen): тот же send_message, что и у поста,
+# плюс маркер disable_web_page_preview=True — по нему экран и отличается
+# от поста (send_post этот параметр не передаёт).
+
+
+def is_screen_record(record: dict) -> bool:
+    """
+    Экран (постоянное сообщение управления): send или edit с маркером
+    disable_web_page_preview=True. Значение важно: PTB передаёт этот ключ
+    (со значением None) во всех Message.reply_* — различаем именно True.
+    """
+    if record.get("disable_web_page_preview") is not True:
+        return False
+    return record["type"] in ("message", "edit_message")
+
 
 def is_post_message(record: dict) -> bool:
     """Сообщение поста (превью/готовый пост), а не ответ на сообщение юзера."""
@@ -327,10 +375,12 @@ class Harness:
             post_creation_module.SessionLocal,
             drafts_module.SessionLocal,
             jobs_module.SessionLocal,
+            screen_module.SessionLocal,
         )
         post_creation_module.SessionLocal = self.session_factory
         drafts_module.SessionLocal = self.session_factory
         jobs_module.SessionLocal = self.session_factory
+        screen_module.SessionLocal = self.session_factory
 
         # Уведомления об ошибках троттлятся по (chat_id, time.monotonic) —
         # без сброса тесты «повторно заметили бы» чужие уведомления
@@ -357,6 +407,7 @@ class Harness:
         post_creation_module.SessionLocal = self._orig_session_local[0]
         drafts_module.SessionLocal = self._orig_session_local[1]
         jobs_module.SessionLocal = self._orig_session_local[2]
+        screen_module.SessionLocal = self._orig_session_local[3]
         errors_module._last_error_notice.clear()
         errors_module._last_error_notice.update(self._orig_error_notice)
         self.engine.dispose()
@@ -448,13 +499,62 @@ class Harness:
         return self.bot.calls
 
     def replies(self) -> list[dict]:
-        """Сообщения бота (промпты/ответы), НЕ являющиеся постами."""
+        """
+        Сообщения бота (промпты/ответы), НЕ являющиеся постами и НЕ
+        являющиеся экранами: лид-сообщения, отдельные подсказки.
+        """
         return [
-            c for c in self.calls if c["type"] == "message" and not is_post_message(c)
+            c
+            for c in self.calls
+            if c["type"] == "message"
+            and not is_post_message(c)
+            and not is_screen_record(c)
         ]
 
     def reply_texts(self) -> list[str]:
         return [call_text(c) or "" for c in self.replies()]
+
+    # —— экран (постоянное сообщение управления) ——
+
+    def screens(self) -> list[dict]:
+        """Все вызовы отрисовки экрана (send и edit) в порядке вызовов."""
+        return [c for c in self.calls if is_screen_record(c)]
+
+    def screen(self) -> dict | None:
+        """Последнее состояние экрана (его текст и клавиатура)."""
+        records = self.screens()
+        return records[-1] if records else None
+
+    def screen_text(self) -> str:
+        """Текст экрана на текущий момент ("" — экрана ещё не было)."""
+        record = self.screen()
+        return (call_text(record) or "") if record else ""
+
+    def screen_buttons(self) -> list[tuple[str, str | None]]:
+        """Inline-кнопки экрана на текущий момент."""
+        record = self.screen()
+        if record is None:
+            return []
+        return inline_buttons(record.get("reply_markup"))
+
+    def edits(self) -> list[dict]:
+        """Все edit_message_text (перерисовки экрана и превью)."""
+        return [c for c in self.calls if c["type"] == "edit_message"]
+
+    def deletes(self) -> list[dict]:
+        """Все delete_message (очистка временных сообщений)."""
+        return [c for c in self.calls if c["type"] == "delete_message"]
+
+    def deleted_ids(self) -> list[int]:
+        """message_id всех удалённых сообщений (в порядке удаления)."""
+        out: list[int] = []
+        for c in self.deletes():
+            pos_args: tuple = tuple(c.get("args") or ())
+            message_id = pos_args[1] if len(pos_args) > 1 else c.get("message_id")
+            if message_id is None:
+                continue
+            out.append(int(message_id))
+        return out
 
     def posts(self) -> list[str | None]:
         """
@@ -485,6 +585,14 @@ class Harness:
             if user_id is not None:
                 query = query.filter(Draft.user_id == user_id)
             return query.order_by(Draft.id).all()
+        finally:
+            session.close()
+
+    def user_states(self) -> list:
+        """Все строки таблицы user_states (экран + WIP-снимки)."""
+        session = self.session_factory()
+        try:
+            return session.query(UserState).order_by(UserState.user_id).all()
         finally:
             session.close()
 
