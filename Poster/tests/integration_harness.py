@@ -530,6 +530,10 @@ class Harness:
         record = self.screen()
         return (call_text(record) or "") if record else ""
 
+    def screen_texts(self) -> list[str]:
+        """История текстов экрана в порядке отрисовки (send и edit)."""
+        return [call_text(c) or "" for c in self.screens()]
+
     def screen_buttons(self) -> list[tuple[str, str | None]]:
         """Inline-кнопки экрана на текущий момент."""
         record = self.screen()

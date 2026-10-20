@@ -76,6 +76,42 @@ def make_session_factory():
     return sessionmaker(bind=engine), engine
 
 
+class _ScreenBot:
+    """Заглушка бота: записывает отрисовки экрана (send/edit)."""
+
+    def __init__(self):
+        self.calls = []
+
+    async def send_message(self, **kwargs):
+        self.calls.append({"type": "message", **kwargs})
+
+    async def edit_message_text(self, **kwargs):
+        self.calls.append({"type": "edit_message", **kwargs})
+
+    async def delete_message(self, **kwargs):
+        self.calls.append({"type": "delete_message", **kwargs})
+
+
+class _InMemoryDbMixin:
+    """Патчит SessionLocal на БД в памяти: post_bot.db тестами не трогается."""
+
+    def setUp(self):
+        import handlers.drafts as drafts_module
+        import handlers.post_creation as post_creation_module
+        import utils.screen as screen_module
+
+        self._modules = (post_creation_module, drafts_module, screen_module)
+        self._orig_session_local = tuple(m.SessionLocal for m in self._modules)
+        self.session_factory, self.engine = make_session_factory()
+        for m in self._modules:
+            m.SessionLocal = self.session_factory
+
+    def tearDown(self):
+        for m, orig in zip(self._modules, self._orig_session_local):
+            m.SessionLocal = orig
+        self.engine.dispose()
+
+
 def make_old_draft(session, user_id=111, age_days=40, title="Старый пост"):
     created = utcnow() - timedelta(days=age_days)
     draft = Draft(
@@ -471,18 +507,6 @@ class IsPostEmptyTests(unittest.TestCase):
 class MainMenuKeyboardTests(unittest.TestCase):
     """Главное меню: inline-клавиатура экрана + справка /help."""
 
-    class _ScreenBot:
-        """Заглушка бота: записывает отрисовки экрана."""
-
-        def __init__(self):
-            self.calls = []
-
-        async def send_message(self, **kwargs):
-            self.calls.append({"type": "message", **kwargs})
-
-        async def edit_message_text(self, **kwargs):
-            self.calls.append({"type": "edit_message", **kwargs})
-
     def test_keyboard_structure(self):
         from telegram import InlineKeyboardMarkup
 
@@ -496,7 +520,7 @@ class MainMenuKeyboardTests(unittest.TestCase):
         self.assertEqual(callbacks, ["create_post", "drafts", "help"])
 
     def test_help_lists_commands(self):
-        bot = self._ScreenBot()
+        bot = _ScreenBot()
         session_factory, engine = make_session_factory()
         self.addCleanup(engine.dispose)
         update = SimpleNamespace(
@@ -590,23 +614,27 @@ class ErrorNoticeTests(unittest.TestCase):
     HANDLERS_IMPORT_ERROR is not None,
     f"импорт обработчиков недоступен: {HANDLERS_IMPORT_ERROR}",
 )
-class DialogUxTests(unittest.TestCase):
+class DialogUxTests(_InMemoryDbMixin, unittest.TestCase):
     """UX диалога: превью, альбомы, редактирование, кнопка «Черновики»."""
 
     def test_preview_text_keeps_dialog_open(self):
         # Раньше текст на превью молча завершал диалог (END) — теперь подсказка
-        reply = AsyncMock()
+        # на экране управления
+        bot = _ScreenBot()
         update = SimpleNamespace(
-            effective_message=SimpleNamespace(text="просто текст", reply_text=reply),
+            effective_message=SimpleNamespace(
+                text="просто текст", reply_text=AsyncMock()
+            ),
             effective_user=SimpleNamespace(id=1),
+            effective_chat=SimpleNamespace(id=777),
         )
-        context = SimpleNamespace(user_data={"current_step": len(POST_STEPS)})
+        context = SimpleNamespace(user_data={"current_step": len(POST_STEPS)}, bot=bot)
 
         result = asyncio.run(handle_message(update, context))
 
         self.assertEqual(result, POST_CREATION)
-        reply.assert_awaited()
-        self.assertIn("кнопк", reply.await_args.args[0])
+        self.assertTrue(bot.calls, "подсказка должна появиться на экране")
+        self.assertIn("кнопк", bot.calls[-1]["text"])
 
     def test_album_outside_image_step_prompts_once(self):
         # Альбом не на шаге изображения: один промпт на весь альбом, без спама

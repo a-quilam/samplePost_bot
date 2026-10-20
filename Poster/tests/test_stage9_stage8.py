@@ -141,10 +141,12 @@ class Stage8ValuesThroughDialogTests(unittest.TestCase):
 
                 for raw in bad_values:
                     await h.text(raw)
-                    reply = h.reply_texts()[-1]
-                    self.assertTrue(
-                        reply.startswith("Некорректный формат."),
-                        f"ожидалась подсказка для {raw!r}, получено: {reply!r}",
+                    # подсказка об ошибке — на экране управления
+                    screen = h.screen_text()
+                    self.assertIn(
+                        "Некорректный формат.",
+                        screen,
+                        f"ожидалась подсказка для {raw!r}, получено: {screen!r}",
                     )
                     # Шаг не сдвинулся, поле не появилось, диалог жив
                     self.assertEqual(
@@ -153,7 +155,7 @@ class Stage8ValuesThroughDialogTests(unittest.TestCase):
                     self.assertIsNone(h.user_data().get(key), f"{raw!r}")
                     self.assertEqual(h.dialog_state(), POST_CREATION)
                     # Кнопка пропуска доступна и на ошибке
-                    self.assertIn("Пропустить", reply)
+                    self.assertIn("Пропустить", screen)
 
                 # После ошибок корректное значение принимается как обычно
                 await h.text(valid_sample[key])
@@ -188,18 +190,18 @@ class EasterEggSilenceTests(unittest.TestCase):
 
     @scenario_test
     async def test_secret_absent_from_start_help_prompts_and_edit(self, h):
-        # /start и /help
+        # /start и /help — ответы на экране управления
         await h.text("/start")
         await h.text("/help")
-        self.assert_no_secret(h.reply_texts(), "приветствии и справке")
+        self.assert_no_secret([h.screen_text()], "приветствии и справке")
 
-        # Все промпты девяти шагов (диалог пройден на пропусках)
+        # Все промпты девяти шагов (диалог пройден на пропусках) — экран
         await h.start_dialog()
-        wizard_replies = [h.reply_texts()[-1]]
+        wizard_texts = [h.screen_text()]
         for _ in range(len(POST_STEPS) - 1):
             await h.text("Пропустить")
-            wizard_replies.append(h.reply_texts()[-1])
-        self.assert_no_secret(wizard_replies, "промптах шагов")
+            wizard_texts.append(h.screen_text())
+        self.assert_no_secret(wizard_texts, "промптах шагов")
 
         # Превью (пустое) → меню правки и промпты каждого поля
         await h.callback("edit_post")

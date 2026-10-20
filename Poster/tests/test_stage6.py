@@ -93,11 +93,18 @@ except Exception as e:  # noqa: BLE001 — причина попадает в с
 
 
 class RecordingBot:
-    """Заглушка бота: записывает все вызовы отправки (или падает)."""
+    """Заглушка бота: записывает все вызовы отправки (или падает).
+
+    send_message возвращает фиктивное сообщение с растущим message_id —
+    экран управления (utils.screen) запоминает свой id и дальше правит себя,
+    а не создаёт новое сообщение на каждый шаг. Как и FakeBot в интеграционном
+    харнессе, различаем send (message) и edit (edit_message).
+    """
 
     def __init__(self, fail=False):
         self.calls = []
         self.fail = fail
+        self._next_id = 100
 
     def _record(self, kind, kwargs):
         if self.fail:
@@ -106,6 +113,14 @@ class RecordingBot:
 
     async def send_message(self, **kwargs):
         self._record("message", kwargs)
+        self._next_id += 1
+        return SimpleNamespace(message_id=self._next_id)
+
+    async def edit_message_text(self, **kwargs):
+        self._record("edit_message", kwargs)
+
+    async def delete_message(self, **kwargs):
+        self._record("delete_message", kwargs)
 
     async def send_photo(self, **kwargs):
         self._record("photo", kwargs)
@@ -257,6 +272,19 @@ def drive_wizard(user_data, bot):
     return context
 
 
+def post_calls(bot):
+    """Сообщения ПОСТОВ (превью/готовый), без экранов управления.
+
+    Экран шагов шлётся с disable_web_page_preview=True — по этому маркеру
+    отфильтровываем его, чтобы тесты видели только посты.
+    """
+    return [
+        c
+        for c in bot.calls
+        if c["type"] in ("message", "photo") and not c.get("disable_web_page_preview")
+    ]
+
+
 def make_session_factory():
     """Сессия над БД в памяти (отдельный engine, к post_bot.db не подключается)."""
     engine = create_engine("sqlite:///:memory:")
@@ -264,11 +292,46 @@ def make_session_factory():
     return sessionmaker(bind=engine), engine
 
 
+class _InMemoryDbMixin:
+    """Патчит SessionLocal на БД в памяти: post_bot.db тестами не трогается."""
+
+    def setUp(self):
+        import handlers.drafts as drafts_module
+        import handlers.post_creation as post_creation_module
+        import utils.screen as screen_module
+
+        self.post_creation_module = post_creation_module
+        self.drafts_module = drafts_module
+        self.screen_module = screen_module
+        self._orig_session_local = (
+            post_creation_module.SessionLocal,
+            drafts_module.SessionLocal,
+            screen_module.SessionLocal,
+        )
+        self.session_factory, self.engine = make_session_factory()
+        post_creation_module.SessionLocal = self.session_factory
+        drafts_module.SessionLocal = self.session_factory
+        screen_module.SessionLocal = self.session_factory
+
+    def tearDown(self):
+        self.post_creation_module.SessionLocal = self._orig_session_local[0]
+        self.drafts_module.SessionLocal = self._orig_session_local[1]
+        self.screen_module.SessionLocal = self._orig_session_local[2]
+        self.engine.dispose()
+
+    def _all_drafts(self):
+        session = self.session_factory()
+        try:
+            return session.query(Draft).order_by(Draft.id).all()
+        finally:
+            session.close()
+
+
 @unittest.skipIf(
     HANDLERS_IMPORT_ERROR is not None,
     f"импорт обработчиков недоступен: {HANDLERS_IMPORT_ERROR}",
 )
-class FullCycleTests(unittest.TestCase):
+class FullCycleTests(_InMemoryDbMixin, unittest.TestCase):
     """Создание → превью → «Готово» → готовый пост у пользователя."""
 
     def test_all_fields_then_finish_sends_final_post(self):
@@ -277,8 +340,8 @@ class FullCycleTests(unittest.TestCase):
         context = drive_wizard(user_data, bot)
 
         # На превью отправлен ровно один пост (фото с подписью)
-        self.assertEqual(len(bot.calls), 1)
-        preview = bot.calls[0]
+        self.assertEqual(len(post_calls(bot)), 1)
+        preview = post_calls(bot)[0]
         self.assertEqual(preview["chat_id"], 777)
         for value in FULL_TEXT_VALUES:
             # HTML не экранирует эти значения (спецсимволов нет) — видимы как есть
@@ -293,15 +356,15 @@ class FullCycleTests(unittest.TestCase):
         from telegram.ext import ConversationHandler
 
         self.assertEqual(result, ConversationHandler.END)
-        self.assertEqual(len(bot.calls), 2)
-        final = bot.calls[1]
+        self.assertEqual(len(post_calls(bot)), 2)
+        final = post_calls(bot)[1]
         # ПРЕВЬЮ == ГОТОВЫЙ ПОСТ: дословно одинаковый текст
         self.assertEqual(preview["caption"], final["caption"])
         # у готового поста нет кнопок действий
         self.assertIsNone(final.get("reply_markup"))
 
         # Все отправки — только в личный чат пользователя
-        self.assertEqual({c["chat_id"] for c in bot.calls}, {777})
+        self.assertEqual({c["chat_id"] for c in post_calls(bot)}, {777})
 
         # подтверждение «Пост готов.» отправлено пользователю
         confirmation = finish_update.effective_message.reply_text.await_args.args[0]
@@ -317,11 +380,11 @@ class FullCycleTests(unittest.TestCase):
         context = drive_wizard(user_data, bot)
 
         self.assertTrue(asyncio.run(finish_post(make_message_update(""), context)))
-        sends_after_first = len(bot.calls)
+        sends_after_first = len(post_calls(bot))
 
         # Повторное нажатие: данные уже очищены — отправки нет
         self.assertFalse(asyncio.run(finish_post(make_message_update(""), context)))
-        self.assertEqual(len(bot.calls), sends_after_first)
+        self.assertEqual(len(post_calls(bot)), sends_after_first)
 
     def test_empty_post_finish_rejected(self):
         bot = RecordingBot()
@@ -329,7 +392,7 @@ class FullCycleTests(unittest.TestCase):
         update = make_message_update("")
 
         self.assertFalse(asyncio.run(finish_post(update, context)))
-        self.assertEqual(bot.calls, [])
+        self.assertEqual(post_calls(bot), [])
         reply = update.effective_message.reply_text.await_args.args[0]
         self.assertIn("Пост пуст", reply)
 
@@ -350,7 +413,7 @@ class FullCycleTests(unittest.TestCase):
     HANDLERS_IMPORT_ERROR is not None,
     f"импорт обработчиков недоступен: {HANDLERS_IMPORT_ERROR}",
 )
-class PartialPostTests(unittest.TestCase):
+class PartialPostTests(_InMemoryDbMixin, unittest.TestCase):
     """Пропуск полей: пустые поля не показываются в превью, заглушек нет."""
 
     def test_skip_fields_preview_shows_only_filled(self):
@@ -371,8 +434,8 @@ class PartialPostTests(unittest.TestCase):
         # 9-й шаг (изображение) — тоже пропуск, дальше превью
         asyncio.run(handle_message(make_message_update("Пропустить"), context))
 
-        self.assertEqual(len(bot.calls), 1)
-        summary = bot.calls[0].get("caption") or bot.calls[0]["text"]
+        self.assertEqual(len(post_calls(bot)), 1)
+        summary = post_calls(bot)[0].get("caption") or post_calls(bot)[0]["text"]
         self.assertIn("• <b>Заголовок</b>: Концерт", summary)
         self.assertNotIn("• <b>Дата</b>:", summary)  # пропущенное поле не показано
         self.assertNotIn("Не указано", summary)  # нигде — ни как значение, ни как текст
@@ -389,8 +452,8 @@ class PartialPostTests(unittest.TestCase):
 
         self.assertTrue(asyncio.run(finish_post(make_message_update(""), context)))
         # последняя отправка — готовый пост (превью было первым)
-        self.assertEqual(len(bot.calls), 2)
-        summary = bot.calls[-1].get("text") or bot.calls[-1].get("caption")
+        self.assertEqual(len(post_calls(bot)), 2)
+        summary = post_calls(bot)[-1].get("text") or post_calls(bot)[-1].get("caption")
         self.assertIn("Только заголовок", summary)
         self.assertNotIn("Не указано", summary)
 
@@ -399,7 +462,7 @@ class PartialPostTests(unittest.TestCase):
     HANDLERS_IMPORT_ERROR is not None,
     f"импорт обработчиков недоступен: {HANDLERS_IMPORT_ERROR}",
 )
-class EditFlowTests(unittest.TestCase):
+class EditFlowTests(_InMemoryDbMixin, unittest.TestCase):
     """Редактирование: меню и промпт с человекочитаемыми названиями полей."""
 
     @staticmethod
@@ -441,26 +504,31 @@ class EditFlowTests(unittest.TestCase):
     HANDLERS_IMPORT_ERROR is not None,
     f"импорт обработчиков недоступен: {HANDLERS_IMPORT_ERROR}",
 )
-class DraftLifecycleTests(unittest.TestCase):
+class DraftLifecycleTests(_InMemoryDbMixin, unittest.TestCase):
     """Черновики: сохранение при выходах, открытие, обновление без копий."""
 
     def setUp(self):
         import handlers.drafts as drafts_module
         import handlers.post_creation as post_creation_module
+        import utils.screen as screen_module
 
         self.drafts_module = drafts_module
         self.post_creation_module = post_creation_module
+        self.screen_module = screen_module
         self._orig_session_local = (
             post_creation_module.SessionLocal,
             drafts_module.SessionLocal,
+            screen_module.SessionLocal,
         )
         self.session_factory, self.engine = make_session_factory()
         post_creation_module.SessionLocal = self.session_factory
         drafts_module.SessionLocal = self.session_factory
+        screen_module.SessionLocal = self.session_factory
 
     def tearDown(self):
         self.post_creation_module.SessionLocal = self._orig_session_local[0]
         self.drafts_module.SessionLocal = self._orig_session_local[1]
+        self.screen_module.SessionLocal = self._orig_session_local[2]
         self.engine.dispose()
 
     def _all_drafts(self):
@@ -607,7 +675,7 @@ class DraftLifecycleTests(unittest.TestCase):
     HANDLERS_IMPORT_ERROR is not None,
     f"импорт обработчиков недоступен: {HANDLERS_IMPORT_ERROR}",
 )
-class PhotoGuardTests(unittest.TestCase):
+class PhotoGuardTests(_InMemoryDbMixin, unittest.TestCase):
     """Фото вне шага — подсказка; фото при правке другого поля — не стирает."""
 
     def test_photo_outside_image_step_gives_hint(self):
@@ -652,7 +720,7 @@ class PhotoGuardTests(unittest.TestCase):
     HANDLERS_IMPORT_ERROR is not None,
     f"импорт обработчиков недоступен: {HANDLERS_IMPORT_ERROR}",
 )
-class AlbumRaceTests(unittest.TestCase):
+class AlbumRaceTests(_InMemoryDbMixin, unittest.TestCase):
     """
     A1 — гонка альбома: фотографии принимаются только пока активен шаг
     изображения; после «✅ Фото готово» запоздавшие фото не меняют данные
@@ -740,41 +808,6 @@ class AlbumRaceTests(unittest.TestCase):
             preview["caption"], final["caption"], "preview == final: текст"
         )
         self.assertEqual(preview["parse_mode"], final["parse_mode"])
-
-
-class _InMemoryDbMixin:
-    """Патчит SessionLocal на БД в памяти: post_bot.db тестами не трогается."""
-
-    def setUp(self):
-        import handlers.drafts as drafts_module
-        import handlers.post_creation as post_creation_module
-        import utils.screen as screen_module
-
-        self.post_creation_module = post_creation_module
-        self.drafts_module = drafts_module
-        self.screen_module = screen_module
-        self._orig_session_local = (
-            post_creation_module.SessionLocal,
-            drafts_module.SessionLocal,
-            screen_module.SessionLocal,
-        )
-        self.session_factory, self.engine = make_session_factory()
-        post_creation_module.SessionLocal = self.session_factory
-        drafts_module.SessionLocal = self.session_factory
-        screen_module.SessionLocal = self.session_factory
-
-    def tearDown(self):
-        self.post_creation_module.SessionLocal = self._orig_session_local[0]
-        self.drafts_module.SessionLocal = self._orig_session_local[1]
-        self.screen_module.SessionLocal = self._orig_session_local[2]
-        self.engine.dispose()
-
-    def _all_drafts(self):
-        session = self.session_factory()
-        try:
-            return session.query(Draft).order_by(Draft.id).all()
-        finally:
-            session.close()
 
 
 @unittest.skipIf(
@@ -1169,7 +1202,7 @@ class MainMenuDuringCreationTests(_InMemoryDbMixin, unittest.TestCase):
     HANDLERS_IMPORT_ERROR is not None,
     f"импорт обработчиков недоступен: {HANDLERS_IMPORT_ERROR}",
 )
-class EmptyPreviewTests(unittest.TestCase):
+class EmptyPreviewTests(_InMemoryDbMixin, unittest.TestCase):
     """B5: превью без единого заполненного поля объясняет, что заполнять."""
 
     def test_all_skips_preview_says_nothing_filled(self):
@@ -1179,17 +1212,23 @@ class EmptyPreviewTests(unittest.TestCase):
         for _ in range(len(POST_STEPS)):
             asyncio.run(handle_message(make_message_update("Пропустить"), context))
 
-        message_calls = [c for c in bot.calls if c["type"] == "message"]
-        self.assertEqual(len(message_calls), 1, "превью отправлено ровно один раз")
-        self.assertIn("Пока ни одно поле не заполнено", message_calls[0]["text"])
-        self.assertNotIn("•", message_calls[0]["text"], "строк полей не должно быть")
+        # сообщения-экраны шагов (disable_web_page_preview) не считаем:
+        # превью — отдельное сообщение поста
+        post_calls = [
+            c
+            for c in bot.calls
+            if c["type"] == "message" and not c.get("disable_web_page_preview")
+        ]
+        self.assertEqual(len(post_calls), 1, "превью отправлено ровно один раз")
+        self.assertIn("Пока ни одно поле не заполнено", post_calls[0]["text"])
+        self.assertNotIn("•", post_calls[0]["text"], "строк полей не должно быть")
 
 
 @unittest.skipIf(
     HANDLERS_IMPORT_ERROR is not None,
     f"импорт обработчиков недоступен: {HANDLERS_IMPORT_ERROR}",
 )
-class WipSaveFailureTests(unittest.TestCase):
+class WipSaveFailureTests(_InMemoryDbMixin, unittest.TestCase):
     """B6: сбой БД при сохранении WIP — подсказка рабочего следующего шага."""
 
     def test_db_failure_offers_working_next_step(self):
@@ -1226,14 +1265,21 @@ class UserFacingTextTests(_InMemoryDbMixin, unittest.TestCase):
 
     def test_wizard_validation_repeats_expected_format(self):
         user_data = {"current_step": 1}  # «Дата» — поле с валидатором
-        context = SimpleNamespace(user_data=user_data, bot=RecordingBot())
+        bot = RecordingBot()
+        context = SimpleNamespace(user_data=user_data, bot=bot)
         update = make_message_update("не дата")
 
         result = asyncio.run(handle_message(update, context))
 
         self.assertEqual(result, POST_CREATION)
-        reply = update.effective_message.reply_text.await_args.args[0]
-        self.assertIn("ДД.ММ.ГГГГ", reply, "валидация должна подсказывать формат")
+        # ошибка ввода обновляет экран управления (новых сообщений нет)
+        screen_texts = [
+            c.get("text", "") for c in bot.calls if c.get("disable_web_page_preview")
+        ]
+        self.assertTrue(
+            any("ДД.ММ.ГГГГ" in t for t in screen_texts),
+            "валидация должна подсказывать формат на экране",
+        )
         self.assertEqual(user_data["current_step"], 1, "шаг не должен продвинуться")
 
     def test_edit_validation_repeats_expected_format(self):

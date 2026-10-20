@@ -32,6 +32,7 @@ from models import (
     get_draft_photos,
     photos_to_json,
 )
+from utils import screen
 from utils import tg_context as ctx
 from utils.formatter import format_text
 from utils.tg_html import entities_to_html, escape_html, split_html, utf16_len
@@ -143,6 +144,23 @@ def get_skip_keyboard():
     Возвращает клавиатуру с кнопкой "Пропустить".
     """
     keyboard = [[InlineKeyboardButton("Пропустить", callback_data="skip")]]
+    return InlineKeyboardMarkup(keyboard)
+
+
+def get_step_keyboard(step_index: int):
+    """
+    Клавиатура экрана шага визарда: пропуск + навигация.
+
+    «◀️ Назад» возвращает на предыдущий шаг (данные не теряются), «🏠 Меню»
+    завершает диалог с сохранением WIP. На первом шаге кнопки «Назад» нет —
+    возвращаться некуда.
+    """
+    keyboard = [[InlineKeyboardButton("⏭ Пропустить", callback_data="skip")]]
+    navigation = []
+    if step_index > 0:
+        navigation.append(InlineKeyboardButton("◀️ Назад", callback_data="back"))
+    navigation.append(InlineKeyboardButton("🏠 Меню", callback_data="main_menu"))
+    keyboard.append(navigation)
     return InlineKeyboardMarkup(keyboard)
 
 
@@ -428,21 +446,113 @@ async def start_edit_draft(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         session.close()
 
 
+def _wip_payload(user_data: dict) -> dict:
+    """
+    Снимок незавершённого поста для долговременного хранения (JSON в
+    user_states). Восстанавливается в user_data после рестарта процесса —
+    см. utils.screen и handlers/post_creation.restore_wip.
+    """
+    payload = {key: user_data.get(key) for key in DRAFT_FIELD_KEYS}
+    payload["formats"] = user_data.get("formats") or {}
+    payload["photos"] = user_data.get("photos") or []
+    payload["current_step"] = user_data.get("current_step", 0)
+    payload["editing_draft_id"] = user_data.get("editing_draft_id")
+    payload["edit_field"] = user_data.get("edit_field")
+    payload["pending_media"] = user_data.get("pending_media")
+    return payload
+
+
+def _restore_wip_payload(user_data: dict, payload: dict) -> None:
+    """Восстанавливает данные поста из WIP-снимка (после рестарта)."""
+    for key in DRAFT_FIELD_KEYS:
+        user_data[key] = payload.get(key)
+    if payload.get("formats"):
+        user_data["formats"] = payload["formats"]
+    if payload.get("photos"):
+        user_data["photos"] = payload["photos"]
+        user_data["image"] = payload["photos"][0]
+    if payload.get("current_step") is not None:
+        user_data["current_step"] = payload["current_step"]
+    if payload.get("editing_draft_id") is not None:
+        user_data["editing_draft_id"] = payload["editing_draft_id"]
+    if payload.get("edit_field"):
+        user_data["edit_field"] = payload["edit_field"]
+    if payload.get("pending_media"):
+        user_data["pending_media"] = payload["pending_media"]
+
+
+def sync_wip(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """
+    Сохраняет снимок WIP и ref экрана в БД — после каждого принятого
+    изменения данных. Пустой пост хранится как пустой снимок (payload=None):
+    в БД не появляются записи пустых черновиков, но ref экрана сохраняется.
+    """
+    user_data = ctx.data(context)
+    payload = None if is_post_empty(user_data) else _wip_payload(user_data)
+    screen.save_state(ctx.user(update).id, user_data, ctx.chat(update).id, payload)
+
+
+def _filled_summary(user_data: dict) -> str:
+    """Краткая сводка заполненных полей для экрана шага (при необходимости)."""
+    filled = [
+        step["label"]
+        for step in POST_STEPS
+        if _field_filled(user_data.get(step["key"]))
+        or (step["key"] == "image" and user_data.get("photos"))
+    ]
+    if not filled:
+        return ""
+    shown = ", ".join(filled[:3])
+    if len(filled) > 3:
+        shown += f" и ещё {len(filled) - 3}"
+    return f"📌 Заполнено: {len(filled)} из {len(POST_STEPS)} — {shown}"
+
+
+async def _render_step_screen(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+    step_index: int,
+    *,
+    error: str | None = None,
+) -> None:
+    """
+    Рисует экран шага визарда: номер, поле, подсказку, сводку и кнопки.
+
+    Ошибка ввода обновляет тот же экран (новых сообщений с ошибками не
+    накапливается); введённое пользователем сообщение при этом не удаляется —
+    оно остаётся в чате до штатного принятия.
+    """
+    step = POST_STEPS[step_index]
+    parts = [
+        f"Шаг {step_index + 1} из {len(POST_STEPS)} — {step['label']}.\n"
+        f"{step['prompt']}"
+    ]
+    if error:
+        parts.append(f"⚠️ {error}")
+    summary = _filled_summary(ctx.data(context))
+    if summary:
+        parts.append(summary)
+    await screen.render_screen(
+        context,
+        ctx.data(context),
+        ctx.chat(update).id,
+        "\n\n".join(parts),
+        get_step_keyboard(step_index),
+    )
+    # ref экрана и WIP — в БД: очистка временных сообщений безопасна
+    sync_wip(update, context)
+
+
 async def prompt_step(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """
-    Отправляет пользователю сообщение с запросом на текущем шаге.
+    Показывает текущий шаг создания поста на экране управления.
     """
     step_index = ctx.data(context)["current_step"]
     if step_index < len(POST_STEPS):
-        step = POST_STEPS[step_index]
-        # Заголовок шага: номер прогресса + русское имя поля — пользователь
-        # всегда видит, какое поле заполняется сейчас
-        await ctx.message(update).reply_text(
-            f"Шаг {step_index + 1} из {len(POST_STEPS)} — {step['label']}.\n"
-            f"{step['prompt']}",
-            reply_markup=get_skip_keyboard(),
+        await _render_step_screen(update, context, step_index)
+        logger.info(
+            f"Переход к шагу {step_index + 1}: {POST_STEPS[step_index]['key']}."
         )
-        logger.info(f"Переход к шагу {step_index + 1}: {step['key']}.")
     else:
         await review_post(update, context)
 
@@ -456,9 +566,12 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         # Экран превью: раньше любой текст молча завершал диалог (END),
         # и пользователь терял состояние без объяснений. Теперь — подсказка,
         # диалог остаётся активным, действие выбирается кнопками.
-        await ctx.message(update).reply_text(
+        await screen.render_screen(
+            context,
+            ctx.data(context),
+            ctx.chat(update).id,
             "Пост готов к действию. Выберите действие кнопками под сообщением "
-            "превью — или /cancel, чтобы отменить."
+            "превью — или /cancel, чтобы отменить.",
         )
         return POST_CREATION
 
@@ -481,9 +594,13 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         else:
             valid = not step["validator"] or step["validator"](text)
         if not valid:
-            await ctx.message(update).reply_text(
-                f"Некорректный формат. {step['prompt']}",
-                reply_markup=get_skip_keyboard(),
+            # Ошибка — на том же экране; сообщение пользователя НЕ удаляется
+            # (оно может содержать полезный ввод для исправления)
+            await _render_step_screen(
+                update,
+                context,
+                step_index,
+                error=f"Некорректный формат. {step['prompt']}",
             )
             logger.warning(f"Некорректный ввод для поля '{step['key']}'.")
             return POST_CREATION
@@ -491,16 +608,17 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         if step["key"] == "image":
             if ctx.message(update).photo:
                 _store_photo(ctx.data(context), ctx.message(update))
-                await ctx.message(update).reply_text("Фото добавлено.")
                 logger.info("Пользователь добавил изображение.")
                 ctx.data(context)["current_step"] += 1
                 await review_post(update, context)
                 # Остаёмся в POST_CREATION, чтобы кнопки действий после обзора работали
                 return POST_CREATION
             else:
-                await ctx.message(update).reply_text(
-                    "Пожалуйста, отправьте изображение или нажмите 'Пропустить'.",
-                    reply_markup=get_skip_keyboard(),
+                await _render_step_screen(
+                    update,
+                    context,
+                    step_index,
+                    error="Пожалуйста, отправьте изображение или нажмите «Пропустить».",
                 )
                 logger.warning("Пользователь не отправил изображение.")
                 return POST_CREATION
@@ -538,6 +656,23 @@ async def handle_skip(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int
     logger.info(f"Пользователь пропустил поле '{step['key']}'.")
 
     ctx.data(context)["current_step"] += 1
+    await prompt_step(update, context)
+    return POST_CREATION
+
+
+async def handle_back(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """
+    Кнопка «◀️ Назад»: возвращает на предыдущий шаг визарда.
+
+    Данные заполненных полей сохраняются — пользователь видит прежний ввод
+    и может его уточнить. На первом шаге кнопки нет, но если callback пришёл
+    (устаревшая клавиатура) — просто перерисовываем шаг 1.
+    """
+    user_data = ctx.data(context)
+    step_index = user_data.get("current_step", 0)
+    if step_index > 0:
+        user_data["current_step"] = step_index - 1
+        logger.info(f"Возврат на шаг {user_data['current_step'] + 1}.")
     await prompt_step(update, context)
     return POST_CREATION
 
@@ -650,6 +785,8 @@ async def handle_callback_query(
 
     if data == "skip":
         return await handle_skip(update, context)
+    elif data == "back":
+        return await handle_back(update, context)
     elif data == "media_done":
         step_index = ctx.data(context).get("current_step", 0)
         if step_index < len(POST_STEPS) and POST_STEPS[step_index]["key"] == "image":
@@ -1241,7 +1378,7 @@ async def main_menu_during_creation(
 # Глобальные callback'и (main_menu, delete_, draftpage_, editdraft_) сюда
 # НЕ входят — ими занимаются свои хендлеры.
 STALE_DIALOG_CALLBACK_PATTERN = (
-    r"^(?:skip|media_done|save_draft|finish|cancel_edit|edit_[a-z_]+)$"
+    r"^(?:skip|back|media_done|save_draft|finish|cancel_edit|edit_[a-z_]+)$"
 )
 
 
@@ -1295,7 +1432,7 @@ def post_creation_handlers() -> list[BaseHandler]:
                     MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message),
                     CallbackQueryHandler(
                         handle_callback_query,
-                        pattern="^(skip|save_draft|finish|edit_post|media_done)$",
+                        pattern="^(skip|back|save_draft|finish|edit_post|media_done)$",
                     ),
                 ],
                 EDIT_FIELD: [

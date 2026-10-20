@@ -101,14 +101,13 @@ class FullCreationFlowTests(unittest.TestCase):
         await h.start_dialog()
         self.assertEqual(h.dialog_state(), POST_CREATION)
 
-        # Девять полей по порядку: каждый шаг даёт следующий промпт
+        # Девять полей по порядку: каждый шаг даёт следующий промпт на экране
         for key, value in WIZARD_VALUES.items():
             await h.text(value)
             index = step_index(key) + 1
-            self.assertEqual(
-                h.reply_texts()[-1],
-                expected_prompts()[index],
-                f"после поля '{key}' должен идти промпт шага {index + 1}",
+            self.assertTrue(
+                h.screen_text().startswith(expected_prompts()[index]),
+                f"после поля '{key}' на экране должен быть промпт шага {index + 1}",
             )
             self.assertEqual(h.dialog_state(), POST_CREATION)
 
@@ -135,9 +134,18 @@ class FullCreationFlowTests(unittest.TestCase):
             self.assertIn(escape_html(value), caption)
         self.assertIn("Добавлено", caption)  # изображение
 
-        # Ровно девять промптов шагов — без лишних сообщений
-        prompts = [t for t in h.reply_texts() if t.startswith("Шаг ")]
-        self.assertEqual(prompts, expected_prompts()[: len(POST_STEPS)])
+        # Промпты шагов — на одном экране (редактируется на месте), а не
+        # девятью отдельными сообщениями. Экран был создан при /start, дальше
+        # только edit: ни одной send-отрисовки за время визарда.
+        rendered_prompts = [t for t in h.screen_texts() if t.startswith("Шаг ")]
+        self.assertEqual(len(rendered_prompts), len(POST_STEPS))
+        for rendered, expected in zip(rendered_prompts, expected_prompts()):
+            self.assertTrue(
+                rendered.startswith(expected),
+                f"на экране должен быть промпт: {expected!r}, получено {rendered!r}",
+            )
+        screen_sends = [c for c in h.screens() if c["type"] == "message"]
+        self.assertEqual(len(screen_sends), 1, "за весь сценарий создаётся один экран")
 
         # «✅ Готово — получить пост» → финальный пост, диалог завершён
         await h.callback("finish")
@@ -195,15 +203,23 @@ class FullCreationFlowTests(unittest.TestCase):
         """Каждый шаг просит поле и несёт кнопку «Пропустить» (callback skip)."""
         await h.start_dialog()
         for index, step in enumerate(POST_STEPS):
-            record = h.replies()[-1]
-            self.assertEqual(
-                record["text"], expected_prompts()[index], f"шаг {step['key']}"
+            # промпт шага — на экране управления, а не отдельным сообщением
+            self.assertTrue(
+                h.screen_text().startswith(expected_prompts()[index]),
+                f"шаг {step['key']}: на экране должен быть промпт",
             )
-            self.assertEqual(
-                inline_buttons(record["reply_markup"]),
-                [("Пропустить", "skip")],
+            buttons = h.screen_buttons()
+            self.assertIn(
+                ("⏭ Пропустить", "skip"),
+                buttons,
                 f"на шаге {step['key']} должна быть кнопка пропуска",
             )
+            # навигация: «◀️ Назад» есть, кроме первого шага; «🏠 Меню» всегда
+            self.assertIn(("🏠 Меню", "main_menu"), buttons)
+            if index == 0:
+                self.assertNotIn(("◀️ Назад", "back"), buttons)
+            else:
+                self.assertIn(("◀️ Назад", "back"), buttons)
             if index == step_index("image"):
                 await h.photo("photo-prompt")
             else:
@@ -468,7 +484,8 @@ class SkipAndEditTests(unittest.TestCase):
 
         await h.text("просто сообщение")
 
-        self.assertIn("Пост готов к действию", h.reply_texts()[-1])
+        # подсказка — на экране управления, новое сообщение не создаётся
+        self.assertIn("Пост готов к действию", h.screen_text())
         self.assertEqual(len(h.posts()), posts_before)
         self.assertEqual(h.dialog_state(), POST_CREATION)
 
@@ -515,10 +532,13 @@ class SkipAndEditTests(unittest.TestCase):
         self.assertEqual(len(drafts), 1, "прежний пост должен сохраниться")
         self.assertEqual(drafts[0].title, "Прежний ВИП")
         self.assertNotIn("title", h.user_data())
-        self.assertEqual(h.reply_texts()[-1], expected_prompts()[0])
+        self.assertTrue(
+            h.screen_text().startswith(expected_prompts()[0]),
+            "после перезапуска экран показывает шаг 1",
+        )
 
         # Повторный /create_post — та же точка входа (entry-точка диалога)
         await h.text("/create_post")
         self.assertEqual(h.dialog_state(), POST_CREATION)
-        self.assertEqual(h.reply_texts()[-1], expected_prompts()[0])
+        self.assertTrue(h.screen_text().startswith(expected_prompts()[0]))
         self.assertEqual(len(h.drafts()), 1, "пустой ВИП не создаёт второй черновик")

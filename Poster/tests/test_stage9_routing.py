@@ -122,12 +122,9 @@ class CallbackMatrixTests(unittest.TestCase):
 
     @scenario_test
     async def test_dialog_buttons_carry_expected_callback_data(self, h):
-        # Кнопка пропуска на каждом шаге
+        # Кнопка пропуска на каждом шаге — на экране управления
         await h.start_dialog()
-        self.assertEqual(
-            inline_buttons(h.replies()[-1]["reply_markup"]),
-            [("Пропустить", "skip")],
-        )
+        self.assertIn(("⏭ Пропустить", "skip"), h.screen_buttons())
         # Кнопки завершения сбора альбома
         self.assertEqual(
             [
@@ -269,10 +266,12 @@ class CommandRoutingTests(unittest.TestCase):
                 await h.text(trigger)
 
                 self.assertEqual(h.dialog_state(), POST_CREATION)
-                self.assertEqual(
-                    h.reply_texts()[-1],
-                    f"Шаг 1 из {len(POST_STEPS)} — {POST_STEPS[0]['label']}.\n"
-                    f"{POST_STEPS[0]['prompt']}",
+                self.assertTrue(
+                    h.screen_text().startswith(
+                        f"Шаг 1 из {len(POST_STEPS)} — {POST_STEPS[0]['label']}.\n"
+                        f"{POST_STEPS[0]['prompt']}"
+                    ),
+                    "шаг 1 должен появиться на экране",
                 )
                 self.assertEqual(
                     len(h.drafts()),
@@ -379,10 +378,12 @@ class ResilienceTests(unittest.TestCase):
 
         await h.text("✏️ Создать пост")
         self.assertEqual(h.dialog_state(), POST_CREATION)
-        self.assertEqual(
-            h.reply_texts()[-1],
-            f"Шаг 1 из {len(POST_STEPS)} — {POST_STEPS[0]['label']}.\n"
-            f"{POST_STEPS[0]['prompt']}",
+        self.assertTrue(
+            h.screen_text().startswith(
+                f"Шаг 1 из {len(POST_STEPS)} — {POST_STEPS[0]['label']}.\n"
+                f"{POST_STEPS[0]['prompt']}"
+            ),
+            "шаг 1 должен появиться на экране",
         )
 
     @scenario_test
