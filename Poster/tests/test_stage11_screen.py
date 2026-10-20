@@ -201,6 +201,76 @@ class TempMessagesTests(unittest.TestCase):
     INTEGRATION_IMPORT_ERROR is not None,
     f"интеграционное окружение недоступно: {INTEGRATION_IMPORT_ERROR}",
 )
+class DropUserInputTests(unittest.TestCase):
+    """drop_user_input: удаляется только ввод ПОСЛЕ подтверждённого сохранения."""
+
+    def setUp(self) -> None:
+        self.bot = FakeBot()
+        self.context: Any = SimpleNamespace(bot=self.bot)
+
+    @staticmethod
+    def _update(message, *, callback_query=None):
+        return SimpleNamespace(message=message, callback_query=callback_query)
+
+    @staticmethod
+    def _user_message(message_id: int = 41, *, is_bot: bool = False):
+        return SimpleNamespace(
+            message_id=message_id,
+            from_user=SimpleNamespace(id=7, is_bot=is_bot),
+            chat=SimpleNamespace(id=777),
+        )
+
+    def _deleted(self) -> list[int]:
+        return [c["args"][1] for c in self.bot.calls if c["type"] == "delete_message"]
+
+    def test_user_text_message_is_deleted(self) -> None:
+        update = self._update(self._user_message(41))
+
+        asyncio.run(screen.drop_user_input(update, self.context))
+
+        self.assertEqual(self._deleted(), [41])
+
+    def test_callback_context_is_not_touched(self) -> None:
+        # сообщение в callback-контексте — сообщение бота (экран/пост):
+        # удалять его нельзя
+        update = self._update(self._user_message(42), callback_query=object())
+
+        asyncio.run(screen.drop_user_input(update, self.context))
+
+        self.assertEqual(self._deleted(), [])
+
+    def test_bot_message_is_not_deleted(self) -> None:
+        update = self._update(self._user_message(43, is_bot=True))
+
+        asyncio.run(screen.drop_user_input(update, self.context))
+
+        self.assertEqual(self._deleted(), [])
+
+    def test_missing_message_and_chat_are_safe(self) -> None:
+        # заглушки/неполные объекты не должны ронять очистку
+        asyncio.run(screen.drop_user_input(SimpleNamespace(), self.context))
+        asyncio.run(
+            screen.drop_user_input(
+                self._update(SimpleNamespace(message_id=44)), self.context
+            )
+        )
+        self.assertEqual(self._deleted(), [])
+
+    def test_delete_failure_does_not_raise(self) -> None:
+        self.bot.errors_by_type["delete_message"] = BadRequest(
+            "message to delete not found"
+        )
+        update = self._update(self._user_message(45))
+
+        asyncio.run(screen.drop_user_input(update, self.context))  # не падает
+
+        self.assertEqual(self.bot.calls, [])  # вызов был, но исключение проглочено
+
+
+@unittest.skipIf(
+    INTEGRATION_IMPORT_ERROR is not None,
+    f"интеграционное окружение недоступно: {INTEGRATION_IMPORT_ERROR}",
+)
 class UserStatePersistenceTests(unittest.TestCase):
     """WIP-снимок в user_states: сохранение, восстановление, очистка."""
 

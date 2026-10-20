@@ -195,6 +195,7 @@ def _clear_post_data(user_data: dict) -> None:
         "last_rejected_media",
         "editing_draft_id",
         "edit_field",
+        "temp_messages",
     ]:
         user_data.pop(key, None)
 
@@ -208,6 +209,9 @@ def _apply_skip(user_data: dict, key: str) -> None:
         user_data["image"] = None
         user_data["photos"] = []
         user_data.pop("pending_media", None)
+        # собранные исходники альбома в очистку НЕ уходят: их данные
+        # отброшены, трекинг снимается — сообщения остаются в чате
+        user_data.pop("temp_messages", None)
     else:
         user_data[key] = None
     # Формат пропущенного поля неактуален и не должен «воскреснуть» в сводке
@@ -481,15 +485,21 @@ def _restore_wip_payload(user_data: dict, payload: dict) -> None:
         user_data["pending_media"] = payload["pending_media"]
 
 
-def sync_wip(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+def sync_wip(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
     """
     Сохраняет снимок WIP и ref экрана в БД — после каждого принятого
     изменения данных. Пустой пост хранится как пустой снимок (payload=None):
     в БД не появляются записи пустых черновиков, но ref экрана сохраняется.
+
+    Возвращает True, если снимок подтверждённо записан — очистка временных
+    сообщений пользователя в этот момент безопасна; False — сбой БД
+    (очистка откладывается, данные остаются в user_data).
     """
     user_data = ctx.data(context)
     payload = None if is_post_empty(user_data) else _wip_payload(user_data)
-    screen.save_state(ctx.user(update).id, user_data, ctx.chat(update).id, payload)
+    return screen.save_state(
+        ctx.user(update).id, user_data, ctx.chat(update).id, payload
+    )
 
 
 def _filled_summary(user_data: dict) -> str:
@@ -514,13 +524,16 @@ async def _render_step_screen(
     step_index: int,
     *,
     error: str | None = None,
-) -> None:
+) -> bool:
     """
     Рисует экран шага визарда: номер, поле, подсказку, сводку и кнопки.
 
     Ошибка ввода обновляет тот же экран (новых сообщений с ошибками не
     накапливается); введённое пользователем сообщение при этом не удаляется —
     оно остаётся в чате до штатного принятия.
+
+    Возвращает True, если ref экрана и снимок WIP подтверждённо записаны
+    в БД (после этого можно удалять временные сообщения пользователя).
     """
     step = POST_STEPS[step_index]
     parts = [
@@ -540,21 +553,51 @@ async def _render_step_screen(
         get_step_keyboard(step_index),
     )
     # ref экрана и WIP — в БД: очистка временных сообщений безопасна
-    sync_wip(update, context)
+    return sync_wip(update, context)
 
 
-async def prompt_step(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+def _preview_hint_text() -> str:
+    """Подсказка экрана в состоянии «превью поста показано»."""
+    return (
+        "Пост готов к действию. Выберите действие кнопками под сообщением "
+        "превью — или /cancel, чтобы отменить."
+    )
+
+
+async def _render_preview_hint(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> bool:
+    """
+    Состояние «превью показано» на экране управления: подсказка действий и
+    кнопки главного меню (действия по посту — кнопками самого превью).
+
+    Возвращает True, если снимок состояния подтверждённо записан в БД.
+    """
+    await screen.render_screen(
+        context,
+        ctx.data(context),
+        ctx.chat(update).id,
+        _preview_hint_text(),
+        main_menu_keyboard(),
+    )
+    return sync_wip(update, context)
+
+
+async def prompt_step(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
     """
     Показывает текущий шаг создания поста на экране управления.
+
+    Возвращает True, если состояние подтверждённо сохранено в БД —
+    после этого можно удалять временные сообщения пользователя.
     """
     step_index = ctx.data(context)["current_step"]
     if step_index < len(POST_STEPS):
-        await _render_step_screen(update, context, step_index)
+        synced = await _render_step_screen(update, context, step_index)
         logger.info(
             f"Переход к шагу {step_index + 1}: {POST_STEPS[step_index]['key']}."
         )
-    else:
-        await review_post(update, context)
+        return synced
+    return await review_post(update, context)
 
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
@@ -566,13 +609,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         # Экран превью: раньше любой текст молча завершал диалог (END),
         # и пользователь терял состояние без объяснений. Теперь — подсказка,
         # диалог остаётся активным, действие выбирается кнопками.
-        await screen.render_screen(
-            context,
-            ctx.data(context),
-            ctx.chat(update).id,
-            "Пост готов к действию. Выберите действие кнопками под сообщением "
-            "превью — или /cancel, чтобы отменить.",
-        )
+        # Ввод НЕ удаляется: он не сохранён в пост (действий не было).
+        await _render_preview_hint(update, context)
         return POST_CREATION
 
     step = POST_STEPS[step_index]
@@ -608,8 +646,13 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         if step["key"] == "image":
             if ctx.message(update).photo:
                 _store_photo(ctx.data(context), ctx.message(update))
+                screen.track_temp(ctx.data(context), ctx.message(update))
                 logger.info("Пользователь добавил изображение.")
                 ctx.data(context)["current_step"] += 1
+                if sync_wip(update, context):
+                    await screen.cleanup_temps(
+                        context, ctx.chat(update).id, ctx.data(context)
+                    )
                 await review_post(update, context)
                 # Остаёмся в POST_CREATION, чтобы кнопки действий после обзора работали
                 return POST_CREATION
@@ -638,7 +681,10 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             )
 
     ctx.data(context)["current_step"] += 1
-    await prompt_step(update, context)
+    if await prompt_step(update, context):
+        # поле подтверждённо сохранено (user_data + снимок WIP в БД) —
+        # временное сообщение ввода убирается из чата best-effort
+        await screen.drop_user_input(update, context)
     return POST_CREATION
 
 
@@ -648,7 +694,9 @@ async def handle_skip(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int
     """
     step_index = ctx.data(context).get("current_step", 0)
     if step_index >= len(POST_STEPS):
-        await review_post(update, context)
+        # Устаревшая кнопка «Пропустить» на экране превью: второй превью
+        # НЕ шлём (стек сообщений превью не растёт) — напоминаем про кнопки
+        await _render_preview_hint(update, context)
         return POST_CREATION
 
     step = POST_STEPS[step_index]
@@ -677,6 +725,37 @@ async def handle_back(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int
     return POST_CREATION
 
 
+async def _render_photo_rejection(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> None:
+    """
+    Подсказка «фото можно добавить на шаге Изображение» — на экране
+    управления (новых сообщений не накапливается, чат не засоряется).
+    """
+    user_data = ctx.data(context)
+    step_index = user_data.get("current_step", 0)
+    if step_index < len(POST_STEPS):
+        step = POST_STEPS[step_index]
+        await screen.render_screen(
+            context,
+            user_data,
+            ctx.chat(update).id,
+            f"Фото можно добавить на шаге «Изображение». "
+            f"Сейчас — шаг {step_index + 1} из {len(POST_STEPS)} "
+            f"({step['label']}): {step['prompt']}",
+            get_step_keyboard(step_index),
+        )
+    else:
+        # На экране превью — путь к замене фото понятен
+        await screen.render_screen(
+            context,
+            user_data,
+            ctx.chat(update).id,
+            "Изображение можно заменить через «✏️ Редактировать» " "→ «Изображение».",
+            main_menu_keyboard(),
+        )
+
+
 async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     """
     Приём фотографий на шаге изображения.
@@ -686,6 +765,10 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> in
     media_group_id: первое показывает кнопку «✅ Фото готово», остальные
     молча добавляются в список. Шаг завершается кнопкой — без таймеров
     и гонок с кнопками «Сохранить в черновики»/«Готово».
+
+    Исходники фото — временные сообщения: удаляются ТОЛЬКО после того, как
+    все file_id сохранены и сбор альбома завершён кнопкой. Отклонённые фото
+    (не на шаге изображения) не сохраняются — и не удаляются.
     """
     message = ctx.message(update)
     if not message.photo:
@@ -709,45 +792,40 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> in
         and user_data.get("pending_media") == media_group_id
     ):
         user_data.setdefault("photos", []).append(message.photo[-1].file_id)
+        # file_id принят → исходник уйдёт в очистку вместе с альбомом
+        screen.track_temp(user_data, message)
         return POST_CREATION
 
     if not at_image_step:
         # Фото вне шага изображения: НЕ теряем молча — объясняем, где менять
-        # фото. Альбом отвечаем ОДНИМ сообщением: без дедупликации каждое
+        # фото. Альбом отвечаем ОДНИМ рендером экрана: без дедупликации каждое
         # фото альбома породило бы свой промпт (спам в чат).
         if media_group_id:
             if user_data.get("last_rejected_media") == media_group_id:
                 return POST_CREATION
             user_data["last_rejected_media"] = media_group_id
-        if step_index < len(POST_STEPS):
-            step = POST_STEPS[step_index]
-            await message.reply_text(
-                f"Фото можно добавить на шаге «Изображение». "
-                f"Сейчас — шаг {step_index + 1} из {len(POST_STEPS)} "
-                f"({step['label']}): {step['prompt']}",
-                reply_markup=get_skip_keyboard(),
-            )
-        else:
-            # На экране превью — путь к замене фото понятен
-            await message.reply_text(
-                "Изображение можно заменить через «✏️ Редактировать» "
-                "→ «Изображение»."
-            )
+        await _render_photo_rejection(update, context)
         return POST_CREATION
 
     state = _store_photo(user_data, message)
+    screen.track_temp(user_data, message)
     if state == "started":
-        await message.reply_text(
+        await screen.render_screen(
+            context,
+            user_data,
+            ctx.chat(update).id,
             "📷 Получаю фотографии альбома. Отправьте остальные, "
             "затем нажмите «✅ Фото готово».",
-            reply_markup=get_media_done_keyboard(),
+            get_media_done_keyboard(),
         )
         logger.info(f"Начат сбор медиа-группы {media_group_id}.")
         return POST_CREATION
     if state == "single":
-        # Одиночная фотография — как раньше: сразу к превью
+        # Одиночная фотография — как раньше: сразу к превью. file_id
+        # сохранён → снимок WIP в БД → исходники можно удалять.
         user_data["current_step"] += 1
-        await message.reply_text("Фото добавлено.")
+        if sync_wip(update, context):
+            await screen.cleanup_temps(context, ctx.chat(update).id, user_data)
         await review_post(update, context)
     # "continued" — запоздавшее фото альбома уже добавлено в список
     return POST_CREATION
@@ -760,15 +838,27 @@ async def _finish_media_done(
     Общая логика кнопки «✅ Фото готово»: фиксирует собранные фотографии.
     Возвращает True, если фотографии есть и шаг можно завершить.
     """
-    photos = ctx.data(context).get("photos") or []
-    if not photos:
-        await ctx.message(update).reply_text(
-            "Фотографии не получены. Отправьте фото (альбом) или нажмите «Пропустить».",
-            reply_markup=get_skip_keyboard(),
-        )
-        return False
-    ctx.data(context)["image"] = photos[0]
-    return True
+    user_data = ctx.data(context)
+    photos = user_data.get("photos") or []
+    if photos:
+        user_data["image"] = photos[0]
+        return True
+    text = "Фотографии не получены. Отправьте фото (альбом) или нажмите «Пропустить»."
+    if user_data.get("edit_field"):
+        # режим правки поля — подсказка в контексте правки (отдельным сообщением)
+        await ctx.message(update).reply_text(text, reply_markup=get_skip_keyboard())
+    else:
+        step_index = user_data.get("current_step", 0)
+        if step_index < len(POST_STEPS):
+            # ошибка — обновлением экрана шага, новых сообщений нет
+            await screen.render_screen(
+                context,
+                user_data,
+                ctx.chat(update).id,
+                text,
+                get_step_keyboard(step_index),
+            )
+    return False
 
 
 async def handle_callback_query(
@@ -793,8 +883,17 @@ async def handle_callback_query(
             if not await _finish_media_done(update, context):
                 return POST_CREATION
             ctx.data(context)["current_step"] += 1
-            await ctx.message(update).reply_text("Фотографии добавлены.")
-        await review_post(update, context)
+            # Все file_id сохранены и сбор альбома завершён — исходники
+            # уходят в очистку (только после снимка WIP в БД, best-effort)
+            if sync_wip(update, context):
+                await screen.cleanup_temps(
+                    context, ctx.chat(update).id, ctx.data(context)
+                )
+            await prompt_step(update, context)
+        else:
+            # Устаревшая кнопка после завершения сбора: напоминаем про
+            # действия по превью, второй превью не шлём
+            await _render_preview_hint(update, context)
         return POST_CREATION
     elif data == "save_draft":
         # Пустой пост черновик не создаёт: остаёмся на превью с объяснением
@@ -965,11 +1064,16 @@ async def send_post(
         )
 
 
-async def review_post(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+async def review_post(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
     """
     Превью поста: фотографии + ровно тот же текст, что уйдёт в готовом
     посте по кнопке «Готово». Кнопки действий — к этому же сообщению
     (для альбома — отдельным сообщением).
+
+    Экран управления переводится в состояние «превью показано»: подсказка
+    действий и кнопки меню (действия по посту — кнопками самого превью).
+    Возвращает True, если состояние подтверждённо сохранено в БД — после
+    этого можно удалять временные сообщения пользователя.
     """
     logger.info("Переход к превью поста.")
     await send_post(
@@ -981,6 +1085,7 @@ async def review_post(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         reply_markup=get_post_actions_keyboard(),
         markup_lead_text="Выберите действие:",
     )
+    return await _render_preview_hint(update, context)
 
 
 async def save_draft(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
@@ -1216,7 +1321,10 @@ async def process_edit(update: Update, context: ContextTypes.DEFAULT_TYPE) -> in
     if text.lower() == "пропустить":
         _apply_skip(user_data, field)
         logger.info(f"Пользователь пропустил обновление поля '{field}'.")
-        await review_post(update, context)
+        synced = await review_post(update, context)
+        if synced:
+            # пропуск принят и сохранён → временное сообщение ввода убираем
+            await screen.drop_user_input(update, context)
         # Возвращаемся в POST_CREATION: кнопки действий должны остаться рабочими
         return POST_CREATION
 
@@ -1243,6 +1351,9 @@ async def process_edit(update: Update, context: ContextTypes.DEFAULT_TYPE) -> in
             logger.warning("Пользователь не отправил изображение при редактировании.")
             return EDIT_FIELD
         state = _store_photo(user_data, message)
+        # file_id принят → исходник уходит в очистку после подтверждённого
+        # сохранения (для альбома — после «✅ Фото готово»)
+        screen.track_temp(user_data, message)
         if state == "started":
             await message.reply_text(
                 "📷 Отправьте остальные фотографии альбома, "
@@ -1269,7 +1380,14 @@ async def process_edit(update: Update, context: ContextTypes.DEFAULT_TYPE) -> in
         logger.info(f"Пользователь обновил поле '{field}'.")
 
     # Остаёмся в диалоге: превью с актуальными значениями + кнопки действий
-    await review_post(update, context)
+    synced = await review_post(update, context)
+    if synced:
+        if field == "image":
+            # file_id сохранён → исходник фото уходит в очистку best-effort
+            await screen.cleanup_temps(context, ctx.chat(update).id, user_data)
+        else:
+            # поле подтверждённо сохранено → временное сообщение ввода убираем
+            await screen.drop_user_input(update, context)
     return POST_CREATION
 
 
@@ -1297,7 +1415,10 @@ async def finish_photo_edit(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     if not await _finish_media_done(update, context):
         return EDIT_FIELD
     logger.info("Пользователь обновил изображения (медиа-группа).")
-    await review_post(update, context)
+    synced = await review_post(update, context)
+    if synced:
+        # все file_id сохранены и сбор завершён → исходники альбома удаляются
+        await screen.cleanup_temps(context, ctx.chat(update).id, ctx.data(context))
     return POST_CREATION
 
 

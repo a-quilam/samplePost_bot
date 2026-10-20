@@ -77,7 +77,7 @@ def make_session_factory():
 
 
 class _ScreenBot:
-    """Заглушка бота: записывает отрисовки экрана (send/edit)."""
+    """Заглушка бота: записывает отрисовки экрана (send/edit/delete)."""
 
     def __init__(self):
         self.calls = []
@@ -88,8 +88,16 @@ class _ScreenBot:
     async def edit_message_text(self, **kwargs):
         self.calls.append({"type": "edit_message", **kwargs})
 
-    async def delete_message(self, **kwargs):
-        self.calls.append({"type": "delete_message", **kwargs})
+    async def delete_message(self, *args, **kwargs):
+        # cleanup_messages зовёт позиционно: delete_message(chat_id, message_id)
+        record = {
+            "type": "delete_message",
+            "chat_id": args[0] if args else kwargs.get("chat_id"),
+            **kwargs,
+        }
+        if len(args) > 1:
+            record["message_id"] = args[1]
+        self.calls.append(record)
 
 
 class _InMemoryDbMixin:
@@ -637,36 +645,38 @@ class DialogUxTests(_InMemoryDbMixin, unittest.TestCase):
         self.assertIn("кнопк", bot.calls[-1]["text"])
 
     def test_album_outside_image_step_prompts_once(self):
-        # Альбом не на шаге изображения: один промпт на весь альбом, без спама
-        context = SimpleNamespace(user_data={"current_step": 0})
+        # Альбом не на шаге изображения: один рендер экрана на весь альбом,
+        # без спама сообщениями на каждое фото
+        bot = _ScreenBot()
+        context = SimpleNamespace(user_data={"current_step": 0}, bot=bot)
 
-        def make_message():
+        def make_message(message_id):
             return SimpleNamespace(
                 photo=[SimpleNamespace(file_id="fid")],
                 media_group_id="mg-1",
+                message_id=message_id,
+                from_user=SimpleNamespace(is_bot=False),
+                chat=SimpleNamespace(id=777),
                 reply_text=AsyncMock(),
             )
 
-        first = make_message()
-        asyncio.run(
-            handle_photo(
-                SimpleNamespace(
-                    effective_message=first, effective_user=SimpleNamespace(id=1)
-                ),
-                context,
+        def make_update(message):
+            return SimpleNamespace(
+                effective_message=message,
+                effective_user=SimpleNamespace(id=1),
+                effective_chat=SimpleNamespace(id=777),
+                message=message,
+                callback_query=None,
             )
-        )
-        second = make_message()
-        asyncio.run(
-            handle_photo(
-                SimpleNamespace(
-                    effective_message=second, effective_user=SimpleNamespace(id=1)
-                ),
-                context,
-            )
-        )
 
-        first.reply_text.assert_awaited_once()
+        first = make_message(11)
+        asyncio.run(handle_photo(make_update(first), context))
+        second = make_message(12)
+        asyncio.run(handle_photo(make_update(second), context))
+
+        self.assertEqual(len(bot.calls), 1, "подсказка — один рендер экрана")
+        self.assertIn("Фото можно добавить", bot.calls[0]["text"])
+        first.reply_text.assert_not_awaited()
         second.reply_text.assert_not_awaited()
 
     def test_edit_without_field_returns_to_preview(self):

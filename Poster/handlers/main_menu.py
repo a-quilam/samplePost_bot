@@ -72,6 +72,9 @@ async def render_main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Команда /start: главное меню на существующем экране."""
     await render_main_menu(update, context)
+    # Сообщение с командой — временный ввод: меню уже на экране, убираем
+    # его best-effort (при сбое очистки диалог не ломается)
+    await screen.drop_user_input(update, context)
 
 
 def help_text() -> str:

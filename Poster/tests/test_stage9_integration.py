@@ -112,9 +112,11 @@ class FullCreationFlowTests(unittest.TestCase):
             self.assertEqual(h.dialog_state(), POST_CREATION)
 
         # Фото — закрывает шаг «Изображение» и показывает превью
-        await h.photo("photo-final-1")
-        self.assertEqual(h.reply_texts()[-1], "Фото добавлено.")
-        preview = h.calls[-1]
+        photo_update = await h.photo("photo-final-1")
+        # исходное сообщение с фото убрано после сохранения file_id
+        self.assertIn(photo_update.message.message_id, h.deleted_ids())
+        self.assertIn("Пост готов к действию", h.screen_text())
+        preview = h.post_records()[-1]
         self.assertEqual(preview["type"], "photo")
         self.assertEqual(preview["photo"], "photo-final-1")
         self.assertEqual(preview["parse_mode"], "HTML")
@@ -179,7 +181,7 @@ class FullCreationFlowTests(unittest.TestCase):
             await h.text("Пропустить")
 
         # Превью — текстовое сообщение с кнопками действий
-        preview = h.calls[-1]
+        preview = h.post_records()[-1]
         self.assertEqual(preview["type"], "message")
         self.assertEqual(preview["parse_mode"], "HTML")
         self.assertEqual(
@@ -240,6 +242,9 @@ class SkipAndEditTests(unittest.TestCase):
         for skip_index, step in enumerate(POST_STEPS):
             with self.subTest(field=step["key"]):
                 await h.start_dialog()
+                photo_posts_before = len(
+                    [c for c in h.post_records() if c["type"] == "photo"]
+                )
                 for index, candidate in enumerate(POST_STEPS):
                     if index == skip_index:
                         await h.text("Пропустить")
@@ -253,7 +258,9 @@ class SkipAndEditTests(unittest.TestCase):
                 self.assertEqual(h.dialog_state(), POST_CREATION)
                 if step["key"] == "image":
                     self.assertEqual(
-                        h.calls[-1]["type"], "message", "фото не должно отправляться"
+                        len([c for c in h.post_records() if c["type"] == "photo"]),
+                        photo_posts_before,
+                        "пропущенное фото не должно отправляться",
                     )
                     self.assertNotIn("• <b>Изображение</b>:", summary)
                     self.assertIsNone(h.user_data().get("image"))
@@ -366,7 +373,7 @@ class SkipAndEditTests(unittest.TestCase):
     async def test_edit_each_field_updates_preview(self, h):
         await h.goto_step(step_index("image"))
         await h.photo("photo-original")
-        old_photo = h.calls[-1]["photo"]
+        old_photo = h.post_records()[-1]["photo"]
 
         for key, new_value in NEW_VALUES.items():
             with self.subTest(field=key):
@@ -391,7 +398,7 @@ class SkipAndEditTests(unittest.TestCase):
                     await h.text(new_value)
                 self.assertEqual(h.dialog_state(), POST_CREATION)
 
-                preview = h.calls[-1]
+                preview = h.post_records()[-1]
                 if key == "image":
                     self.assertEqual(preview["type"], "photo")
                     self.assertNotEqual(preview["photo"], old_photo)

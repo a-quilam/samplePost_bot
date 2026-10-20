@@ -271,8 +271,10 @@ class PhotoAlbumTests(unittest.TestCase):
     async def test_single_photo_and_replacement_via_edit(self, h):
         await h.goto_step(step_index("image"))
         await h.photo("photo-1")
-        self.assertIn("Фото добавлено.", h.reply_texts()[-1])
-        first_preview = h.calls[-1]
+        # «Фото добавлено» больше не отдельным сообщением: экран сразу
+        # переходит в состояние «превью показано»
+        self.assertIn("Пост готов к действию", h.screen_text())
+        first_preview = h.post_records()[-1]
         self.assertEqual(first_preview["type"], "photo")
 
         # Замена фото через «Редактировать» → «Изображение»
@@ -285,7 +287,7 @@ class PhotoAlbumTests(unittest.TestCase):
 
         await h.photo("photo-2")
         self.assertEqual(h.dialog_state(), POST_CREATION)
-        second_preview = h.calls[-1]
+        second_preview = h.post_records()[-1]
         self.assertEqual(second_preview["type"], "photo")
         self.assertEqual(second_preview["photo"], "photo-2")
 
@@ -303,26 +305,24 @@ class PhotoAlbumTests(unittest.TestCase):
         await h.goto_step(step_index("image"))
 
         await h.photo("a1", media_group_id="mg-1")
-        first_reply = h.reply_texts()[-1]
-        self.assertIn("Получаю фотографии альбома", first_reply)
-        self.assertEqual(
-            inline_buttons(h.replies()[-1]["reply_markup"]),
-            [("✅ Фото готово", "media_done")],
-        )
+        self.assertIn("Получаю фотографии альбома", h.screen_text())
+        self.assertIn(("✅ Фото готово", "media_done"), h.screen_buttons())
 
         # Остальные фото альбома добавляются молча (без спама подтверждений)
-        replies_before = len(h.reply_texts())
+        screens_before = len(h.screen_texts())
         await h.photo("a2", media_group_id="mg-1")
         await h.photo("a3", media_group_id="mg-1")
-        self.assertEqual(len(h.reply_texts()), replies_before)
+        self.assertEqual(len(h.screen_texts()), screens_before)
 
         await h.callback("media_done")
-        self.assertIn("Фотографии добавлены", h.reply_texts()[-2])
+        # экран переводится в состояние «превью показано»
+        self.assertIn("Пост готов к действию", h.screen_text())
         self.assertEqual(h.dialog_state(), POST_CREATION)
 
         # Превью альбома: сама медиа-группа + lead-сообщение с кнопками
-        # (send_post отправляет альбом раньше lead-сообщения)
-        lead = [c for c in h.calls if c["type"] == "message"][-1]
+        # (send_post отправляет альбом раньше lead-сообщения; лид — не пост
+        # и не экран, поэтому он в replies())
+        lead = h.replies()[-1]
         self.assertEqual(lead["text"], "Выберите действие:")
         self.assertEqual(
             [data for _, data in inline_buttons(lead["reply_markup"])],
@@ -348,15 +348,15 @@ class PhotoAlbumTests(unittest.TestCase):
         await h.goto_step(step_index("image"))
         await h.photo("a1", media_group_id="mg-1")
         await h.callback("media_done")
-        preview = h.calls[-1]
+        preview = h.post_records()[-1]
         self.assertEqual(preview["type"], "photo")
 
         # Запоздавшие фото альбома: подсказка (одна на альбом) + дедупликация
         await h.photo("a2", media_group_id="mg-1")
-        self.assertIn("Редактировать", h.reply_texts()[-1])
-        replies_before = len(h.reply_texts())
+        self.assertIn("Редактировать", h.screen_text())
+        screens_before = len(h.screen_texts())
         await h.photo("a3", media_group_id="mg-1")
-        self.assertEqual(len(h.reply_texts()), replies_before, "дедуп по альбому")
+        self.assertEqual(len(h.screen_texts()), screens_before, "дедуп по альбому")
         self.assertEqual(h.user_data()["photos"], ["a1"], "состав не изменился")
 
         # preview == final: запоздавшие фото не попали в пост
@@ -399,17 +399,15 @@ class PhotoAlbumTests(unittest.TestCase):
 
         await h.callback("media_done")
 
-        self.assertIn("Фотографии не получены", h.reply_texts()[-1])
+        # отказ — обновлением экрана, без новых сообщений
+        self.assertIn("Фотографии не получены", h.screen_text())
         self.assertEqual(h.dialog_state(), POST_CREATION)
         self.assertEqual(
             h.user_data().get("current_step"),
             step_index("image"),
             "шаг не должен продвигаться без фото",
         )
-        self.assertEqual(
-            inline_buttons(h.replies()[-1]["reply_markup"]),
-            [("Пропустить", "skip")],
-        )
+        self.assertIn(("⏭ Пропустить", "skip"), h.screen_buttons())
 
         # После отказа шаг корректно пропускается
         await h.text("Пропустить")
@@ -423,7 +421,8 @@ class PhotoAlbumTests(unittest.TestCase):
         await h.text("Концерт")
         step_before = h.user_data().get("current_step")
         await h.photo("stray-1")
-        self.assertIn("Фото можно добавить на шаге", h.reply_texts()[-1])
+        # подсказка — обновлением экрана, новых сообщений нет
+        self.assertIn("Фото можно добавить на шаге", h.screen_text())
         self.assertEqual(h.dialog_state(), POST_CREATION)
         self.assertEqual(h.user_data().get("current_step"), step_before)
         self.assertEqual(h.user_data().get("title"), "Концерт")
@@ -434,7 +433,7 @@ class PhotoAlbumTests(unittest.TestCase):
         await h.text("Пропустить")
         posts_before = len(h.posts())
         await h.photo("stray-2")
-        self.assertIn("Редактировать", h.reply_texts()[-1])
+        self.assertIn("Редактировать", h.screen_text())
         self.assertEqual(len(h.posts()), posts_before)
         self.assertEqual(h.dialog_state(), POST_CREATION)
 
@@ -460,7 +459,7 @@ class PhotoAlbumTests(unittest.TestCase):
             await h.text("Пропустить")
         await h.photo("photo-mix")
 
-        preview = h.calls[-1]
+        preview = h.post_records()[-1]
         await h.callback("finish")
         final = [c for c in h.calls if c["type"] == "photo"][-1]
 

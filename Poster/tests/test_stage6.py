@@ -26,6 +26,7 @@
 """
 
 import asyncio
+import itertools
 import unittest
 from datetime import datetime
 from pathlib import Path
@@ -116,11 +117,17 @@ class RecordingBot:
         self._next_id += 1
         return SimpleNamespace(message_id=self._next_id)
 
-    async def edit_message_text(self, **kwargs):
+    async def edit_message_text(self, *args, **kwargs):
         self._record("edit_message", kwargs)
 
-    async def delete_message(self, **kwargs):
-        self._record("delete_message", kwargs)
+    async def delete_message(self, *args, **kwargs):
+        # cleanup_messages зовёт позиционно: delete_message(chat_id, message_id)
+        self._record(
+            "delete_message",
+            {"chat_id": args[0] if args else kwargs.get("chat_id"), **kwargs},
+        )
+        if len(args) > 1:
+            self.calls[-1]["message_id"] = args[1]
 
     async def send_photo(self, **kwargs):
         self._record("photo", kwargs)
@@ -129,16 +136,24 @@ class RecordingBot:
         self._record("media_group", kwargs)
 
 
+_MESSAGE_ID_SEQ = itertools.count(1)
+
+
 def make_message_update(text=None, *, photo=None, media_group_id=None, entities=None):
     """Update, имитирующий сообщение пользователя (текст или фото).
 
     entities — реальные MessageEntity форматирования (None = без форматирования).
+    message_id растёт, как у настоящего Telegram: очистка временного ввода
+    отслеживает и удаляет конкретные сообщения.
     """
     message = SimpleNamespace(
         text=text,
         photo=photo,
         media_group_id=media_group_id,
         entities=entities,
+        message_id=next(_MESSAGE_ID_SEQ),
+        from_user=SimpleNamespace(id=7, is_bot=False),
+        chat=SimpleNamespace(id=777),
         reply_text=AsyncMock(),
     )
     return SimpleNamespace(
@@ -680,14 +695,17 @@ class PhotoGuardTests(_InMemoryDbMixin, unittest.TestCase):
 
     def test_photo_outside_image_step_gives_hint(self):
         user_data = {"current_step": 0, "title": "Концерт"}  # шаг «Заголовок»
-        context = SimpleNamespace(user_data=user_data, bot=RecordingBot())
+        bot = RecordingBot()
+        context = SimpleNamespace(user_data=user_data, bot=bot)
         update = make_message_update(photo=[SimpleNamespace(file_id="f1")])
 
         result = asyncio.run(handle_photo(update, context))
 
         self.assertEqual(result, POST_CREATION)
-        reply = update.effective_message.reply_text.await_args.args[0]
-        self.assertIn("Изображение", reply)
+        # подсказка — обновлением экрана управления (новых сообщений нет)
+        screens = [c for c in bot.calls if c.get("disable_web_page_preview")]
+        self.assertTrue(screens, "подсказка должна появиться на экране")
+        self.assertIn("Изображение", screens[-1]["text"])
         # поле не тронуто, шаг не продвинут, фото не потеряно молча
         self.assertEqual(user_data["title"], "Концерт")
         self.assertEqual(user_data["current_step"], 0)
@@ -695,13 +713,15 @@ class PhotoGuardTests(_InMemoryDbMixin, unittest.TestCase):
 
     def test_photo_at_preview_points_to_edit_button(self):
         user_data = {"current_step": len(POST_STEPS)}
-        context = SimpleNamespace(user_data=user_data, bot=RecordingBot())
+        bot = RecordingBot()
+        context = SimpleNamespace(user_data=user_data, bot=bot)
         update = make_message_update(photo=[SimpleNamespace(file_id="f1")])
 
         asyncio.run(handle_photo(update, context))
 
-        reply = update.effective_message.reply_text.await_args.args[0]
-        self.assertIn("Редактировать", reply)
+        screens = [c for c in bot.calls if c.get("disable_web_page_preview")]
+        self.assertTrue(screens, "подсказка должна появиться на экране")
+        self.assertIn("Редактировать", screens[-1]["text"])
 
     def test_photo_during_other_field_edit_keeps_value(self):
         user_data = {"edit_field": "title", "title": "Концерт"}
@@ -757,9 +777,17 @@ class AlbumRaceTests(_InMemoryDbMixin, unittest.TestCase):
         asyncio.run(handle_photo(third, context))
 
         self.assertEqual(user_data["photos"], ["a-1", "a-2", "a-3"])
-        # подтверждение сбора — одно на альбом, без спама на каждое фото
+        # подтверждение сбора — одно на альбом, без спама на каждое фото:
+        # рендер экрана с кнопкой «✅ Фото готово» при первом фото
+        album_screens = [
+            c
+            for c in bot.calls
+            if c.get("disable_web_page_preview")
+            and "Получаю фотографии альбома" in (c.get("text") or "")
+        ]
+        self.assertEqual(len(album_screens), 1, "подсказка сбора — один рендер экрана")
         first_reply = first.effective_message.reply_text
-        first_reply.assert_awaited_once()
+        first_reply.assert_not_awaited()
         second.effective_message.reply_text.assert_not_awaited()
         third.effective_message.reply_text.assert_not_awaited()
 
@@ -772,6 +800,8 @@ class AlbumRaceTests(_InMemoryDbMixin, unittest.TestCase):
             [media.media for media in previews[0]["media"]],
             ["a-1", "a-2", "a-3"],
         )
+        # после сохранения всех file_id исходники альбома удаляются (3 фото)
+        self.assertEqual(len(self._calls_of(bot, "delete_message")), 3)
 
     def test_late_album_photo_after_done_does_not_change_post(self):
         # Гонка: пользователь нажал «Фото готово», превью уже показано,
@@ -792,10 +822,18 @@ class AlbumRaceTests(_InMemoryDbMixin, unittest.TestCase):
         self.assertEqual(
             user_data["photos"], ["a-1"], "запоздавшие фото не попадают в пост"
         )
-        # пользователь не получает тишины: подсказка + дедуп по альбому
-        late_reply = late.effective_message.reply_text
-        late_reply.assert_awaited_once()
-        self.assertIn("Редактировать", late_reply.await_args.args[0])
+        # пользователь не получает тишины: подсказка на экране + дедуп по альбому
+        hint_screens = [
+            c
+            for c in bot.calls
+            if c.get("disable_web_page_preview")
+            and "Редактировать" in (c.get("text") or "")
+        ]
+        self.assertEqual(
+            len(hint_screens), 1, "подсказка запоздавшему фото — один рендер экрана"
+        )
+        self.assertIn("Редактировать", hint_screens[0]["text"])
+        late.effective_message.reply_text.assert_not_awaited()
         late_again.effective_message.reply_text.assert_not_awaited()
 
         asyncio.run(handle_callback_query(make_callback_update("finish"), context))

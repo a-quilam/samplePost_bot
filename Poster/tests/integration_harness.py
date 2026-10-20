@@ -389,6 +389,13 @@ class Harness:
 
         self.app: Any = None
         self._update_seq = 0
+        # message_id сообщений пользователя растут, как у настоящего Telegram:
+        # очистка временного ввода (удаление сообщений) проверяется по id
+        self._user_msg_seq = 0
+
+    def _next_user_msg_id(self) -> int:
+        self._user_msg_seq += 1
+        return self._user_msg_seq
 
     async def start(self) -> "Harness":
         self.app = bot_module.build_application()
@@ -435,6 +442,7 @@ class Harness:
                 chat_id=chat_id if chat_id is not None else self.chat_id,
                 user_id=user_id if user_id is not None else self.user_id,
                 update_id=self._update_seq,
+                message_id=self._next_user_msg_id(),
                 entities=entities,
             )
         )
@@ -468,6 +476,7 @@ class Harness:
                 chat_id=chat_id if chat_id is not None else self.chat_id,
                 user_id=user_id if user_id is not None else self.user_id,
                 update_id=self._update_seq,
+                message_id=self._next_user_msg_id(),
             )
         )
 
@@ -575,6 +584,19 @@ class Harness:
                 first = c["media"][0]
                 out.append(getattr(first, "caption", None))
         return out
+
+    def post_records(self) -> list[dict]:
+        """
+        Сырые записи ПОСТОВ (превью/готовый) в порядке отправки: send_photo,
+        send_media_group и прямые send_message из send_post. Экран управления
+        и ответы бота сюда не попадают — после превью экран перерисовывается,
+        и tests[-1] по всем calls был бы экраном, а не превью.
+        """
+        return [
+            c
+            for c in self.calls
+            if c["type"] in ("photo", "media_group") or is_post_message(c)
+        ]
 
     def answers(self) -> list[dict]:
         """Все answer_callback_query (защита от «висящего» спиннера)."""

@@ -136,6 +136,34 @@ async def cleanup_messages(bot, chat_id: int, message_ids: list[int]) -> None:
             logger.info(f"Не удалось удалить сообщение {message_id}: {e}")
 
 
+async def drop_user_input(update: Any, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """
+    Удаляет временное сообщение ввода пользователя (команда, текст шага,
+    фото) best-effort.
+
+    Вызывается ТОЛЬКО после подтверждённого сохранения данных (поле принято
+    в user_data + снимок WIP записан в БД): при сбое очистки диалог не
+    ломается, а сообщение остаётся в чате — пользователь ничего не теряет.
+
+    Не трогаются: сообщения бота (в т.ч. экран и посты — их сообщение
+    приходит в callback-контексте), чужие сообщения и всё, что не является
+    сообщением пользователя (атрибуты отсутствуют — guard'ы, а не ошибки).
+    """
+    message = getattr(update, "message", None)
+    if message is None or getattr(update, "callback_query", None) is not None:
+        return
+    message_id = getattr(message, "message_id", None)
+    if message_id is None:
+        return
+    from_user = getattr(message, "from_user", None)
+    if from_user is not None and getattr(from_user, "is_bot", False):
+        return
+    chat_id = getattr(getattr(message, "chat", None), "id", None)
+    if chat_id is None:
+        return
+    await cleanup_messages(context.bot, chat_id, [message_id])
+
+
 async def cleanup_temps(
     context: ContextTypes.DEFAULT_TYPE, chat_id: int, user_data: dict
 ) -> None:
@@ -178,7 +206,7 @@ def save_state(
     user_data: dict,
     chat_id: int,
     payload: dict | None,
-) -> None:
+) -> bool:
     """
     Сохраняет снимок состояния: ref экрана + WIP-payload.
 
@@ -187,6 +215,9 @@ def save_state(
     сообщений пользователя безопасна даже при аварийном рестарте.
     Ошибка БД не прерывает сценарий (логируется) — данные остаются в
     user_data и попробуются сохранить при следующем изменении.
+
+    Возвращает True, если снимок подтверждённо записан (очистка временных
+    сообщений разрешена), False — сбой БД (очистка откладывается).
     """
     session = SessionLocal()
     try:
@@ -200,9 +231,11 @@ def save_state(
         row.payload = _dumps(payload)
         row.updated_at = utcnow()
         session.commit()
+        return True
     except Exception as e:
         session.rollback()
         logger.error(f"Не удалось сохранить состояние пользователя {user_id}: {e}")
+        return False
     finally:
         session.close()
 

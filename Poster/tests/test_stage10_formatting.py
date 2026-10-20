@@ -60,7 +60,7 @@ class FormattedInputTests(unittest.TestCase):
             entities=[MessageEntity(type=MessageEntity.BOLD, offset=0, length=14)],
         )
 
-        preview_record = h.calls[-1]
+        preview_record = h.post_records()[-1]
         self.assertEqual(preview_record["parse_mode"], "HTML")
         preview = h.posts()[-1]
         self.assertIn("• <b>Заголовок</b>: <b>Важный концерт</b>", preview)
@@ -296,7 +296,7 @@ class PhotoFormattingTests(unittest.TestCase):
             await h.text("Пропустить")
         await h.photo("fmt-photo-1")
 
-        preview = h.calls[-1]
+        preview = h.post_records()[-1]
         self.assertEqual(preview["type"], "photo")
         self.assertEqual(preview["parse_mode"], "HTML")
         self.assertIn("• <b>Заголовок</b>: <b>Концерт сегодня</b>", preview["caption"])

@@ -407,7 +407,7 @@ class ResilienceTests(unittest.TestCase):
     async def test_finish_send_failure_keeps_post_and_reports(self, h):
         await h.goto_step(step_index("image"))
         await h.photo("photo-r1")
-        preview = h.calls[-1]
+        preview = h.post_records()[-1]
 
         h.bot.fail_types.add("photo")
         await h.callback("finish")
