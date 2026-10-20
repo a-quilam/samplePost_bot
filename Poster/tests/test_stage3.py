@@ -282,6 +282,14 @@ class PostSummaryTests(unittest.TestCase):
         self.assertNotIn("• <b>Заголовок</b>:", summary)
         self.assertIn("• <b>Дата</b>: 15.09.2026", summary)
 
+    def test_summary_skips_whitespace_only_values(self):
+        # Пробелы-только — пустое поле (единый критерий _field_filled)
+        summary = build_post_summary(
+            {"title": "   \n", "date": "25.12.2026"}, heading="h"
+        )
+        self.assertNotIn("• <b>Заголовок</b>:", summary)
+        self.assertIn("• <b>Дата</b>: 25.12.2026", summary)
+
     def test_summary_photo_line_only_when_present(self):
         self.assertIn(
             "• <b>Изображение</b>: Добавлено",

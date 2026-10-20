@@ -656,8 +656,11 @@ async def handle_callback_query(
         await review_post(update, context)
         return POST_CREATION
     elif data == "save_draft":
-        await save_draft(update, context)
-        return ConversationHandler.END
+        # Пустой пост черновик не создаёт: остаёмся на превью с объяснением
+        # (при ошибке БД данные остаются в user_data — тоже остаёмся)
+        if await save_draft(update, context):
+            return ConversationHandler.END
+        return POST_CREATION
     elif data == "finish":
         # «Готово»: пост отправлен → цикл завершён; иначе (пустой пост,
         # сбой отправки) остаёмся на превью, данные не потеряны
@@ -670,6 +673,20 @@ async def handle_callback_query(
     else:
         logger.warning(f"Неизвестный CallbackQuery: {data}")
         return POST_CREATION
+
+
+def _field_filled(value) -> bool:
+    """
+    Единый критерий заполненности текстового поля.
+
+    Пусто: None, пустая строка, значение только из пробелов, а также
+    легаси-заглушка «Не указано» из старых черновиков. Одно правило для
+    сводки (build_post_summary) и запрета пустых черновиков (is_post_empty).
+    """
+    if value is None:
+        return False
+    stripped = str(value).strip()
+    return bool(stripped) and stripped != "Не указано"
 
 
 def build_post_summary(post_data: dict, *, heading: str) -> str:
@@ -694,8 +711,9 @@ def build_post_summary(post_data: dict, *, heading: str) -> str:
                 has_fields = True
             continue
         value = post_data.get(key)
-        # «Не указано» — легаси-запись старых черновиков, для сводки это пусто
-        if value in (None, "", "Не указано"):
+        # Единый критерий пустоты: пробелы-только и легаси-«Не указано» —
+        # пустое поле, его строки в сводке не будет
+        if not _field_filled(value):
             continue
         html_value = formats.get(key) or escape_html(str(value))
         lines.append(f"• <b>{step['label']}</b>: {html_value}")
@@ -824,26 +842,40 @@ async def review_post(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     )
 
 
-async def save_draft(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+async def save_draft(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
     """
     Сохраняет пост в черновики: обновляет открытый черновик (editing_draft_id)
     или создаёт новый — лишних копий не появляется.
+
+    Возвращает True, если запись создана/обновлена. False — пустой пост
+    (запись НЕ создаётся и не портит открытый черновик, данные остаются
+    в user_data) или ошибка БД (данные тоже не теряются). Диалог в этом
+    случае остаётся на превью.
     """
     logger.info("Сохранение поста в черновики.")
+    user_data = ctx.data(context)
+    if is_post_empty(_post_fields(user_data)):
+        await ctx.message(update).reply_text(
+            "Пост пуст: заполните хотя бы одно поле или добавьте фото, "
+            "чтобы сохранить черновик.",
+            reply_markup=main_menu_keyboard(),
+        )
+        logger.info("Пустой пост не сохранён — черновик не создан.")
+        return False
     session: Session = SessionLocal()
     try:
         draft = _find_own_draft(
-            session, ctx.data(context).get("editing_draft_id"), ctx.user(update).id
+            session, user_data.get("editing_draft_id"), ctx.user(update).id
         )
         is_update = draft is not None
         if draft is None:
             draft = Draft(user_id=ctx.user(update).id)
             session.add(draft)
-        _apply_fields(draft, ctx.data(context))
+        _apply_fields(draft, user_data)
         session.commit()
         # После успешного сохранения данные чистим: повторные выходы не создадут
         # дубль-черновик, а пост уже надёжно в БД
-        _clear_post_data(ctx.data(context))
+        _clear_post_data(user_data)
         if is_update:
             await ctx.message(update).reply_text(
                 f"Черновик {draft.id} обновлён.", reply_markup=main_menu_keyboard()
@@ -853,6 +885,7 @@ async def save_draft(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
                 "Пост сохранён в черновики.", reply_markup=main_menu_keyboard()
             )
         logger.info(f"Черновик {draft.id} сохранён (обновление={is_update}).")
+        return True
     except Exception as e:
         session.rollback()
         await ctx.message(update).reply_text(
@@ -860,6 +893,7 @@ async def save_draft(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
             reply_markup=main_menu_keyboard(),
         )
         logger.error(f"Ошибка при сохранении черновика: {e}")
+        return False
     finally:
         session.close()
 
@@ -868,14 +902,14 @@ def is_post_empty(post_data: dict) -> bool:
     """
     Пост пуст, если нет ни одного содержательного поля и нет фотографий.
 
-    Значения-заглушки «Не указано» (легаси-черновики со старыми записями)
-    считаются пустыми — такой пост бессмысленно отправлять.
+    Критерий поля — _field_filled (strip + легаси-«Не указано»): пробелы-только
+    это пусто. Фото (image + photos) делает пост заполненным, даже если все
+    текстовые поля пусты.
     """
-    empty_values = (None, "", "Не указано")
     for key in DRAFT_FIELD_KEYS:
         if key == "image":
             continue  # фото проверяется отдельно (image + photos)
-        if post_data.get(key) not in empty_values:
+        if _field_filled(post_data.get(key)):
             return False
     return not post_data.get("image") and not post_data.get("photos")
 

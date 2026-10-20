@@ -445,6 +445,14 @@ class IsPostEmptyTests(unittest.TestCase):
     def test_title_makes_not_empty(self):
         self.assertFalse(is_post_empty({"title": "Встреча"}))
 
+    def test_whitespace_only_values_are_empty(self):
+        # Пробелы-только (без содержательного текста) — пустой пост
+        self.assertTrue(is_post_empty({"title": "   ", "text": "\n\t "}))
+        self.assertFalse(is_post_empty({"title": "   ", "text": " сюда"}))
+
+    def test_legacy_placeholder_with_spaces_is_empty(self):
+        self.assertTrue(is_post_empty({"title": "  Не указано  "}))
+
     def test_text_makes_not_empty(self):
         self.assertFalse(is_post_empty({"text": "Привет!"}))
 

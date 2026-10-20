@@ -262,12 +262,11 @@ class SkipAndEditTests(unittest.TestCase):
         self.assertIsNone(h.dialog_state())
 
     @scenario_test
-    async def test_empty_post_save_draft_is_explicit_user_choice(self, h):
-        """Характеристика: защита есть только на отправке («Готово»).
+    async def test_empty_post_save_draft_creates_nothing_and_explains(self, h):
+        """Пустой пост не создаёт черновик: понятный отказ, диалог живёт.
 
-        «Сохранить в черновики» на пустом посте — явное действие пользователя:
-        черновик создаётся пустой, завершения диалога не происходит (кнопка
-        не «проваливается»), состояние остаётся на превью.
+        Ни записи в БД, ни очистки user_data, ни завершения диалога —
+        пользователь видит объяснение, заполняет поле и сохраняет снова.
         """
         await h.start_dialog()
         for _ in range(len(POST_STEPS)):
@@ -275,14 +274,43 @@ class SkipAndEditTests(unittest.TestCase):
 
         await h.callback("save_draft")
 
-        self.assertEqual(len(h.drafts()), 1)
-        draft = h.drafts()[0]
-        self.assertIsNone(draft.title)
-        self.assertIsNone(draft.date)
-        self.assertEqual(h.reply_texts()[-1].split(".")[0], "Пост сохранён в черновики")
+        self.assertEqual(len(h.drafts()), 0, "пустой черновик не создаётся")
+        self.assertIn("Пост пуст", h.reply_texts()[-1])
+        self.assertEqual(h.dialog_state(), POST_CREATION, "диалог остаётся")
+        self.assertEqual(
+            h.user_data().get("current_step"),
+            len(POST_STEPS),
+            "отказ не чистит данные диалога",
+        )
+        self.assertEqual(len(h.answers()), 1, "кнопка отвечена")
+
+        # Заполнение снимает защиту: обычное сохранение работает как раньше
+        await h.callback("edit_post")
+        await h.callback("edit_title")
+        await h.text("Спасение пустого поста")
+        await h.callback("save_draft")
+
+        self.assertEqual(len(h.drafts()), 1, "заполненный пост сохраняется")
         self.assertIsNone(h.dialog_state())
-        self.assertNotIn("title", h.user_data())
-        self.assertEqual(len(h.answers()), 1)
+        self.assertNotIn("title", h.user_data(), "после сохранения данные чистятся")
+
+    @scenario_test
+    async def test_emptying_opened_draft_refuses_save_and_keeps_record(self, h):
+        """Очистка всех полей открытого черновика не портит и не дублирует запись."""
+        await goto_preview(h, title="Исходный контент")
+        await h.callback("save_draft")
+        await h.callback("editdraft_1")
+
+        # Очищаем единственное заполненное поле и пробуем сохранить
+        await h.callback("edit_post")
+        await h.callback("edit_title")
+        await h.callback("skip")
+        await h.callback("save_draft")
+
+        self.assertEqual(len(h.drafts()), 1, "вторая запись не появилась")
+        self.assertEqual(h.drafts()[0].title, "Исходный контент", "запись не порчена")
+        self.assertIn("Пост пуст", h.reply_texts()[-1])
+        self.assertEqual(h.dialog_state(), POST_CREATION, "диалог остаётся")
 
     @scenario_test
     async def test_empty_post_finish_is_rejected_and_dialog_survives(self, h):
