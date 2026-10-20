@@ -84,7 +84,13 @@ def main() -> None:
     # Фоновые задачи
     setup_jobs(application)
 
-    application.run_polling()
+    # Явный allowed_updates обязателен: Telegram хранит последнюю подписку
+    # между вызовами getUpdates («If not specified, the previous setting will
+    # be used»). Без явного параметра PTB не включает его в запрос, и бот
+    # наследует любую прошлую серверную настройку. Инцидент P0: подписка
+    # «только callback_query» пережила перезапуск — сообщения (/start, ввод
+    # полей) перестали доставляться при формально здоровом polling.
+    application.run_polling(allowed_updates=Update.ALL_TYPES)
 
 
 if __name__ == "__main__":
