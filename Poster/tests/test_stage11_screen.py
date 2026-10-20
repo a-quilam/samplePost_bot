@@ -62,7 +62,7 @@ class ScreenRenderTests(unittest.TestCase):
 
         sends = [c for c in self.bot.calls if c["type"] == "message"]
         self.assertEqual(len(sends), 1)
-        self.assertEqual(sends[0]["args"][1], "Главное меню")
+        self.assertEqual(call_text(sends[0]), "Главное меню")
         self.assertTrue(sends[0]["disable_web_page_preview"])
         ref = screen.screen_ref(self.user_data)
         self.assertIsNotNone(ref)

@@ -164,15 +164,28 @@ class CommandRoutingTests(unittest.TestCase):
 
     @scenario_test
     async def test_commands_outside_dialog_single_reply(self, h):
+        # /drafts отвечает сообщением-списком; /start, /help, /cancel
+        # обновляют постоянный экран управления (Stage 11) — новых
+        # сообщений при этом не появляется
         for cmd, fragment in self.OUTSIDE_EXPECTED.items():
             with self.subTest(cmd=cmd):
                 self.assertIsNone(h.dialog_state())
-                before = len(h.reply_texts())
+                replies_before = len(h.reply_texts())
                 await h.text(cmd)
-                self.assertEqual(
-                    len(h.reply_texts()) - before, 1, f"{cmd}: ровно один ответ"
-                )
-                self.assertIn(fragment, h.reply_texts()[-1])
+                if cmd == "/drafts":
+                    self.assertEqual(
+                        len(h.reply_texts()) - replies_before,
+                        1,
+                        f"{cmd}: ровно один ответ",
+                    )
+                    self.assertIn(fragment, h.reply_texts()[-1])
+                else:
+                    self.assertEqual(
+                        len(h.reply_texts()) - replies_before,
+                        0,
+                        f"{cmd}: ответ — на экране, без новых сообщений",
+                    )
+                    self.assertIn(fragment, h.screen_text())
                 self.assertIsNone(h.dialog_state())
 
         # /create_post вне диалога — обычная точка входа
@@ -182,12 +195,16 @@ class CommandRoutingTests(unittest.TestCase):
 
     @scenario_test
     async def test_commands_inside_dialog_end_it_and_save_wip_once(self, h):
+        # Ответы команд: /start и /help обновляют экран (Stage 11), /drafts и
+        # /cancel пока отвечают сообщением
+        answered_on_screen = {"/start": "Здравствуйте", "/help": "Команды:"}
         for cmd in self.OUTSIDE_EXPECTED:
             with self.subTest(cmd=cmd):
                 await h.start_dialog()
                 await h.text(f"ВИП перед {cmd}")
                 drafts_before = len(h.drafts())
                 replies_before = len(h.reply_texts())
+                screen_before = h.screen_text()
 
                 await h.text(cmd)
 
@@ -198,18 +215,25 @@ class CommandRoutingTests(unittest.TestCase):
                     "ВИП должен сохраниться ровно один раз",
                 )
                 new_replies = h.reply_texts()[replies_before:]
-                self.assertEqual(
-                    len(new_replies),
-                    2,
-                    "уведомление о сохранении ВИП + ровно один ответ команды",
-                )
-                self.assertIn("сохранён в черновики", new_replies[0])
+                if cmd in answered_on_screen:
+                    # уведомление о сохранении ВИП + ответ на экране
+                    self.assertEqual(len(new_replies), 1)
+                    self.assertIn("сохранён в черновики", new_replies[0])
+                    self.assertIn(answered_on_screen[cmd], h.screen_text())
+                    self.assertNotEqual(h.screen_text(), screen_before)
+                else:
+                    self.assertEqual(
+                        len(new_replies),
+                        2,
+                        "уведомление о сохранении ВИП + ровно один ответ команды",
+                    )
+                    self.assertIn("сохранён в черновики", new_replies[0])
                 self.assertNotIn("title", h.user_data())
 
                 # Состояние не «висит»: следующее сообщение уходит в подсказку,
-                # а не в поле поста
+                # а не в поле поста (подсказка — на экране управления)
                 await h.text("потом обычный текст")
-                self.assertIn("Воспользуйтесь кнопками меню", h.reply_texts()[-1])
+                self.assertIn("Воспользуйтесь кнопками меню", h.screen_text())
 
     @scenario_test
     async def test_commands_during_edit_field_end_dialog(self, h):
@@ -265,21 +289,19 @@ class CommandRoutingTests(unittest.TestCase):
 
     @scenario_test
     async def test_outside_dialog_text_photo_and_unknown_command_answered(self, h):
-        cases = [
-            ("привет", "Воспользуйтесь кнопками меню"),
-            ("/bogus", "Неизвестная команда"),
-        ]
-        for raw, fragment in cases:
-            with self.subTest(raw=raw):
-                before = len(h.reply_texts())
-                await h.text(raw)
-                self.assertEqual(len(h.reply_texts()) - before, 1)
-                self.assertIn(fragment, h.reply_texts()[-1])
+        # подсказка на обычный текст/фото обновляется на экране (Stage 11)
+        await h.text("привет")
+        self.assertIn("Воспользуйтесь кнопками меню", h.screen_text())
+        self.assertIsNone(h.dialog_state())
 
+        # неизвестная команда — обычное reply-сообщение (не экран)
         before = len(h.reply_texts())
-        await h.photo("stray-photo")
+        await h.text("/bogus")
         self.assertEqual(len(h.reply_texts()) - before, 1)
-        self.assertIn("Фото понадобится на шаге", h.reply_texts()[-1])
+        self.assertIn("Неизвестная команда", h.reply_texts()[-1])
+
+        await h.photo("stray-photo")
+        self.assertIn("Фото понадобится на шаге", h.screen_text())
         self.assertIsNone(h.dialog_state())
 
 
@@ -313,8 +335,9 @@ class RegistrationOrderTests(unittest.TestCase):
         conv = application.handlers[0][0]
         self.assertTrue(conv.allow_reentry, "перезапуск диалога должен работать")
         self.assertFalse(conv.persistent, "persistence в Stage 9 не внедряется")
-        # Три entry-точки: команда, reply-кнопка, открытие черновика
-        self.assertEqual(len(conv.entry_points), 3)
+        # Четыре entry-точки: команда, inline-кнопка меню, reply-текст,
+        # открытие черновика
+        self.assertEqual(len(conv.entry_points), 4)
         entry_names = [getattr(h.callback, "__name__", "") for h in conv.entry_points]
         self.assertIn("start_post_creation", entry_names)
         self.assertIn("start_edit_draft", entry_names)

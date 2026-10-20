@@ -748,20 +748,25 @@ class _InMemoryDbMixin:
     def setUp(self):
         import handlers.drafts as drafts_module
         import handlers.post_creation as post_creation_module
+        import utils.screen as screen_module
 
         self.post_creation_module = post_creation_module
         self.drafts_module = drafts_module
+        self.screen_module = screen_module
         self._orig_session_local = (
             post_creation_module.SessionLocal,
             drafts_module.SessionLocal,
+            screen_module.SessionLocal,
         )
         self.session_factory, self.engine = make_session_factory()
         post_creation_module.SessionLocal = self.session_factory
         drafts_module.SessionLocal = self.session_factory
+        screen_module.SessionLocal = self.session_factory
 
     def tearDown(self):
         self.post_creation_module.SessionLocal = self._orig_session_local[0]
         self.drafts_module.SessionLocal = self._orig_session_local[1]
+        self.screen_module.SessionLocal = self._orig_session_local[2]
         self.engine.dispose()
 
     def _all_drafts(self):
@@ -861,10 +866,9 @@ class CommandDuringCreationTests(_InMemoryDbMixin, unittest.TestCase):
     """/start, /help, /drafts во время диалога: сохранение WIP + завершение."""
 
     @staticmethod
-    def _replies(update):
-        return [
-            call.args[0] for call in update.effective_message.reply_text.await_args_list
-        ]
+    def _bot_calls(context):
+        """Тексты, отправленные ботом (в т.ч. отрисовки экрана)."""
+        return [call.get("text", "") for call in context.bot.calls]
 
     @staticmethod
     def _conversation():
@@ -886,7 +890,7 @@ class CommandDuringCreationTests(_InMemoryDbMixin, unittest.TestCase):
         self.assertEqual(drafts[0].title, "Начатый пост")
         self.assertNotIn("title", user_data)
         self.assertTrue(
-            any("Здравствуйте" in text for text in self._replies(update)),
+            any("Здравствуйте" in text for text in self._bot_calls(context)),
             "пользователь должен увидеть главное меню",
         )
 
@@ -909,7 +913,7 @@ class CommandDuringCreationTests(_InMemoryDbMixin, unittest.TestCase):
         self.assertNotIn("edit_field", user_data)
         self.assertNotIn("date", user_data)
         self.assertTrue(
-            any("Команды:" in text for text in self._replies(update)),
+            any("Команды:" in text for text in self._bot_calls(context)),
             "должна показаться справка",
         )
 
@@ -948,7 +952,7 @@ class CommandDuringCreationTests(_InMemoryDbMixin, unittest.TestCase):
     HANDLERS_IMPORT_ERROR is not None,
     f"импорт обработчиков недоступен: {HANDLERS_IMPORT_ERROR}",
 )
-class OutsideDialogTests(unittest.TestCase):
+class OutsideDialogTests(_InMemoryDbMixin, unittest.TestCase):
     """B1/B2: вне диалога текст/фото и /cancel получают внятный ответ."""
 
     @staticmethod
@@ -1017,14 +1021,17 @@ class OutsideDialogTests(unittest.TestCase):
         )
         self.assertEqual(first.callback.__name__, "cancel_without_dialog")
 
-        # поведение: понятный ответ, а не «Неизвестная команда»
-        reply = AsyncMock()
+        # поведение: понятный ответ на экране, а не «Неизвестная команда»
+        bot = RecordingBot()
         stub_update = SimpleNamespace(
-            effective_message=SimpleNamespace(reply_text=reply, photo=None),
+            effective_message=SimpleNamespace(reply_text=AsyncMock(), photo=None),
             effective_user=SimpleNamespace(id=7),
+            effective_chat=SimpleNamespace(id=777),
         )
-        asyncio.run(cancel_without_dialog(stub_update, SimpleNamespace(user_data={})))
-        text = reply.await_args.args[0]
+        asyncio.run(
+            cancel_without_dialog(stub_update, SimpleNamespace(user_data={}, bot=bot))
+        )
+        text = bot.calls[-1]["text"]
         self.assertIn("нет активного создания поста", text)
 
     def test_outside_hint_texts_explain_next_step(self):
@@ -1034,17 +1041,20 @@ class OutsideDialogTests(unittest.TestCase):
             (SimpleNamespace(text=None, photo=[object()]), "Изображение"),
         ):
             with self.subTest(photo=bool(message.photo)):
-                reply = AsyncMock()
+                bot = RecordingBot()
                 stub_update = SimpleNamespace(
                     effective_message=SimpleNamespace(
-                        reply_text=reply, text=message.text, photo=message.photo
+                        reply_text=AsyncMock(), text=message.text, photo=message.photo
                     ),
                     effective_user=SimpleNamespace(id=7),
+                    effective_chat=SimpleNamespace(id=777),
                 )
                 asyncio.run(
-                    outside_dialog_hint(stub_update, SimpleNamespace(user_data={}))
+                    outside_dialog_hint(
+                        stub_update, SimpleNamespace(user_data={}, bot=bot)
+                    )
                 )
-                self.assertIn(expected, reply.await_args.args[0])
+                self.assertIn(expected, bot.calls[-1]["text"])
 
 
 @unittest.skipIf(
@@ -1130,18 +1140,19 @@ class MainMenuDuringCreationTests(_InMemoryDbMixin, unittest.TestCase):
         self.assertEqual(len(drafts), 1, "незавершённый пост должен сохраниться")
         self.assertEqual(drafts[0].title, "Начатый пост")
         self.assertNotIn("title", user_data)
-        update.callback_query.edit_message_text.assert_awaited()
-        self.assertIn(
-            "Здравствуйте",
-            update.callback_query.edit_message_text.await_args.args[0],
+        # меню рисуется на экране (context.bot), а не reply/query-сообщением
+        self.assertTrue(
+            any(
+                "Здравствуйте" in (call.get("text") or "") for call in context.bot.calls
+            ),
             "пользователь должен реально оказаться в главном меню",
         )
         self.assertTrue(
             any(
-                "Выберите действие" in call.args[0]
-                for call in update.effective_message.reply_text.await_args_list
+                "Выберите действие" in (call.get("text") or "")
+                for call in context.bot.calls
             ),
-            "должна появиться reply-клавиатура главного меню",
+            "должна появиться клавиатура главного меню",
         )
 
     def test_main_menu_without_dialog_not_claimed_by_conversation(self):

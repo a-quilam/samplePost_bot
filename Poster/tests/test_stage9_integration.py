@@ -84,15 +84,17 @@ class FullCreationFlowTests(unittest.TestCase):
 
     @scenario_test
     async def test_nine_steps_photo_finish_preview_equals_final(self, h):
-        # /start — приветствие с reply-клавиатурой главного меню
+        # /start — приветствие на экране управления с inline-кнопками меню
         await h.text("/start")
         self.assertIsNone(h.dialog_state())
-        first = h.replies()[0]
-        self.assertEqual(first["text"], "Здравствуйте! 👋\n\nВыберите действие:")
-        keyboard = first["reply_markup"].keyboard
+        self.assertEqual(h.screen_text(), "Здравствуйте! 👋\n\nВыберите действие:")
         self.assertEqual(
-            [[button.text for button in row] for row in keyboard],
-            [["✏️ Создать пост"], ["📝 Черновики"]],
+            [(text, data) for text, data in h.screen_buttons()],
+            [
+                ("✏️ Создать пост", "create_post"),
+                ("📂 Черновики", "drafts"),
+                ("❔ Помощь", "help"),
+            ],
         )
 
         # «Создать пост» — диалог открыт, шаг 1
@@ -142,8 +144,11 @@ class FullCreationFlowTests(unittest.TestCase):
         self.assertIsNone(h.dialog_state())
         self.assertEqual(len(h.answers()), 1, "callback обязан быть отвечен")
         self.assertEqual(h.reply_texts()[-1], "Пост готов.")
-        menu_rows = h.replies()[-1]["reply_markup"].keyboard
-        self.assertIn("✏️ Создать пост", [b.text for row in menu_rows for b in row])
+        menu_buttons = h.replies()[-1]["reply_markup"].inline_keyboard
+        self.assertIn(
+            "✏️ Создать пост",
+            [b.text for row in menu_buttons for b in row],
+        )
 
         # ПРЕВЬЮ == ГОТОВЫЙ ПОСТ: дословно одинаковый текст и фото
         posts = h.posts()
@@ -492,9 +497,10 @@ class SkipAndEditTests(unittest.TestCase):
         self.assertEqual(len(drafts), 1)
         self.assertEqual(drafts[0].title, "Недописанный пост")
         self.assertNotIn("title", h.user_data())
-        self.assertIn("сохранён в черновики", h.reply_texts()[-2])
-        self.assertIn("Здравствуйте", h.calls[-2]["text"])
-        self.assertIn("Выберите действие", h.reply_texts()[-1])
+        # уведомление о сохранении ВИП — reply; меню — на экране
+        self.assertIn("сохранён в черновики", h.reply_texts()[-1])
+        self.assertIn("Здравствуйте", h.screen_text())
+        self.assertIn("Выберите действие", h.screen_text())
         self.assertGreaterEqual(len(h.answers()), 1)
 
     @scenario_test

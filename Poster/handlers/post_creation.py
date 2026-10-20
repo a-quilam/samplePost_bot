@@ -363,6 +363,10 @@ async def start_post_creation(
     Запускает процесс создания поста. Если в user_data остался незавершённый
     пост (предыдущий диалог не завершён) — он сохраняется в черновики.
     """
+    query = getattr(update, "callback_query", None)
+    if query is not None:
+        # вход по inline-кнопке «✏️ Создать пост»: спиннер не должен висеть
+        await query.answer()
     logger.info("Начало создания поста.")
     await _save_wip_before_exit(update, context)
     ctx.data(context)["current_step"] = 0  # Инициализация текущего шага
@@ -1193,6 +1197,9 @@ async def help_during_creation(
     справка и диалог завершается — следующее сообщение пользователя не может
     неожиданно записаться в поле поста.
     """
+    query = getattr(update, "callback_query", None)
+    if query is not None:
+        await query.answer()
     await _save_wip_before_exit(update, context)
     await help_command(update, context)
     return ConversationHandler.END
@@ -1202,12 +1209,15 @@ async def view_drafts_and_exit(
     update: Update, context: ContextTypes.DEFAULT_TYPE
 ) -> int:
     """
-    Reply-кнопка «📝 Черновики» и команда /drafts ВНУТРИ диалога:
-    незавершённый пост сохраняется, показывается список черновиков и диалог
-    завершается — состояние не должно «висеть» после перехода в другой
-    раздел (иначе следующий текст пользователя уходил бы на шаг диалога,
-    который пользователь уже покинул).
+    Reply-кнопка «📝 Черновики», inline-кнопка «📂 Черновики» и команда
+    /drafts ВНУТРИ диалога: незавершённый пост сохраняется, показывается
+    список черновиков и диалог завершается — состояние не должно «висеть»
+    после перехода в другой раздел (иначе следующий текст пользователя
+    уходил бы на шаг диалога, который пользователь уже покинул).
     """
+    query = getattr(update, "callback_query", None)
+    if query is not None:
+        await query.answer()
     await _save_wip_before_exit(update, context)
     await view_drafts(update, context)
     return ConversationHandler.END
@@ -1259,9 +1269,12 @@ def post_creation_handlers() -> list[BaseHandler]:
         ConversationHandler(
             entry_points=[
                 CommandHandler("create_post", start_post_creation),
-                # Кнопка «Создать пост» из Reply-клавиатуры главного меню.
-                # Обязательна как entry_point: только ConversationHandler умеет
-                # отслеживать состояние диалога.
+                # Inline-кнопка «✏️ Создать пост» главного меню. Обязательна
+                # как entry_point: только ConversationHandler умеет отслеживать
+                # состояние диалога.
+                CallbackQueryHandler(start_post_creation, pattern=r"^create_post$"),
+                # Текстовая кнопка «Создать пост» (совместимость: набранный
+                # текст работает так же, как и callback)
                 MessageHandler(filters.Regex("^✏️ Создать пост$"), start_post_creation),
                 # Открытие существующего черновика в редакторе (кнопка в списке черновиков)
                 CallbackQueryHandler(start_edit_draft, pattern=r"^editdraft_\d+$"),
@@ -1315,10 +1328,13 @@ def post_creation_handlers() -> list[BaseHandler]:
                 CommandHandler("start", start_during_creation),
                 CommandHandler("help", help_during_creation),
                 CommandHandler("drafts", view_drafts_and_exit),
-                # «Главное меню» во время диалога: WIP сохраняется, диалог
-                # завершается — иначе состояние оставалось бы активным
-                # «поверх» главного меню
+                # Кнопки главного меню, нажатые во время диалога: WIP
+                # сохраняется, диалог завершается — иначе состояние оставалось
+                # бы активным «поверх» меню, а список/справка молча теряли бы
+                # незавершённый пост
                 CallbackQueryHandler(main_menu_during_creation, pattern=r"^main_menu$"),
+                CallbackQueryHandler(view_drafts_and_exit, pattern=r"^drafts$"),
+                CallbackQueryHandler(help_during_creation, pattern=r"^help$"),
             ],
             allow_reentry=True,
         ),

@@ -66,7 +66,7 @@ async def render_screen(
     if ref:
         try:
             await bot.edit_message_text(
-                text,
+                text=text,
                 chat_id=ref["chat_id"],
                 message_id=ref["message_id"],
                 parse_mode="HTML",
@@ -80,8 +80,8 @@ async def render_screen(
                 return
             logger.info(f"Экран не отредактирован ({e}) — создаю новый.")
     message = await bot.send_message(
-        chat_id,
-        text,
+        chat_id=chat_id,
+        text=text,
         parse_mode="HTML",
         reply_markup=reply_markup,
         disable_web_page_preview=True,
@@ -266,3 +266,15 @@ def load_payload(user_id: int) -> dict | None:
     """Читает только WIP-payload (без ref экрана)."""
     _ref, payload = load_state(user_id)
     return payload
+
+
+def save_screen_ref(user_id: int, user_data: dict, chat_id: int) -> None:
+    """
+    Сохраняет ref экрана в БД, НЕ трогая WIP-payload.
+
+    Используется при отрисовке экранов вне диалога (главное меню, справка):
+    экран должен пережить рестарт, а незавершённый пост — остаться в БД
+    до явного завершения.
+    """
+    _ref, payload = load_state(user_id)
+    save_state(user_id, user_data, chat_id, payload)

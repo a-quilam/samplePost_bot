@@ -28,7 +28,7 @@ import unittest
 import warnings
 from datetime import timedelta
 from types import SimpleNamespace
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, patch
 
 from sqlalchemy import create_engine, text
 from sqlalchemy.orm import sessionmaker
@@ -43,6 +43,7 @@ from models import Draft, utcnow
 try:
     import bot as bot_module
     import handlers.post_creation as post_creation_module
+    import utils.screen as screen_module
     from handlers.drafts import (
         DRAFTS_PAGE_SIZE,
         build_drafts_message,
@@ -468,25 +469,46 @@ class IsPostEmptyTests(unittest.TestCase):
     f"импорт обработчиков недоступен: {HANDLERS_IMPORT_ERROR}",
 )
 class MainMenuKeyboardTests(unittest.TestCase):
-    """Единая клавиатура главного меню + справка /help."""
+    """Главное меню: inline-клавиатура экрана + справка /help."""
+
+    class _ScreenBot:
+        """Заглушка бота: записывает отрисовки экрана."""
+
+        def __init__(self):
+            self.calls = []
+
+        async def send_message(self, **kwargs):
+            self.calls.append({"type": "message", **kwargs})
+
+        async def edit_message_text(self, **kwargs):
+            self.calls.append({"type": "edit_message", **kwargs})
 
     def test_keyboard_structure(self):
-        from telegram import ReplyKeyboardMarkup
+        from telegram import InlineKeyboardMarkup
 
         keyboard = main_menu_keyboard()
-        self.assertIsInstance(keyboard, ReplyKeyboardMarkup)
-        texts = [button.text for row in keyboard.keyboard for button in row]
-        self.assertEqual(texts, ["✏️ Создать пост", "📝 Черновики"])
-        self.assertTrue(keyboard.resize_keyboard)
+        self.assertIsInstance(keyboard, InlineKeyboardMarkup)
+        texts = [button.text for row in keyboard.inline_keyboard for button in row]
+        self.assertEqual(texts, ["✏️ Создать пост", "📂 Черновики", "❔ Помощь"])
+        callbacks = [
+            button.callback_data for row in keyboard.inline_keyboard for button in row
+        ]
+        self.assertEqual(callbacks, ["create_post", "drafts", "help"])
 
     def test_help_lists_commands(self):
-        reply = AsyncMock()
+        bot = self._ScreenBot()
+        session_factory, engine = make_session_factory()
+        self.addCleanup(engine.dispose)
         update = SimpleNamespace(
-            effective_message=SimpleNamespace(reply_text=reply),
+            effective_message=SimpleNamespace(reply_text=AsyncMock()),
             effective_user=SimpleNamespace(id=1),
+            effective_chat=SimpleNamespace(id=777),
         )
-        asyncio.run(help_command(update, SimpleNamespace(user_data={})))
-        text = reply.await_args.args[0]
+        with patch.object(screen_module, "SessionLocal", session_factory):
+            asyncio.run(help_command(update, SimpleNamespace(user_data={}, bot=bot)))
+        # справка рисуется на экране управления (send/edit), не reply-сообщением
+        self.assertEqual(len(bot.calls), 1)
+        text = bot.calls[0]["text"]
         for command in ("/start", "/create_post", "/drafts", "/cancel", "/help"):
             self.assertIn(command, text)
         # B8: сценарий работы — разница кнопок и автосохранение при выходе
