@@ -26,7 +26,14 @@ from handlers.main_menu import help_command, main_menu_keyboard, start
 from models import Draft, get_draft_photos, photos_to_json
 from utils import tg_context as ctx
 from utils.formatter import escape_markdown, format_text
-from utils.validators import validate_date, validate_time, validate_url
+from utils.validators import (
+    normalize_date,
+    normalize_time,
+    normalize_url,
+    validate_date,
+    validate_time,
+    validate_url,
+)
 
 # Настройка логирования
 logger = logging.getLogger(__name__)
@@ -54,20 +61,32 @@ POST_STEPS: list[dict[str, Any]] = [
     {
         "key": "date",
         "label": "Дата",
-        "prompt": "Введите дату события (ДД.ММ.ГГГГ) или нажмите 'Пропустить':",
+        "prompt": (
+            "Введите дату события (ДД.ММ.ГГГГ, 17.11, 1711, «17 ноября», "
+            "«сегодня», «завтра») или нажмите 'Пропустить':"
+        ),
         "validator": validate_date,
+        "normalizer": normalize_date,
     },
     {
         "key": "time_start",
         "label": "Время начала",
-        "prompt": "Введите время начала (ЧЧ:ММ) или нажмите 'Пропустить':",
+        "prompt": (
+            "Введите время начала (ЧЧ:ММ, 1830, 930, «полседьмого», "
+            "просто час — напр. 7) или нажмите 'Пропустить':"
+        ),
         "validator": validate_time,
+        "normalizer": normalize_time,
     },
     {
         "key": "time_end",
         "label": "Время окончания",
-        "prompt": "Введите время окончания (ЧЧ:ММ) или нажмите 'Пропустить':",
+        "prompt": (
+            "Введите время окончания (ЧЧ:ММ, 1830, 930, «полседьмого», "
+            "просто час — напр. 7) или нажмите 'Пропустить':"
+        ),
         "validator": validate_time,
+        "normalizer": normalize_time,
     },
     {
         "key": "place_name",
@@ -90,8 +109,12 @@ POST_STEPS: list[dict[str, Any]] = [
     {
         "key": "place_url",
         "label": "URL места",
-        "prompt": "Введите URL места проведения или нажмите 'Пропустить':",
+        "prompt": (
+            "Введите ссылку на место (t.me/..., @username, example.com "
+            "или полный URL) или нажмите 'Пропустить':"
+        ),
         "validator": validate_url,
+        "normalizer": normalize_url,
     },
     {
         "key": "image",
@@ -388,7 +411,14 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         _apply_skip(ctx.data(context), step["key"])
         logger.info(f"Пользователь пропустил поле '{step['key']}'.")
     else:
-        if step["validator"] and not step["validator"](text):
+        # Нормализация (дата/время/ссылка): успешный разбор возвращает
+        # нормализованный вид для хранения, неуспешный — None (ошибка).
+        normalized = step["normalizer"](text) if step.get("normalizer") else None
+        if step.get("normalizer"):
+            valid = normalized is not None
+        else:
+            valid = not step["validator"] or step["validator"](text)
+        if not valid:
             await ctx.message(update).reply_text(
                 f"Некорректный формат. {step['prompt']}",
                 reply_markup=get_skip_keyboard(),
@@ -413,7 +443,9 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
                 logger.warning("Пользователь не отправил изображение.")
                 return POST_CREATION
         else:
-            ctx.data(context)[step["key"]] = format_text(text)
+            ctx.data(context)[step["key"]] = (
+                normalized if normalized is not None else format_text(text)
+            )
             logger.info(
                 f"Пользователь ввел '{step['key']}': {ctx.data(context)[step['key']]}"
             )
@@ -991,7 +1023,13 @@ async def process_edit(update: Update, context: ContextTypes.DEFAULT_TYPE) -> in
         # Возвращаемся в POST_CREATION: кнопки действий должны остаться рабочими
         return POST_CREATION
 
-    if step["validator"] and not step["validator"](text):
+    # Нормализация (дата/время/ссылка) — единое правило с визардом
+    normalized = step["normalizer"](text) if step.get("normalizer") else None
+    if step.get("normalizer"):
+        valid = normalized is not None
+    else:
+        valid = not step["validator"] or step["validator"](text)
+    if not valid:
         await message.reply_text(
             f"Некорректный формат. {step['prompt']}",
             reply_markup=get_skip_keyboard(),
@@ -1024,7 +1062,8 @@ async def process_edit(update: Update, context: ContextTypes.DEFAULT_TYPE) -> in
         logger.info("Пользователь обновил изображение.")
     else:
         # Единое правило форматирования текстовых полей — как в визарде
-        user_data[field] = format_text(text)
+        # (нормализованные дата/время/ссылка хранятся нормализованно)
+        user_data[field] = normalized if normalized is not None else format_text(text)
         logger.info(f"Пользователь обновил поле '{field}'.")
 
     # Остаёмся в диалоге: превью с актуальными значениями + кнопки действий
