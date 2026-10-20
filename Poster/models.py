@@ -39,6 +39,10 @@ class Draft(Base):
     # У старых черновиков NULL — тогда используется image (единственная/первая),
     # поэтому существующие записи продолжают работать без миграции данных.
     photos: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # HTML-представления форматируемых полей (JSON: {"title": "<b>...</b>"}).
+    # NULL у старых черновиков и у полей без форматирования — тогда сводка
+    # показывает плоский текст поля с HTML-экранированием (легаси-поведение).
+    formats: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime, default=utcnow, nullable=False
     )
@@ -81,3 +85,37 @@ def get_draft_photos(draft: Draft) -> list[str]:
         if isinstance(parsed, list) and parsed:
             return [str(p) for p in parsed if p]
     return [draft.image] if draft.image else []
+
+
+# --- Форматирование текстовых полей (безопасный HTML) ------------------------
+
+
+def formats_to_json(formats: dict[str, str] | None) -> str | None:
+    """
+    Сериализует HTML-представления полей в JSON для колонки Draft.formats.
+
+    Пустой набор -> None: поле без форматирования и легаси-запись хранятся
+    одинаково (NULL) и оба рендерятся как плоский текст — старое и новое
+    представление различаются по наличию колонки/ключей, а не по символам.
+    """
+    items = {str(key): str(value) for key, value in (formats or {}).items() if value}
+    return json.dumps(items, ensure_ascii=False) if items else None
+
+
+def get_draft_formats(draft: Draft) -> dict[str, str]:
+    """
+    HTML-представления полей черновика.
+
+    Старые записи (колонка/JSON отсутствует или битый) дают {}: поле
+    рендерится как плоский текст — как и до Stage 10.
+    """
+    raw = getattr(draft, "formats", None)
+    if not raw:
+        return {}
+    try:
+        parsed = json.loads(raw)
+    except (ValueError, TypeError):
+        return {}
+    if not isinstance(parsed, dict):
+        return {}
+    return {str(key): str(value) for key, value in parsed.items() if value}

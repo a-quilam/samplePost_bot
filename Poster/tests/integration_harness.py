@@ -152,13 +152,23 @@ def make_text_update(
     user_id: int = DEFAULT_USER_ID,
     update_id: int = 1,
     message_id: int = 1,
+    entities: list[MessageEntity] | None = None,
 ) -> Update:
-    """Текстовое сообщение (командам добавляется bot_command-entity)."""
-    entities = []
-    if text.startswith("/"):
-        entities = [
-            MessageEntity(type=MessageEntity.BOT_COMMAND, offset=0, length=len(text))
-        ]
+    """
+    Текстовое сообщение.
+
+    entities=None — «автоматика» (командам добавляется bot_command-entity);
+    явный список, включая пустой, задаёт ровно его — так в тестах передаётся
+    форматирование пользовательского ввода.
+    """
+    if entities is None:
+        entities = []
+        if text.startswith("/"):
+            entities = [
+                MessageEntity(
+                    type=MessageEntity.BOT_COMMAND, offset=0, length=len(text)
+                )
+            ]
     message = Message(
         message_id=message_id,
         date=FIXTURE_DATE,
@@ -340,7 +350,12 @@ class Harness:
         return update
 
     async def text(
-        self, text: str, *, chat_id: int | None = None, user_id: int | None = None
+        self,
+        text: str,
+        *,
+        chat_id: int | None = None,
+        user_id: int | None = None,
+        entities: list[MessageEntity] | None = None,
     ) -> Update:
         self._update_seq += 1
         return await self.feed(
@@ -349,6 +364,7 @@ class Harness:
                 chat_id=chat_id if chat_id is not None else self.chat_id,
                 user_id=user_id if user_id is not None else self.user_id,
                 update_id=self._update_seq,
+                entities=entities,
             )
         )
 

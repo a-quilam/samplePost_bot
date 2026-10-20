@@ -74,6 +74,10 @@ def _migrate(bind) -> None:
                 connection.execute(
                     text("ALTER TABLE drafts ADD COLUMN updated_at DATETIME")
                 )
+            if "formats" not in columns:
+                # HTML-представления полей (Stage 10); у существующих записей
+                # NULL — они остаются на плоском тексте, данные не переписываем
+                connection.execute(text("ALTER TABLE drafts ADD COLUMN formats TEXT"))
 
 
 def init_db():

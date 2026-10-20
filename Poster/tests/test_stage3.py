@@ -17,7 +17,7 @@ from sqlalchemy.orm import sessionmaker
 import models  # noqa: F401  — регистрация таблиц в Base.metadata
 from base import Base
 from database import _migrate
-from models import Draft, get_draft_photos, photos_to_json
+from models import Draft, get_draft_formats, get_draft_photos, photos_to_json
 from utils.formatter import escape_markdown, format_text, replace_quotes
 
 # Импорт обработчиков требует config (.env с токеном) и telegram —
@@ -363,6 +363,7 @@ class MigrationTests(unittest.TestCase):
             columns = {c["name"] for c in inspect(engine).get_columns("drafts")}
             self.assertIn("photos", columns)
             self.assertIn("updated_at", columns)
+            self.assertIn("formats", columns)
         finally:
             engine.dispose()
 
@@ -383,6 +384,25 @@ class MigrationTests(unittest.TestCase):
         finally:
             engine.dispose()
 
+    def test_migrate_adds_formats_column(self):
+        # Stage 10: колонка появляется как NULL — старые черновики остаются
+        # на плоском тексте, данные не переписываются
+        engine = self.make_old_db()
+        try:
+            _migrate(engine)
+            columns = {c["name"] for c in inspect(engine).get_columns("drafts")}
+            self.assertIn("formats", columns)
+            with engine.connect() as connection:
+                row = connection.execute(
+                    text("SELECT title, formats FROM drafts WHERE id = 1")
+                ).fetchone()
+            self.assertEqual(row.title, "Старый пост")
+            self.assertIsNone(row.formats)
+            # Легаси-запись читается через общий хелпер как «без форматирования»
+            self.assertEqual(get_draft_formats(Draft(formats=row.formats)), {})
+        finally:
+            engine.dispose()
+
     def test_migrate_noop_on_fresh_schema(self):
         engine = create_engine("sqlite:///:memory:")
         try:
@@ -390,6 +410,7 @@ class MigrationTests(unittest.TestCase):
             _migrate(engine)
             columns = {c["name"] for c in inspect(engine).get_columns("drafts")}
             self.assertIn("photos", columns)
+            self.assertIn("formats", columns)
         finally:
             engine.dispose()
 

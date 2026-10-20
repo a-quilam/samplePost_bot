@@ -115,12 +115,16 @@ class RecordingBot:
         self._record("media_group", kwargs)
 
 
-def make_message_update(text=None, *, photo=None, media_group_id=None):
-    """Update, имитирующий сообщение пользователя (текст или фото)."""
+def make_message_update(text=None, *, photo=None, media_group_id=None, entities=None):
+    """Update, имитирующий сообщение пользователя (текст или фото).
+
+    entities — реальные MessageEntity форматирования (None = без форматирования).
+    """
     message = SimpleNamespace(
         text=text,
         photo=photo,
         media_group_id=media_group_id,
+        entities=entities,
         reply_text=AsyncMock(),
     )
     return SimpleNamespace(
@@ -138,7 +142,9 @@ def make_callback_update(data):
         edit_message_text=AsyncMock(),
         from_user=SimpleNamespace(id=7),
     )
-    message = SimpleNamespace(text=None, photo=None, reply_text=AsyncMock())
+    message = SimpleNamespace(
+        text=None, photo=None, entities=None, reply_text=AsyncMock()
+    )
     return SimpleNamespace(
         callback_query=query,
         effective_message=message,

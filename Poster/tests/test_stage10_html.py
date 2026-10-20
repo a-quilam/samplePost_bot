@@ -1,6 +1,6 @@
 # tests/test_stage10_html.py
 """
-Тесты Stage 10, часть 1: безопасный HTML (utils/tg_html).
+Тесты Stage 10, часть 1: безопасный HTML (utils/tg_html) и его хранение.
 
 - entities_to_html: каждый тип форматирования Telegram, вложенные и
   комбинированные entities, смещения UTF-16 (эмодзи), экранирование
@@ -9,7 +9,9 @@
 - utf16_len: единицы смещений Telegram, а не символы Python;
 - split_html: теги и ссылки-сущности не рвутся, открытые теги
   закрываются/переоткрываются, видимый текст не теряется и не дублируется,
-  предпочтение границы после '\\n', лимит считается в UTF-16.
+  предпочтение границы после '\\n', лимит считается в UTF-16;
+- хранение: приём форматированного ввода (_store_text_field), JSON
+  колонки Draft.formats, очистка при пропуске/сбросе, легаси-записи.
 
 Запуск из каталога Poster:
     python -m unittest discover -s tests -v
@@ -23,6 +25,22 @@ from datetime import datetime
 from telegram import Chat, Message, MessageEntity, User
 
 from utils.tg_html import entities_to_html, escape_html, split_html, utf16_len
+
+# Хранение форматирования живёт в handlers (импорт требует config/.env) —
+# при недоступности соответствующие тесты пропускаются, а не падают.
+try:
+    from handlers.post_creation import (
+        _apply_fields,
+        _apply_skip,
+        _clear_post_data,
+        _post_fields,
+        _store_text_field,
+    )
+    from models import Draft, formats_to_json, get_draft_formats
+
+    STORAGE_IMPORT_ERROR = None
+except Exception as e:  # noqa: BLE001 — причина попадает в сообщение пропуска
+    STORAGE_IMPORT_ERROR = str(e)
 
 
 def make_message(text: str, entities: list[MessageEntity]) -> Message:
@@ -395,6 +413,91 @@ class SplitHtmlTests(unittest.TestCase):
         for chunk in chunks:
             self.assertTrue(chunk.startswith('<a href="https://example.com/page">'))
             self.assertTrue(chunk.endswith("</a>"))
+
+
+@unittest.skipIf(
+    STORAGE_IMPORT_ERROR is not None,
+    f"хранилище форматирования недоступно: {STORAGE_IMPORT_ERROR}",
+)
+class DraftFormatsStorageTests(unittest.TestCase):
+    """Приём форматированного ввода и его хранение в колонке Draft.formats."""
+
+    def test_plain_input_applies_typography_without_formats(self):
+        user_data: dict = {}
+        _store_text_field(user_data, "title", 'Скидка "50%"', None)
+        # Обычный путь не меняется: типографика превращает кавычки в «ёлочки»
+        self.assertEqual(user_data["title"], "Скидка «50%»")
+        self.assertNotIn("formats", user_data)
+
+    def test_formatted_input_keeps_text_verbatim(self):
+        user_data: dict = {}
+        text = 'Скидка "50%" и <бета>'
+        _store_text_field(user_data, "title", text, [ent(MessageEntity.BOLD, 0, 6)])
+        # Текст не искажается (типографика сдвинула бы смещения entities),
+        # разметка уходит отдельно — как безопасный HTML
+        self.assertEqual(user_data["title"], text)
+        self.assertEqual(
+            user_data["formats"]["title"],
+            "<b>Скидка</b> &quot;50%&quot; и &lt;бета&gt;",
+        )
+
+    def test_stale_format_dropped_on_plain_input(self):
+        user_data: dict = {"formats": {"title": "<b>старый</b>"}}
+        _store_text_field(user_data, "title", "новый", None)
+        self.assertEqual(user_data["title"], "новый")
+        self.assertNotIn("formats", user_data)
+
+    def test_post_fields_serializes_formats(self):
+        user_data = {"title": "Привет", "formats": {"title": "<b>Привет</b>"}}
+        fields = _post_fields(user_data)
+        self.assertEqual(fields["formats"], '{"title": "<b>Привет</b>"}')
+
+    def test_post_fields_without_formats_is_none(self):
+        self.assertIsNone(_post_fields({"title": "Привет"})["formats"])
+
+    def test_apply_fields_roundtrip_keeps_formats(self):
+        user_data = {"title": "Привет", "formats": {"title": "<b>Привет</b>"}}
+        draft = Draft(user_id=1)
+        _apply_fields(draft, user_data)
+        self.assertEqual(draft.formats, '{"title": "<b>Привет</b>"}')
+        self.assertEqual(get_draft_formats(draft), {"title": "<b>Привет</b>"})
+
+    def test_formats_to_json_empty_is_none(self):
+        # Пустое форматирование хранится как NULL — «новое» и «старое»
+        # различаются по наличию данных, а не по символам в тексте
+        self.assertIsNone(formats_to_json(None))
+        self.assertIsNone(formats_to_json({}))
+        self.assertIsNone(formats_to_json({"title": ""}))
+
+    def test_get_draft_formats_legacy_and_broken_json(self):
+        self.assertEqual(get_draft_formats(Draft(user_id=1)), {})
+        self.assertEqual(get_draft_formats(Draft(user_id=1, formats="не json")), {})
+        self.assertEqual(get_draft_formats(Draft(user_id=1, formats="[1, 2]")), {})
+        self.assertEqual(
+            get_draft_formats(Draft(user_id=1, formats='{"text": "<i>цель</i>"}')),
+            {"text": "<i>цель</i>"},
+        )
+
+    def test_clear_post_data_drops_formats(self):
+        user_data = {"title": "T", "formats": {"title": "<b>T</b>"}, "photos": ["f1"]}
+        _clear_post_data(user_data)
+        self.assertEqual(user_data, {})
+
+    def test_apply_skip_drops_field_format_only(self):
+        user_data = {
+            "title": "<b>T</b>",
+            "text": "текст",
+            "formats": {"title": "<b>T</b>", "text": "<i>текст</i>"},
+        }
+        _apply_skip(user_data, "title")
+        self.assertIsNone(user_data["title"])
+        self.assertNotIn("title", user_data["formats"])
+        self.assertEqual(user_data["formats"], {"text": "<i>текст</i>"})
+
+    def test_apply_skip_on_last_field_removes_formats(self):
+        user_data = {"title": "T", "formats": {"title": "<b>T</b>"}}
+        _apply_skip(user_data, "title")
+        self.assertNotIn("formats", user_data)
 
 
 if __name__ == "__main__":

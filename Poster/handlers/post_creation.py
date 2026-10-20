@@ -1,4 +1,5 @@
 import logging
+from collections.abc import Sequence
 from typing import Any
 
 from sqlalchemy.orm import Session
@@ -7,6 +8,7 @@ from telegram import (
     InlineKeyboardMarkup,
     InputMediaPhoto,
     Message,
+    MessageEntity,
     Update,
 )
 from telegram.ext import (
@@ -23,9 +25,16 @@ from database import SessionLocal
 from handlers.callbacks import handle_main_menu_selection
 from handlers.drafts import view_drafts
 from handlers.main_menu import help_command, main_menu_keyboard, start
-from models import Draft, get_draft_photos, photos_to_json
+from models import (
+    Draft,
+    formats_to_json,
+    get_draft_formats,
+    get_draft_photos,
+    photos_to_json,
+)
 from utils import tg_context as ctx
 from utils.formatter import escape_markdown, format_text
+from utils.tg_html import entities_to_html
 from utils.validators import (
     normalize_date,
     normalize_time,
@@ -163,6 +172,7 @@ def _clear_post_data(user_data: dict) -> None:
     """Полностью сбрасывает данные поста (новое создание — без «наследства»)."""
     for key in DRAFT_FIELD_KEYS + [
         "photos",
+        "formats",
         "pending_media",
         "last_rejected_media",
         "editing_draft_id",
@@ -182,6 +192,50 @@ def _apply_skip(user_data: dict, key: str) -> None:
         user_data.pop("pending_media", None)
     else:
         user_data[key] = None
+    # Формат пропущенного поля неактуален и не должен «воскреснуть» в сводке
+    _set_field_html(user_data, key, None)
+
+
+def _set_field_html(user_data: dict, key: str, html_value: str | None) -> None:
+    """
+    Запоминает/сбрасывает HTML-представление поля (user_data["formats"]).
+
+    Пустой набор форматирования не хранится: поле без форматирования
+    и поле из легаси-записи неразличимы и рендерятся одинаково.
+    """
+    formats = user_data.get("formats")
+    formats = formats if isinstance(formats, dict) else {}
+    if html_value:
+        formats[key] = html_value
+        user_data["formats"] = formats
+    else:
+        formats.pop(key, None)
+        if formats:
+            user_data["formats"] = formats
+        else:
+            user_data.pop("formats", None)
+
+
+def _store_text_field(
+    user_data: dict,
+    key: str,
+    text: str,
+    entities: Sequence[MessageEntity] | None,
+) -> None:
+    """
+    Сохраняет свободное текстовое поле с учётом форматирования.
+
+    Обычный текст уходит через типографику (format_text); сообщение
+    с entities — дословно (типографика сдвинула бы смещения и изменила бы
+    видимый текст), а его разметка сохраняется отдельно в
+    user_data["formats"][key] как безопасный HTML и применяется в сводке.
+    """
+    if entities:
+        user_data[key] = text
+        _set_field_html(user_data, key, entities_to_html(text, entities))
+    else:
+        user_data[key] = format_text(text)
+        _set_field_html(user_data, key, None)
 
 
 def _store_photo(user_data: dict, message: Message) -> str:
@@ -226,6 +280,7 @@ def _post_fields(user_data: dict) -> dict:
     fields = {key: user_data.get(key) for key in DRAFT_FIELD_KEYS}
     fields["image"] = photos[0] if photos else None
     fields["photos"] = photos_to_json(photos)
+    fields["formats"] = formats_to_json(user_data.get("formats"))
     return fields
 
 
@@ -346,6 +401,9 @@ async def start_edit_draft(update: Update, context: ContextTypes.DEFAULT_TYPE) -
             value = getattr(draft, key)
             # Легаси-заглушка «Не указано» из старых черновиков = пустое поле
             ctx.data(context)[key] = None if value == "Не указано" else value
+        formats = get_draft_formats(draft)
+        if formats:
+            ctx.data(context)["formats"] = formats
         photos = get_draft_photos(draft)
         ctx.data(context)["photos"] = photos
         ctx.data(context)["image"] = photos[0] if photos else None
@@ -443,9 +501,16 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
                 logger.warning("Пользователь не отправил изображение.")
                 return POST_CREATION
         else:
-            ctx.data(context)[step["key"]] = (
-                normalized if normalized is not None else format_text(text)
-            )
+            user_data = ctx.data(context)
+            if normalized is not None:
+                # Нормализованные значения (дата/время/ссылка) — каноничный
+                # плоский текст; форматирование исходника здесь не сохраняем
+                user_data[step["key"]] = normalized
+                _set_field_html(user_data, step["key"], None)
+            else:
+                _store_text_field(
+                    user_data, step["key"], text, ctx.message(update).entities
+                )
             logger.info(
                 f"Пользователь ввел '{step['key']}': {ctx.data(context)[step['key']]}"
             )
@@ -1062,8 +1127,13 @@ async def process_edit(update: Update, context: ContextTypes.DEFAULT_TYPE) -> in
         logger.info("Пользователь обновил изображение.")
     else:
         # Единое правило форматирования текстовых полей — как в визарде
-        # (нормализованные дата/время/ссылка хранятся нормализованно)
-        user_data[field] = normalized if normalized is not None else format_text(text)
+        # (нормализованные дата/время/ссылка хранятся нормализованно,
+        # форматированный ввод — дословно с HTML в user_data["formats"])
+        if normalized is not None:
+            user_data[field] = normalized
+            _set_field_html(user_data, field, None)
+        else:
+            _store_text_field(user_data, field, text, message.entities)
         logger.info(f"Пользователь обновил поле '{field}'.")
 
     # Остаёмся в диалоге: превью с актуальными значениями + кнопки действий
