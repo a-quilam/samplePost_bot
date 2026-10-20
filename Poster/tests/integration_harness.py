@@ -232,6 +232,26 @@ def make_photo_update(
     return Update(update_id=update_id, message=message)
 
 
+# Ключи записей ПРЯМЫХ send_message из send_post (и его частей): ровно
+# chat_id/text/parse_mode[/reply_markup], без «лишних» параметров. Ответы
+# бота на сообщения пользователя (Message.reply_text) всегда передают
+# полный пакет параметров (reply_parameters, entities, read_timeout, ...) —
+# по этому набору ключей пост и отличается от ответа/лид-сообщения
+# (у лид-сообщения нет parse_mode вовсе).
+POST_MESSAGE_KEYS = frozenset(
+    {"type", "args", "chat_id", "text", "parse_mode", "reply_markup"}
+)
+
+
+def is_post_message(record: dict) -> bool:
+    """Сообщение поста (превью/готовый пост), а не ответ на сообщение юзера."""
+    return (
+        record["type"] == "message"
+        and "parse_mode" in record
+        and frozenset(record) <= POST_MESSAGE_KEYS
+    )
+
+
 def call_text(record: dict) -> str | None:
     """Текст записанного вызова send_message/edit_message_text."""
     if record.get("text") is not None:
@@ -430,9 +450,7 @@ class Harness:
     def replies(self) -> list[dict]:
         """Сообщения бота (промпты/ответы), НЕ являющиеся постами."""
         return [
-            c
-            for c in self.calls
-            if c["type"] == "message" and c.get("parse_mode") != "MarkdownV2"
+            c for c in self.calls if c["type"] == "message" and not is_post_message(c)
         ]
 
     def reply_texts(self) -> list[str]:
@@ -445,7 +463,7 @@ class Harness:
         """
         out: list[str | None] = []
         for c in self.calls:
-            if c["type"] == "message" and c.get("parse_mode") == "MarkdownV2":
+            if is_post_message(c):
                 out.append(call_text(c))
             elif c["type"] == "photo":
                 out.append(c.get("caption"))

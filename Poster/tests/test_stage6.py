@@ -79,7 +79,6 @@ try:
         view_drafts_and_exit,
     )
     from models import Draft
-    from utils.formatter import escape_markdown
 
     # Bot нужен только для check_update CommandHandler (сравнивает имя бота);
     # сеть не используется — username подставляется вместо getMe
@@ -282,9 +281,10 @@ class FullCycleTests(unittest.TestCase):
         preview = bot.calls[0]
         self.assertEqual(preview["chat_id"], 777)
         for value in FULL_TEXT_VALUES:
-            self.assertIn(escape_markdown(value), preview["caption"])
+            # HTML не экранирует эти значения (спецсимволов нет) — видимы как есть
+            self.assertIn(value, preview["caption"])
         # сводка с русскими названиями полей
-        self.assertIn("*Заголовок*:", preview["caption"])
+        self.assertIn("• <b>Заголовок</b>:", preview["caption"])
 
         # «Готово» → финальная отправка + подтверждение, диалог закрыт
         finish_update = make_callback_update("finish")
@@ -373,8 +373,8 @@ class PartialPostTests(unittest.TestCase):
 
         self.assertEqual(len(bot.calls), 1)
         summary = bot.calls[0].get("caption") or bot.calls[0]["text"]
-        self.assertIn("• *Заголовок*: Концерт", summary)
-        self.assertNotIn("• *Дата*:", summary)  # пропущенное поле не показано
+        self.assertIn("• <b>Заголовок</b>: Концерт", summary)
+        self.assertNotIn("• <b>Дата</b>:", summary)  # пропущенное поле не показано
         self.assertNotIn("Не указано", summary)  # нигде — ни как значение, ни как текст
 
     def test_partial_post_can_be_finished(self):

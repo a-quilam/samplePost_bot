@@ -22,6 +22,7 @@
 
 import asyncio
 import os
+import re
 import tempfile
 import unittest
 import warnings
@@ -51,6 +52,7 @@ try:
     from handlers.main_menu import help_command, main_menu_keyboard
     from handlers.post_creation import (
         POST_CREATION,
+        POST_HEADING,
         POST_STEPS,
         handle_message,
         handle_photo,
@@ -320,28 +322,25 @@ class SplitLongTextTests(unittest.TestCase):
         # Ни один символ не потерян (границы — только переводы строк)
         self.assertEqual("".join(chunks), text)
 
-    def test_escape_pairs_not_torn(self):
-        # Строка из экранированных пар '\\.'; limit=101 заставляет границу
-        # попадать между '\\' и '.' — сплит обязан откатиться, не разрывая пару
-        text = "\\." * 3000
+    def test_html_tags_not_torn(self):
+        # Граница не должна рвать теги: каждая часть остаётся валидным HTML
+        # (пары тегов сходятся), а видимый текст не теряется и не дублируется
+        text = "<b>жирный <i>курсив</i> текст</b> " * 200
         chunks = split_long_text(text, limit=101)
         self.assertGreater(len(chunks), 1)
-
-        def trailing_backslashes(s: str) -> int:
-            count = 0
-            for char in reversed(s):
-                if char != "\\":
-                    break
-                count += 1
-            return count
-
         for chunk in chunks:
-            self.assertEqual(
-                trailing_backslashes(chunk) % 2,
-                0,
-                f"часть заканчивается незакрытым экранированием: ...{chunk[-10:]!r}",
-            )
-        self.assertEqual("".join(chunks), text)
+            self.assertLessEqual(len(chunk), 101)
+            for tag in ("b", "i"):
+                self.assertEqual(
+                    chunk.count(f"<{tag}>"),
+                    chunk.count(f"</{tag}>"),
+                    f"разорванный тег <{tag}> в части: ...{chunk[-40:]!r}",
+                )
+
+        def visible(html: str) -> str:
+            return re.sub(r"<[^>]*>", "", html)
+
+        self.assertEqual("".join(visible(c) for c in chunks), visible(text))
 
     def test_internal_newlines_preserved(self):
         text = "а" * 10 + "\n" + "б" * 10 + "\n" + "В" * 300
@@ -386,7 +385,7 @@ class SendPostLongTextTests(unittest.TestCase):
                 -100500,
                 post,
                 photos or [],
-                heading="📢 *Новый пост:*",
+                heading=POST_HEADING,
                 reply_markup=reply_markup,
             )
         )
@@ -411,7 +410,8 @@ class SendPostLongTextTests(unittest.TestCase):
             self.assertIsNone(call["reply_markup"])
 
     def test_single_photo_overflow_still_split(self):
-        # "!" экранируется в MarkdownV2 — текст растёт и превышает лимит
+        # Длинный заголовок (4800 символов) не влезает в подпись к фото
+        # (лимит 1000 в UTF-16) — фото уходит без подписи, текст — частями
         long_post = {"title": "Очень! " * 600}
         calls = self._send(long_post, photos=["p1"])
         self.assertEqual(calls[0]["type"], "photo")

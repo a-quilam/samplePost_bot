@@ -30,7 +30,7 @@ try:
         inline_buttons,
         scenario_test,
     )
-    from utils.formatter import escape_markdown
+    from utils.tg_html import escape_html
 
     INTEGRATION_IMPORT_ERROR = HARNESS_IMPORT_ERROR
 except Exception as e:  # noqa: BLE001 — причина попадает в сообщение пропуска
@@ -116,7 +116,7 @@ class FullCreationFlowTests(unittest.TestCase):
         preview = h.calls[-1]
         self.assertEqual(preview["type"], "photo")
         self.assertEqual(preview["photo"], "photo-final-1")
-        self.assertEqual(preview["parse_mode"], "MarkdownV2")
+        self.assertEqual(preview["parse_mode"], "HTML")
         self.assertEqual(
             inline_buttons(preview["reply_markup"]),
             [
@@ -126,11 +126,11 @@ class FullCreationFlowTests(unittest.TestCase):
             ],
         )
 
-        # Превью содержит все введённые значения (экранированные) и метки
+        # Превью содержит все введённые значения (HTML-экранированные) и метки
         caption = preview["caption"]
         for key, value in WIZARD_VALUES.items():
-            self.assertIn(f"• *{POST_STEPS[step_index(key)]['label']}*:", caption)
-            self.assertIn(escape_markdown(value), caption)
+            self.assertIn(f"• <b>{POST_STEPS[step_index(key)]['label']}</b>:", caption)
+            self.assertIn(escape_html(value), caption)
         self.assertIn("Добавлено", caption)  # изображение
 
         # Ровно девять промптов шагов — без лишних сообщений
@@ -168,14 +168,14 @@ class FullCreationFlowTests(unittest.TestCase):
         # Превью — текстовое сообщение с кнопками действий
         preview = h.calls[-1]
         self.assertEqual(preview["type"], "message")
-        self.assertEqual(preview["parse_mode"], "MarkdownV2")
+        self.assertEqual(preview["parse_mode"], "HTML")
         self.assertEqual(
             [data for _, data in inline_buttons(preview["reply_markup"])],
             ["edit_post", "save_draft", "finish"],
         )
         # Пропущенные поля не видны, заглушек «Не указано» нет
-        self.assertIn("• *Заголовок*: Только заголовок", preview["text"])
-        self.assertNotIn("• *Дата*:", preview["text"])
+        self.assertIn("• <b>Заголовок</b>: Только заголовок", preview["text"])
+        self.assertNotIn("• <b>Дата</b>:", preview["text"])
         self.assertNotIn("Не указано", preview["text"])
 
         await h.callback("finish")
@@ -234,10 +234,10 @@ class SkipAndEditTests(unittest.TestCase):
                     self.assertEqual(
                         h.calls[-1]["type"], "message", "фото не должно отправляться"
                     )
-                    self.assertNotIn("• *Изображение*:", summary)
+                    self.assertNotIn("• <b>Изображение</b>:", summary)
                     self.assertIsNone(h.user_data().get("image"))
                 else:
-                    self.assertNotIn(f"• *{step['label']}*:", summary)
+                    self.assertNotIn(f"• <b>{step['label']}</b>:", summary)
                     self.assertIsNone(h.user_data().get(step["key"]))
                 self.assertNotIn("Не указано", summary)
 
@@ -349,16 +349,14 @@ class SkipAndEditTests(unittest.TestCase):
                     old_photo = preview["photo"]
                 else:
                     preview_text = h.posts()[-1]
-                    self.assertIn(escape_markdown(new_value), preview_text)
+                    self.assertIn(escape_html(new_value), preview_text)
                     if key in WIZARD_VALUES:
-                        self.assertNotIn(
-                            escape_markdown(WIZARD_VALUES[key]), preview_text
-                        )
+                        self.assertNotIn(escape_html(WIZARD_VALUES[key]), preview_text)
 
         await h.callback("finish")
         self.assertIsNone(h.dialog_state())
         final = h.posts()[-1]
-        self.assertIn(escape_markdown(NEW_VALUES["title"]), final)
+        self.assertIn(escape_html(NEW_VALUES["title"]), final)
 
     @scenario_test
     async def test_repeat_edit_same_field_keeps_last_value(self, h):
@@ -373,11 +371,11 @@ class SkipAndEditTests(unittest.TestCase):
             await h.callback("edit_title")
             await h.text(value)
             self.assertEqual(h.dialog_state(), POST_CREATION)
-            self.assertIn(escape_markdown(value), h.posts()[-1])
+            self.assertIn(escape_html(value), h.posts()[-1])
 
         self.assertNotIn("Первый вариант", h.posts()[-1])
         await h.callback("finish")
-        self.assertIn(escape_markdown("Третий вариант"), h.posts()[-1])
+        self.assertIn(escape_html("Третий вариант"), h.posts()[-1])
 
     @scenario_test
     async def test_cancel_edit_returns_to_preview_without_changes(self, h):
@@ -444,7 +442,7 @@ class SkipAndEditTests(unittest.TestCase):
     @scenario_test
     async def test_skip_button_during_edit_clears_field(self, h):
         await goto_preview(h)
-        self.assertIn("• *Заголовок*:", h.posts()[-1])
+        self.assertIn("• <b>Заголовок</b>:", h.posts()[-1])
 
         await h.callback("edit_post")
         await h.callback("edit_title")
@@ -452,7 +450,7 @@ class SkipAndEditTests(unittest.TestCase):
 
         self.assertEqual(h.dialog_state(), POST_CREATION)
         self.assertIsNone(h.user_data().get("title"))
-        self.assertNotIn("• *Заголовок*:", h.posts()[-1])
+        self.assertNotIn("• <b>Заголовок</b>:", h.posts()[-1])
 
     @scenario_test
     async def test_main_menu_button_ends_dialog_and_saves_wip(self, h):

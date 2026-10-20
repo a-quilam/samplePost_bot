@@ -156,7 +156,7 @@ class SendPostTests(unittest.TestCase):
         calls = self.send([])
         self.assertEqual(len(calls), 1)
         self.assertEqual(calls[0]["type"], "message")
-        self.assertEqual(calls[0]["parse_mode"], "MarkdownV2")
+        self.assertEqual(calls[0]["parse_mode"], "HTML")
         self.assertTrue(calls[0]["text"].startswith(POST_HEADING))
         self.assertIn("Встреча", calls[0]["text"])
 
@@ -262,13 +262,15 @@ class PostSummaryTests(unittest.TestCase):
     """Сводка поста (превью == готовый пост): только заполненные поля."""
 
     def test_summary_escapes_user_values(self):
-        summary = build_post_summary({"title": "Скидка 50%_*"}, heading="h")
-        self.assertIn("\\*", summary)  # '*' пользователя экранирован
-        self.assertIn("\\_", summary)  # '_' пользователя экранирован
+        # HTML-режим: спецсимволы пользователя экранируются ровно один раз;
+        # markdown-спецсимволы (*, _, ...) — обычный текст, их не трогаем
+        summary = build_post_summary({"title": "Скидка 50%_* a<b>"}, heading="h")
+        self.assertIn("Скидка 50%_* a&lt;b&gt;", summary)
+        self.assertNotIn("a<b>", summary)
 
     def test_summary_shows_only_filled_fields(self):
         summary = build_post_summary({"title": "Концерт"}, heading="h")
-        self.assertIn("• *Заголовок*: Концерт", summary)
+        self.assertIn("• <b>Заголовок</b>: Концерт", summary)
         for label in ("Дата", "Время начала", "Текст", "Изображение"):
             self.assertNotIn(label, summary)
 
@@ -277,12 +279,12 @@ class PostSummaryTests(unittest.TestCase):
         summary = build_post_summary(
             {"title": "Не указано", "date": "15.09.2026"}, heading="h"
         )
-        self.assertNotIn("• *Заголовок*:", summary)
-        self.assertIn("• *Дата*: 15\\.09\\.2026", summary)
+        self.assertNotIn("• <b>Заголовок</b>:", summary)
+        self.assertIn("• <b>Дата</b>: 15.09.2026", summary)
 
     def test_summary_photo_line_only_when_present(self):
         self.assertIn(
-            "• *Изображение*: Добавлено",
+            "• <b>Изображение</b>: Добавлено",
             build_post_summary({"image": "f1"}, heading="h"),
         )
         self.assertNotIn("Изображение", build_post_summary({"title": "Т"}, heading="h"))

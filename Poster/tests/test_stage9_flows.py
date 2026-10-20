@@ -30,7 +30,7 @@ try:
         inline_buttons,
         scenario_test,
     )
-    from utils.formatter import escape_markdown
+    from utils.tg_html import escape_html
 
     INTEGRATION_IMPORT_ERROR = HARNESS_IMPORT_ERROR
 except Exception as e:  # noqa: BLE001 — причина попадает в сообщение пропуска
@@ -467,4 +467,4 @@ class PhotoAlbumTests(unittest.TestCase):
         self.assertEqual(preview["caption"], final["caption"])
         self.assertEqual(preview["parse_mode"], final["parse_mode"])
         self.assertEqual(preview["photo"], final["photo"])
-        self.assertIn(escape_markdown("Концерт «Хиты» (2026)!"), final["caption"])
+        self.assertIn(escape_html("Концерт «Хиты» (2026)!"), final["caption"])

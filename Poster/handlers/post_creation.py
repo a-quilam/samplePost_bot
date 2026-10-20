@@ -33,8 +33,8 @@ from models import (
     photos_to_json,
 )
 from utils import tg_context as ctx
-from utils.formatter import escape_markdown, format_text
-from utils.tg_html import entities_to_html
+from utils.formatter import format_text
+from utils.tg_html import entities_to_html, escape_html, split_html, utf16_len
 from utils.validators import (
     normalize_date,
     normalize_time,
@@ -52,7 +52,7 @@ POST_CREATION, EDIT_FIELD = range(2)
 
 # Единый заголовок поста для ПРЕВЬЮ и ГОТОВОГО ПОСТА: текст, который видит
 # пользователь в превью, дословно совпадает с финальной отправкой по «Готово».
-POST_HEADING = "📢 *Новый пост:*"
+POST_HEADING = "📢 <b>Новый пост:</b>"
 
 # Определение шагов создания поста
 # list[dict[str, Any]] — явная аннотация: без неё mypy сводит разнотипные
@@ -674,102 +674,58 @@ async def handle_callback_query(
 
 def build_post_summary(post_data: dict, *, heading: str) -> str:
     """
-    Собирает итоговое MarkdownV2-сообщение о посте: русские названия полей,
+    Собирает итоговое HTML-сообщение о посте: русские названия полей,
     показываются ТОЛЬКО заполненные поля (пропуск не даёт строки в сводке).
 
     Превью и готовый пост собираются этой же функцией — тексты совпадают
-    дословно. Наша разметка (*жирный*) остаётся как есть, значения
-    пользователя экранируются.
+    дословно. Наша разметка (<b>) остаётся как есть; значение пользователя —
+    либо готовый HTML сохранённого форматирования (user_data["formats"]),
+    либо плоский текст с HTML-экранированием: каждое значение экранируется
+    ровно один раз, двойного экранирования нет.
     """
     lines = [heading, ""]
+    formats = post_data.get("formats") or {}
     has_fields = False
     for step in POST_STEPS:
         key = step["key"]
         if key == "image":
             if post_data.get("image") or post_data.get("photos"):
-                lines.append(f"• *{step['label']}*: Добавлено")
+                lines.append(f"• <b>{step['label']}</b>: Добавлено")
                 has_fields = True
             continue
         value = post_data.get(key)
         # «Не указано» — легаси-запись старых черновиков, для сводки это пусто
         if value in (None, "", "Не указано"):
             continue
-        lines.append(f"• *{step['label']}*: {escape_markdown(str(value))}")
+        html_value = formats.get(key) or escape_html(str(value))
+        lines.append(f"• <b>{step['label']}</b>: {html_value}")
         has_fields = True
     if not has_fields:
         # Превью ещё ничего не заполнено: без этой строки пользователь видит
-        # только заголовок и не понимает, что происходит. Точка экранируется —
-        # сообщение уходит с parse_mode=MarkdownV2
-        lines.append(escape_markdown("Пока ни одно поле не заполнено."))
+        # только заголовок и не понимает, что происходит
+        lines.append("Пока ни одно поле не заполнено.")
     lines.append("")
     return "\n".join(lines)
 
 
-# Максимальная длина одного сообщения в Telegram — 4096 символов.
-# Экранирование MarkdownV2 удлиняет текст (каждый спецсимвол → 2 символа),
-# поэтому итоговый текст отправляем частями с запасом до лимита.
+# Максимальная длина одного сообщения в Telegram — 4096 символов; подпись
+# к фото — 1024. Лимит считается по «сырому» HTML в код-юнитах UTF-16
+# (см. utils.tg_html): он не короче видимого текста, поэтому части
+# укладываются в лимит и после разбора разметки Telegram — с запасом.
 MESSAGE_TEXT_LIMIT = 4000
-
-
-def _trailing_backslashes(s: str) -> int:
-    """Сколько подряд идущих '\\' в конце строки."""
-    count = 0
-    for char in reversed(s):
-        if char != "\\":
-            break
-        count += 1
-    return count
-
-
-def _split_line(line: str, limit: int) -> list[str]:
-    """
-    Жёсткий сплит одной строки на части не длиннее limit.
-
-    Граница не должна разрывать пару экранирования MarkdownV2 ('\\x'):
-    иначе первая часть кончится «висячим» '\\' и Telegram вернёт ошибку
-    разбора разметки. Нечётное число '\\' перед границей → откат на 1 символ.
-    """
-    if len(line) <= limit:
-        return [line]
-    pieces: list[str] = []
-    rest = line
-    while len(rest) > limit:
-        cut = limit
-        if _trailing_backslashes(rest[:cut]) % 2 == 1:
-            cut -= 1
-        if cut <= 0:  # защита от вырожденного limit <= 1
-            cut = limit
-        pieces.append(rest[:cut])
-        rest = rest[cut:]
-    if rest:
-        pieces.append(rest)
-    return pieces
+CAPTION_TEXT_LIMIT = 1000
 
 
 def split_long_text(text: str, limit: int = MESSAGE_TEXT_LIMIT) -> list[str]:
     """
-    Разбивает текст длиннее limit на части для отправки сообщениями.
+    Разбивает длинный HTML-пост на части для отправки сообщениями.
 
-    Сначала — по переводам строк (границы частей читаются естественно);
-    слишком длинная строка рвётся жёстко через _split_line. На границе
-    частей теряется только один перевод строки (сообщения и так отдельные).
+    Разбор и границы — в utils.tg_html.split_html: теги и ссылки-сущности
+    не рвутся, открытые на границе теги закрываются и переоткрываются,
+    видимый текст сохраняется без потерь и дублей, граница предпочитается
+    после перевода строки.
     """
-    if len(text) <= limit:
-        return [text]
-    chunks: list[str] = []
-    current = ""
-    for line in text.split("\n"):
-        for piece in _split_line(line, limit):
-            candidate = f"{current}\n{piece}" if current else piece
-            if len(candidate) > limit:
-                if current:
-                    chunks.append(current)
-                current = piece
-            else:
-                current = candidate
-    if current:
-        chunks.append(current)
-    return chunks
+    return split_html(text, limit)
 
 
 async def send_post(
@@ -802,7 +758,7 @@ async def send_post(
             await bot.send_message(
                 chat_id=chat_id,
                 text=chunk,
-                parse_mode="MarkdownV2",
+                parse_mode="HTML",
                 reply_markup=reply_markup if index == 0 else None,
             )
 
@@ -811,13 +767,14 @@ async def send_post(
         return
 
     if len(file_ids) == 1:
-        # Лимит подписи к фото — 1024 символа: при переполнении фото без подписи
-        if len(text) <= 1000:
+        # Лимит подписи к фото — 1024 символа (считаем в UTF-16 по сырому
+        # HTML): при переполнении фото уходит без подписи, текст — частями
+        if utf16_len(text) <= CAPTION_TEXT_LIMIT:
             await bot.send_photo(
                 chat_id=chat_id,
                 photo=file_ids[0],
                 caption=text,
-                parse_mode="MarkdownV2",
+                parse_mode="HTML",
                 reply_markup=reply_markup,
             )
             return
@@ -826,12 +783,12 @@ async def send_post(
         return
 
     # Медиа-группа: подпись разрешена только у первого снимка
-    with_caption = len(text) <= 1000
+    with_caption = utf16_len(text) <= CAPTION_TEXT_LIMIT
     media = []
     for index, file_id in enumerate(file_ids):
         if index == 0 and with_caption:
             media.append(
-                InputMediaPhoto(media=file_id, caption=text, parse_mode="MarkdownV2")
+                InputMediaPhoto(media=file_id, caption=text, parse_mode="HTML")
             )
         else:
             media.append(InputMediaPhoto(media=file_id))
@@ -839,7 +796,7 @@ async def send_post(
 
     if not with_caption:
         for chunk in chunks:
-            await bot.send_message(chat_id=chat_id, text=chunk, parse_mode="MarkdownV2")
+            await bot.send_message(chat_id=chat_id, text=chunk, parse_mode="HTML")
     if reply_markup is not None:
         # sendMediaGroup не поддерживает кнопки — клавиатура отдельным сообщением
         await bot.send_message(
