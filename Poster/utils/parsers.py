@@ -6,16 +6,16 @@
 Относительные даты считаются в согласованной временной зоне приложения
 (APP_TZ), а не в произвольной зоне сервера.
 
-ПРАВИЛА ВРЕМЕНИ (вечер по умолчанию, особые случаи 0 и 12):
-- «цифровое с минутами» — ЧЧ:ММ и ЧЧ.ММ, а также 4-значная компактная
-  запись (ЧЧММ) — БУКВАЛЬНО, без сдвига: 18:30 → 18:30, 12:30 → 12:30,
-  1840 → 18:40, 0900 → 09:00, 0000 → 00:00;
-- «разговорное» — час без минут («7», «18»), 3 цифры («930» = 9:30),
-  запись пробелом («9 30»), «полседьмого», «четверть восьмого»,
-  «без четверти семь» — ВЕЧЕРНЕЕ ПРАВИЛО: 1–11 → +12, 0 → 00,
-  12 → 00 (12 означает полночь);
-- «утра»/«дня» — час без сдвига: 7 утра → 07:00, 12 утра → 12:00,
-  12 дня → 12:00;
+ПРАВИЛА ВРЕМЕНИ (разделитель НЕ влияет на интерпретацию):
+- запись с минутами (ЧЧ:ММ, ЧЧ.ММ, ЧЧММ, «ЧЧ ММ», «930») и час без
+  минут обрабатываются едино — ВЕЧЕРНЕЕ ПРАВИЛО по умолчанию:
+  час 1–11 → +12 независимо от записи: 7:30 → 19:30, 07:30 → 19:30,
+  730 → 19:30, 7 30 → 19:30, 0900 → 21:00, 18:30 → 18:30, 2215 → 22:15;
+- особое правило 12: час 12 БЕЗ минут («12») — полночь → 00:00;
+  час 12 С минутами без явного времени суток — как записано:
+  12:30 / 12.30 / 1230 / 12 30 → 12:30; час 0 → 00:00 («0000» → 00:00);
+- «утра»/«дня» (явный приоритет над вечерним правилом):
+  7:30 утра → 07:30, 7 утра → 07:00, 12 утра → 12:00, 12 дня → 12:00;
 - «вечера»/«ночи» — час <12 → +12, час 12 → минус 12:
   7 вечера → 19:00, 12:30 ночи → 00:30, 12 ночи → 00:00.
 Неоднозначное не угадывается (например, «18:30 вечера» → ошибка).
@@ -135,10 +135,18 @@ def _hour_from_token(token: str, table: dict[str, int]) -> int | None:
     return table.get(token)
 
 
-def _apply_evening(hour: int, minute: int) -> tuple[int, int] | None:
-    """Вечернее правило для разговорного времени (без явного времени суток)."""
-    if hour == 0 or hour == 12:
+def _apply_evening(
+    hour: int, minute: int, *, bare: bool = False
+) -> tuple[int, int] | None:
+    """Вечернее правило (без явного времени суток).
+
+    bare=True — час БЕЗ минут: особое правило 12 («12» → полночь).
+    Час 12 С минутами без периода остаётся как записан («12:30» → 12:30).
+    """
+    if hour == 0:
         return 0, minute
+    if hour == 12:
+        return (0, minute) if bare else (hour, minute)
     if 1 <= hour <= 11:
         return hour + 12, minute
     if 13 <= hour <= 23:
@@ -146,10 +154,12 @@ def _apply_evening(hour: int, minute: int) -> tuple[int, int] | None:
     return None
 
 
-def _apply_period(hour: int, minute: int, period: str | None) -> tuple[int, int] | None:
+def _apply_period(
+    hour: int, minute: int, period: str | None, *, bare: bool = False
+) -> tuple[int, int] | None:
     """Правило времени суток; period — утра/дня/вечера/ночи или None."""
     if period is None:
-        return _apply_evening(hour, minute)
+        return _apply_evening(hour, minute, bare=bare)
     if period in ("утра", "дня"):
         # Явное утро/день: час без сдвига (12 утра → 12:00)
         return (hour, minute) if 0 <= hour <= 12 else None
@@ -172,8 +182,10 @@ def parse_time_flexible(text: str) -> str | None:
     """
     Гибкий разбор времени. Возвращает «ЧЧ:ММ» или None.
 
-    См. модульный docstring: цифровая запись — буквально, разговорная —
-    с вечерним правилом, явные утро/день/вечер/ночь — по правилу периода.
+    Разделитель не влияет на интерпретацию: все формы с минутами
+    (ЧЧ:ММ, ЧЧ.ММ, ЧЧММ, «ЧЧ ММ», «930») и час без минут подчиняются
+    единому вечернему правилу; особое правило «12» — только для часа
+    без минут. Явные утро/день/вечер/ночь имеют приоритет.
     """
     raw = substitute_lotto(text or "").strip()
     if not raw:
@@ -185,27 +197,24 @@ def parse_time_flexible(text: str) -> str | None:
         period = m.group(1)
         raw = raw[: m.start()].strip()
 
-    def _resolve(hour: int, minute: int, *, literal: bool = False) -> str | None:
-        # Цифровая запись (literal) — без вечернего сдвига; сдвиг только при
-        # явном времени суток («12:30 ночи» → 00:30). Разговорная — вечером.
-        applied: tuple[int, int] | None
-        if literal and period is None:
-            applied = (hour, minute)
-        else:
-            applied = _apply_period(hour, minute, period)
+    def _resolve(hour: int, minute: int, *, bare: bool = False) -> str | None:
+        # bare=True — час без минут (особое правило 12 → полночь);
+        # явный период («12:30 ночи» → 00:30) имеет приоритет над
+        # вечерним правилом.
+        applied = _apply_period(hour, minute, period, bare=bare)
         if applied is None:
             return None
         return _finish(*applied)
 
-    # Цифровое с разделителем «:» или «.» — буквально
+    # ЧЧ:ММ и ЧЧ.ММ — тот же разбор, что и у компактных/пробельных форм
     m = re.fullmatch(r"(\d{1,2})[:.](\d{2})", raw)
     if m:
-        return _resolve(int(m.group(1)), int(m.group(2)), literal=True)
+        return _resolve(int(m.group(1)), int(m.group(2)))
 
-    # Компактные 4 цифры ЧЧММ — буквально
+    # Компактные 4 цифры ЧЧММ — тот же разбор (разделитель не важен)
     m = re.fullmatch(r"(\d{4})", raw)
     if m:
-        return _resolve(int(raw[:2]), int(raw[2:]), literal=True)
+        return _resolve(int(raw[:2]), int(raw[2:]))
 
     # 3 цифры «930» — разговорный час с минутами
     m = re.fullmatch(r"(\d)(\d{2})", raw)
@@ -250,20 +259,24 @@ def parse_time_flexible(text: str) -> str | None:
         hour = _hour_from_token(m.group(2), _HOUR_WORDS_NOMINATIVE)
         if hour is None or not 0 <= minus <= 59:
             return None
-        applied = _apply_period(hour, 0, period)
-        if applied is None:
-            return None
-        total = applied[0] * 60 + applied[1] - minus
+        if period is None and hour == 12:
+            # «без четверти двенадцать» — отсчёт до полуночи → 23:45
+            total = 24 * 60 - minus
+        else:
+            applied = _apply_period(hour, 0, period)
+            if applied is None:
+                return None
+            total = applied[0] * 60 + applied[1] - minus
         if total < 0:
             return None
         return _finish(total // 60, total % 60)
 
-    # Час без минут: «7», «18», «0» (после пасхалки — и «топор» → «7»)
+    # Час без минут: «7», «18», «0», «12» (после пасхалки — и «топор» → «7»)
     m = _NOMINATIVE_RE.fullmatch(raw)
     if m:
         hour = _hour_from_token(m.group(1), _HOUR_WORDS_NOMINATIVE)
         if hour is not None:
-            return _resolve(hour, 0)
+            return _resolve(hour, 0, bare=True)
 
     return None
 

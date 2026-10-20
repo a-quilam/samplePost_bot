@@ -4,8 +4,10 @@
 
 - даты: все согласованные форматы, относительные, дни недели,
   високосные годы, границы суток/года, ошибки и неоднозначности;
-- время: цифровые формы буквально, разговорные с вечерним правилом,
-  особые случаи 0 и 12, явные утро/день/вечер/ночь, ошибки;
+- время: единое вечернее правило для всех форм записи (разделитель не
+  влияет: 7:30 = 7.30 = 730 = «7 30» = 19:30), особые случаи 0 и 12
+  («12» → полночь, «12:30» → 12:30), явные утро/день/вечер/ночь,
+  ошибки;
 - лото-пасхалка: полный перенос значениями оригинала anounce,
   исправление substring-бага, границы токенов, негативы;
 - ссылки: нормализация, опасные схемы, произвольный текст;
@@ -260,21 +262,26 @@ class TimeParserTest(unittest.TestCase):
             parse_time_flexible(text), f"время '{text}' должно быть отклонено"
         )
 
-    def test_digital_literal_with_minutes(self):
-        """ЧЧ:ММ и ЧЧ.ММ — буквально, без вечернего сдвига."""
+    def test_digital_with_minutes_evening_rule(self):
+        """ЧЧ:ММ и ЧЧ.ММ подчиняются единому вечернему правилу."""
         self.assert_time("18:30", "18:30")
         self.assert_time("18.30", "18:30")
-        self.assert_time("7:30", "07:30")  # цифровая запись — буквально
-        self.assert_time("12:30", "12:30")  # особое правило 12 не действует
-        self.assert_time("09:00", "09:00")
+        self.assert_time("7:30", "19:30")  # разделитель не влияет: 1–11 → вечер
+        self.assert_time("7.30", "19:30")
+        self.assert_time("07:30", "19:30")  # ведущий ноль не отменяет правило
+        self.assert_time(
+            "12:30", "12:30"
+        )  # особое правило: 12 с минутами — как записано
+        self.assert_time("12.30", "12:30")
+        self.assert_time("09:00", "21:00")
         self.assert_time("00:00", "00:00")
         self.assert_time("23:59", "23:59")
 
-    def test_compact_4_digits_literal(self):
+    def test_compact_4_digits(self):
         self.assert_time("1840", "18:40")
         self.assert_time("2215", "22:15")
         self.assert_time("1830", "18:30")
-        self.assert_time("0900", "09:00")
+        self.assert_time("0900", "21:00")  # как «9:00» — разделитель не важен
         self.assert_time("0000", "00:00")
         self.assert_time("1210", "12:10")
         self.assert_time("1230", "12:30")
@@ -290,7 +297,7 @@ class TimeParserTest(unittest.TestCase):
     def test_space_form_is_conversational(self):
         self.assert_time("18 30", "18:30")
         self.assert_time("9 30", "21:30")
-        self.assert_time("12 30", "00:30")  # разговорные 12 → полночь
+        self.assert_time("12 30", "12:30")  # 12 с минутами — как записано
 
     def test_bare_hour_evening_default(self):
         self.assert_time("7", "19:00")
@@ -330,12 +337,16 @@ class TimeParserTest(unittest.TestCase):
         self.assert_time("без четверти семь утра", "06:45")
         self.assert_time("без 15 пять", "16:45")
         self.assert_time("без пятнадцати пять", "16:45")  # лото-подстановка
+        # «без четверти двенадцать» без периода — до полуночи; утра — до 12:00
+        self.assert_time("без четверти двенадцать", "23:45")
+        self.assert_time("без четверти двенадцать утра", "11:45")
 
     def test_lotto_times(self):
         self.assert_time("гуси-лебеди:15", "22:15")
-        self.assert_time("топор:30", "07:30")  # цифровое с минутами — буквально
+        self.assert_time("топор:30", "19:30")  # «7:30» → вечер, разделитель не важен
+        self.assert_time("топор:30 утра", "07:30")  # явное утро — приоритет
         self.assert_time("топор", "19:00")  # «7» разговорно → вечер
-        self.assert_time("дюжина", "00:00")  # «12» разговорно → полночь
+        self.assert_time("дюжина", "00:00")  # «12» без минут → полночь
 
     def test_invalid_times(self):
         self.assert_invalid("25:00")  # часа 25 не бывает
@@ -361,6 +372,63 @@ class TimeParserTest(unittest.TestCase):
         self.assert_time("23:59", "23:59")
         self.assert_time("00:00", "00:00")
         self.assert_time("0000", "00:00")
+
+
+@unittest.skipIf(IMPORT_ERROR is not None, f"импорт недоступен: {IMPORT_ERROR}")
+class SeparatorIndependenceTest(unittest.TestCase):
+    """Разделитель не влияет на интерпретацию времени (правило Stage 8.1).
+
+    Одинаковое время в любой записи (ЧЧ:ММ, ЧЧ.ММ, ЧЧММ, «ЧЧ ММ», 3 цифры)
+    даёт один и тот же результат; явные утро/день/ночь имеют приоритет;
+    особое правило «12» действует только для часа БЕЗ минут.
+    """
+
+    # Группы эквивалентных записей → ожидаемое ЧЧ:ММ
+    EQUIVALENT_GROUPS: list[tuple[tuple[str, ...], str]] = [
+        (("7:30", "7.30", "730", "7 30", "07:30", "0730"), "19:30"),
+        (("9:00", "9.00", "900", "9 00", "0900"), "21:00"),
+        (("18:30", "18.30", "1830", "18 30"), "18:30"),
+        (("22:15", "2215", "22 15"), "22:15"),
+        (("12:30", "12.30", "1230", "12 30"), "12:30"),
+        (
+            ("7:30 утра", "7.30 утра", "730 утра", "7 30 утра", "07:30 утра"),
+            "07:30",
+        ),
+        (("топор:30",), "19:30"),  # лото: «7:30» → вечер
+        (("топор:30 утра",), "07:30"),  # лото: явное утро — приоритет
+    ]
+
+    def test_equivalent_spellings(self):
+        """Все формы одной группы дают одинаковый результат."""
+        for forms, expected in self.EQUIVALENT_GROUPS:
+            results = []
+            for form in forms:
+                with self.subTest(form=form):
+                    result = parse_time_flexible(form)
+                    self.assertEqual(
+                        result,
+                        expected,
+                        f"'{form}' → '{expected}' (разделитель не влияет)",
+                    )
+                    results.append(result)
+            self.assertEqual(len(set(results)), 1, f"формы {forms} разошлись")
+
+    def test_special_twelve_only_bare(self):
+        """«12» — полночь только без минут; с минутами — как записано."""
+        self.assertEqual(parse_time_flexible("12"), "00:00")
+        self.assertEqual(parse_time_flexible("12 утра"), "12:00")
+        self.assertEqual(parse_time_flexible("12 дня"), "12:00")
+        self.assertEqual(parse_time_flexible("12:30"), "12:30")
+        self.assertEqual(parse_time_flexible("12 30"), "12:30")
+        self.assertEqual(parse_time_flexible("12:30 ночи"), "00:30")
+
+    def test_explicit_period_priority(self):
+        """Явное время суток важнее вечернего правила в любой записи."""
+        self.assertEqual(parse_time_flexible("7:30 утра"), "07:30")
+        self.assertEqual(parse_time_flexible("7 утра"), "07:00")
+        self.assertEqual(parse_time_flexible("полседьмого утра"), "06:30")
+        self.assertEqual(parse_time_flexible("9:30 ночи"), "21:30")
+        self.assertEqual(parse_time_flexible("1230 ночи"), "00:30")
 
 
 @unittest.skipIf(IMPORT_ERROR is not None, f"импорт недоступен: {IMPORT_ERROR}")
