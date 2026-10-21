@@ -74,6 +74,9 @@ class FakeBot:
     - errors_by_type — тип вызова -> исключение, которое БУДЕТ брошено
       (например BadRequest «Message to edit not found» для проверки
       восстановления экрана);
+    - fail_after — тип вызова -> сколько ЕЩЁ успешных вызовов этого типа
+      разрешено, после чего все падают (сбой посередине: частичная
+      доставка длинного поста или превью из нескольких частей);
     - send_* возвращают фиктивные Message с растущим message_id — так
       продукт запоминает id экрана/превью (как от настоящего Telegram);
     - атрибута defaults нет намеренно: Message.reply_text проверяет его
@@ -89,6 +92,8 @@ class FakeBot:
         self.calls: list[dict[str, Any]] = []
         self.fail_types: set[str] = set()
         self.errors_by_type: dict[str, Exception] = {}
+        # kind -> разрешено ещё N успешных вызовов, далее все падают
+        self.fail_after: dict[str, int] = {}
         self._next_message_id = 100
 
     def _record(self, kind: str, args: tuple, kwargs: dict) -> None:
@@ -96,6 +101,13 @@ class FakeBot:
             raise RuntimeError(f"имитация сбоя Telegram API: {kind}")
         if kind in self.errors_by_type:
             raise self.errors_by_type[kind]
+        remaining = self.fail_after.get(kind)
+        if remaining is not None:
+            if remaining <= 0:
+                raise RuntimeError(
+                    f"имитация сбоя Telegram API: {kind} (после успешных вызовов)"
+                )
+            self.fail_after[kind] = remaining - 1
         self.calls.append({"type": kind, "args": args, **kwargs})
 
     def _make_message(self, kwargs: dict) -> Any:

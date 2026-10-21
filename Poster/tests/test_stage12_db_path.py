@@ -100,9 +100,7 @@ class DatabasePathFromAnyCwdTests(unittest.TestCase):
             result = _run(PRINT_URL, cwd)
             self.assertEqual(result.returncode, 0, result.stderr)
 
-        self.assertEqual(
-            real_db.stat().st_size, size_before, "рабочая база изменялась"
-        )
+        self.assertEqual(real_db.stat().st_size, size_before, "рабочая база изменялась")
 
     def test_database_url_override_wins_over_default(self):
         # Явно настроенный DATABASE_URL сохраняет приоритет (Docker и тесты)

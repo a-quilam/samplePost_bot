@@ -1,5 +1,6 @@
+import hashlib
 import logging
-from collections.abc import Sequence
+from collections.abc import Awaitable, Callable, Sequence
 from typing import Any
 
 from sqlalchemy.orm import Session
@@ -199,6 +200,9 @@ def _clear_post_data(user_data: dict) -> None:
         # превью забывается, но НЕ удаляется: его удаление — явное решение
         # на завершение цикла (коммит F), здесь — только сброс ссылок
         "preview_messages",
+        # прогресс частичной отправки готового поста: данные поста сброшены —
+        # следующая отправка начинается с чистого листа
+        "post_delivery",
     ]:
         user_data.pop(key, None)
 
@@ -398,7 +402,13 @@ async def start_post_creation(
         await query.answer()
     logger.info("Начало создания поста.")
     await _save_wip_before_exit(update, context)
-    ctx.data(context)["current_step"] = 0  # Инициализация текущего шага
+    user_data = ctx.data(context)
+    if screen.screen_ref(user_data) is None:
+        # После рестарта ref экрана известен только БД: без восстановления
+        # вход по кнопке без /start создал бы ВТОРОЙ экран, а sync_wip
+        # затёр бы старый ref (Stage 12, §5)
+        screen.hydrate_screen_ref(user_data, ctx.user(update).id)
+    user_data["current_step"] = 0  # Инициализация текущего шага
     await prompt_step(update, context)
     return POST_CREATION
 
@@ -464,6 +474,12 @@ async def start_edit_draft(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     # Открытие другого черновика: незавершённый пост не теряем
     await _save_wip_before_exit(update, context)
 
+    user_data = ctx.data(context)
+    if screen.screen_ref(user_data) is None:
+        # После рестарта: старый экран редактируется, а не создаётся заново;
+        # ref в БД не затирается (Stage 12, §5)
+        screen.hydrate_screen_ref(user_data, ctx.user(update).id)
+
     session: Session = SessionLocal()
     try:
         draft = _find_own_draft(session, draft_id, query.from_user.id)
@@ -512,6 +528,14 @@ def _wip_payload(user_data: dict) -> dict:
     payload["editing_draft_id"] = user_data.get("editing_draft_id")
     payload["edit_field"] = user_data.get("edit_field")
     payload["pending_media"] = user_data.get("pending_media")
+    # Сообщения текущего превью: превью, показанное до рестарта, должно
+    # заменяться, а не копиться (Stage 12, §6 — «превью не накапливаются»)
+    payload["preview_messages"] = [
+        int(mid) for mid in (user_data.get("preview_messages") or [])
+    ]
+    # Прогресс частичной отправки готового поста: повторная попытка после
+    # рестарта досылает только недостаающее (Stage 12, §6)
+    payload["post_delivery"] = dict(user_data.get("post_delivery") or {})
     return payload
 
 
@@ -532,6 +556,12 @@ def _restore_wip_payload(user_data: dict, payload: dict) -> None:
         user_data["edit_field"] = payload["edit_field"]
     if payload.get("pending_media"):
         user_data["pending_media"] = payload["pending_media"]
+    if payload.get("preview_messages"):
+        user_data["preview_messages"] = [
+            int(mid) for mid in payload["preview_messages"]
+        ]
+    if isinstance(payload.get("post_delivery"), dict) and payload["post_delivery"]:
+        user_data["post_delivery"] = dict(payload["post_delivery"])
 
 
 def sync_wip(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
@@ -1041,6 +1071,23 @@ def split_long_text(text: str, limit: int = MESSAGE_TEXT_LIMIT) -> list[str]:
     return split_html(text, limit)
 
 
+def _delivery_fingerprint(text: str, file_ids: list[str]) -> str:
+    """
+    Отпечаток содержимого поста для продолжения частичной отправки.
+
+    Текст + список фото: одинаковое содержимое — одинаковый отпечаток
+    (повторная попытка возобновляет отправку); изменение поста между
+    попытками делает прежние message_id несопоставимыми с новым
+    содержимым, и прогресс сознательно сбрасывается.
+    """
+    digest = hashlib.sha256()
+    digest.update(text.encode("utf-8"))
+    for file_id in file_ids:
+        digest.update(b"\x00")
+        digest.update(file_id.encode("utf-8"))
+    return digest.hexdigest()
+
+
 async def send_post(
     bot,
     chat_id,
@@ -1050,6 +1097,7 @@ async def send_post(
     heading: str,
     reply_markup: InlineKeyboardMarkup | None = None,
     markup_lead_text: str | None = None,
+    progress: dict | None = None,
 ) -> list[int]:
     """
     ЕДИНАЯ отправка поста: текст / фото с подписью / медиа-группа.
@@ -1064,48 +1112,101 @@ async def send_post(
     Возвращает message_id отправленных сообщений (для превью — чтобы
     заменять старое превью; для готового поста id не используется —
     пост остаётся в чате навсегда).
+
+    progress — контейнер продолжения частичной отправки (Stage 12, §6):
+    после каждой подтверждённой операции в него пишутся step (сколько
+    операций выполнено) и ids (их message_id). Повторная попытка с тем же
+    progress и тем же содержимым досылает ТОЛЬКО недостаающее — без
+    дублей уже отправленного и без его удаления. Изменение поста между
+    попытками сбрасывает прогресс (отпечаток текста и фото).
     """
     text = build_post_summary(post_data, heading=heading)
 
     file_ids = [p for p in (photos or []) if p]
     chunks = split_long_text(text)
     sent: list[int] = []
+    done = 0  # операций подтверждено (в т.ч. в прошлой попытке)
+
+    if progress is not None:
+        fingerprint = _delivery_fingerprint(text, file_ids)
+        if progress.get("fingerprint") == fingerprint:
+            sent.extend(int(mid) for mid in progress.get("ids", []))
+            done = int(progress.get("step", 0))
+        elif progress:
+            # прежние id относятся к другому содержимому — начинаем заново
+            logger.warning(
+                "Частичная отправка прервана изменением поста — отправка заново."
+            )
+        progress["fingerprint"] = fingerprint
+        progress["step"] = done
+        progress["ids"] = list(sent)
+
+    op_index = 0
 
     def _remember(message) -> None:
         message_id = getattr(message, "message_id", None)
         if message_id is not None:
             sent.append(int(message_id))
 
-    async def send_text_chunks() -> None:
-        for index, chunk in enumerate(chunks):
+    async def _perform(runner: Callable[[], Awaitable[None]]) -> None:
+        """
+        Одна операция отправки: при продолжении уже подтверждённые
+        операции пропускаются (их id уже в sent из progress).
+        """
+        nonlocal op_index
+        current = op_index
+        op_index += 1
+        if current < done:
+            return
+        await runner()
+        if progress is not None:
+            progress["step"] = op_index
+            progress["ids"] = list(sent)
+
+    def _text_runner(chunk_index: int, *, with_markup: bool):
+        chunk = chunks[chunk_index]
+
+        async def runner() -> None:
             message = await bot.send_message(
                 chat_id=chat_id,
                 text=chunk,
                 parse_mode="HTML",
-                reply_markup=reply_markup if index == 0 else None,
+                reply_markup=reply_markup if with_markup else None,
             )
             _remember(message)
 
+        return runner
+
     if not file_ids:
-        await send_text_chunks()
+        for index in range(len(chunks)):
+            await _perform(_text_runner(index, with_markup=index == 0))
         return sent
 
     if len(file_ids) == 1:
         # Лимит подписи к фото — 1024 символа (считаем в UTF-16 по сырому
         # HTML): при переполнении фото уходит без подписи, текст — частями
         if utf16_len(text) <= CAPTION_TEXT_LIMIT:
-            message = await bot.send_photo(
-                chat_id=chat_id,
-                photo=file_ids[0],
-                caption=text,
-                parse_mode="HTML",
-                reply_markup=reply_markup,
-            )
-            _remember(message)
+
+            async def caption_runner() -> None:
+                message = await bot.send_photo(
+                    chat_id=chat_id,
+                    photo=file_ids[0],
+                    caption=text,
+                    parse_mode="HTML",
+                    reply_markup=reply_markup,
+                )
+                _remember(message)
+
+            await _perform(caption_runner)
             return sent
-        message = await bot.send_photo(chat_id=chat_id, photo=file_ids[0])
-        _remember(message)
-        await send_text_chunks()
+
+        async def plain_photo_runner() -> None:
+            message = await bot.send_photo(chat_id=chat_id, photo=file_ids[0])
+            _remember(message)
+
+        await _perform(plain_photo_runner)
+        for index in range(len(chunks)):
+            await _perform(_text_runner(index, with_markup=index == 0))
         return sent
 
     # Медиа-группа: подпись разрешена только у первого снимка
@@ -1118,23 +1219,28 @@ async def send_post(
             )
         else:
             media.append(InputMediaPhoto(media=file_id))
-    for message in await bot.send_media_group(chat_id=chat_id, media=media):
-        _remember(message)
+
+    async def group_runner() -> None:
+        for message in await bot.send_media_group(chat_id=chat_id, media=media):
+            _remember(message)
+
+    await _perform(group_runner)
 
     if not with_caption:
-        for chunk in chunks:
-            message = await bot.send_message(
-                chat_id=chat_id, text=chunk, parse_mode="HTML"
-            )
-            _remember(message)
+        for index in range(len(chunks)):
+            await _perform(_text_runner(index, with_markup=False))
     if reply_markup is not None:
         # sendMediaGroup не поддерживает кнопки — клавиатура отдельным сообщением
-        message = await bot.send_message(
-            chat_id=chat_id,
-            text=markup_lead_text or "Выберите действие:",
-            reply_markup=reply_markup,
-        )
-        _remember(message)
+
+        async def lead_runner() -> None:
+            message = await bot.send_message(
+                chat_id=chat_id,
+                text=markup_lead_text or "Выберите действие:",
+                reply_markup=reply_markup,
+            )
+            _remember(message)
+
+        await _perform(lead_runner)
     return sent
 
 
@@ -1151,15 +1257,32 @@ async def review_post(update: Update, context: ContextTypes.DEFAULT_TYPE) -> boo
     """
     logger.info("Переход к превью поста.")
     chat_id = ctx.chat(update).id
-    message_ids = await send_post(
-        context.bot,
-        chat_id,
-        ctx.data(context),
-        _current_photos(ctx.data(context)),
-        heading=POST_HEADING,
-        reply_markup=get_post_actions_keyboard(),
-        markup_lead_text="Выберите действие:",
-    )
+    # Локальный контейнер прогресса: при сбое посередине частично
+    # отправленные части превью запоминаются как временныесообщения
+    # ТЕКУЩЕГО превью — следующая замена/очистка их удалит, и превью
+    # не накапливаются (Stage 12, §6)
+    delivery: dict = {}
+    try:
+        message_ids = await send_post(
+            context.bot,
+            chat_id,
+            ctx.data(context),
+            _current_photos(ctx.data(context)),
+            heading=POST_HEADING,
+            reply_markup=get_post_actions_keyboard(),
+            markup_lead_text="Выберите действие:",
+            progress=delivery,
+        )
+    except Exception:
+        partial = [int(mid) for mid in delivery.get("ids") or []]
+        if partial:
+            user_data = ctx.data(context)
+            current = [int(mid) for mid in (user_data.get("preview_messages") or [])]
+            screen.track_preview(user_data, current + partial)
+            logger.info(
+                f"Часть превью ({partial}) запомнена после сбоя — уйдёт в очистку."
+            )
+        raise
     # новое превью отправлено → старое заменяется (стек превью не растёт)
     await screen.replace_preview(context, chat_id, ctx.data(context), message_ids)
     return await _render_preview_hint(update, context)
@@ -1273,6 +1396,14 @@ async def finish_post(update: Update, context: ContextTypes.DEFAULT_TYPE) -> boo
         )
         return False
 
+    # Продолжение частичной отправки: подтверждённо отправленные части
+    # запоминаются в user_data["post_delivery"] — повторная попытка досылает
+    # ТОЛЬКО недостаающее, без дублей уже отправленного и без его удаления
+    # (Stage 12, §6). Контейнер мутируется внутри send_post.
+    delivery = user_data.get("post_delivery")
+    if not isinstance(delivery, dict):
+        delivery = {}
+        user_data["post_delivery"] = delivery
     try:
         await send_post(
             context.bot,
@@ -1280,9 +1411,13 @@ async def finish_post(update: Update, context: ContextTypes.DEFAULT_TYPE) -> boo
             user_data,
             _current_photos(user_data),
             heading=POST_HEADING,
+            progress=delivery,
         )
     except Exception as e:
         logger.error(f"Не удалось отправить готовый пост: {e}")
+        # прогресс частичной отправки — в снимок WIP: продолжение переживёт
+        # рестарт процесса (запись best-effort, в памяти прогресс уже есть)
+        sync_wip(update, context)
         # не врать об успехе: превью и данные остаются, можно повторить;
         # отрисовка статуса — best-effort (API может быть целиком недоступен)
         try:
