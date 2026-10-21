@@ -10,10 +10,12 @@
 копий. Путь привязан к каталогу проекта, а не к текущей рабочей директории:
 запуск из любого каталога пишет в Poster/logs/, случайные logs/ не создаются.
 Каталог можно переопределить параметром setup_logging(log_dir=...).
+Токен бота вычищается из сообщений и трассировок (SecretScrubFilter).
 """
 
 import logging
 import os
+import traceback
 from logging.handlers import RotatingFileHandler
 
 # Каталог логов — рядом с модулем (как BASE_DIR в database.py, Stage 12):
@@ -33,6 +35,48 @@ LOG_BACKUP_COUNT = 5
 # Маркер «нашего» хендлера — чтобы setup_logging() был идемпотентным
 _MARKER_ATTR = "_post_bot_log"
 
+# Чем заменять найденные секреты в журналах
+SECRET_PLACEHOLDER = "***"
+
+
+class SecretScrubFilter(logging.Filter):
+    """
+    Вычищает значения-секреты (токен бота) из сообщений и трассировок (§5).
+
+    Токен попадает в лог через URL запросов Telegram API (например, при
+    LOG_LEVEL=DEBUG у httpx/telegram) и может оказаться в тексте исключения
+    (logger.error(..., exc_info=True)). Фильтр ставится на ХЕНДЛЕРЫ: фильтры
+    логгера не действуют на пропагированные записи. Работает идемпотентно
+    (повторная зачистка уже очищенного текста — no-op).
+    """
+
+    def __init__(self, secrets: list[str] | None = None):
+        super().__init__()
+        self._secrets = [s for s in (secrets or []) if s]
+
+    def _scrub(self, text: str) -> str:
+        for secret in self._secrets:
+            text = text.replace(secret, SECRET_PLACEHOLDER)
+        return text
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        if not self._secrets:
+            return True
+        # Сообщение (msg + args) — единая строка без секретов
+        record.msg = self._scrub(record.getMessage())
+        record.args = None
+        # Трассировка: готовый exc_text Formatter.format() использует
+        # вместо повторного форматирования exc_info
+        if record.exc_text:
+            record.exc_text = self._scrub(record.exc_text)
+        elif record.exc_info:
+            record.exc_text = self._scrub(
+                "".join(traceback.format_exception(*record.exc_info))
+            )
+        if record.stack_info:
+            record.stack_info = self._scrub(record.stack_info)
+        return True
+
 
 def resolve_level(name: str | None) -> int:
     """
@@ -43,6 +87,19 @@ def resolve_level(name: str | None) -> int:
         return logging.INFO
     level = getattr(logging, str(name).upper(), None)
     return level if isinstance(level, int) else logging.INFO
+
+
+def _build_scrub_filter() -> SecretScrubFilter:
+    """
+    Фильтр зачистки секретов для хендлеров.
+
+    Токен читается напрямую из окружения (config НЕ импортируется — модуль
+    остаётся независимым и тестируется без настоящего токена): config.py
+    делает load_dotenv() при импорте, а bot.py импортирует config до
+    setup_logging(), поэтому к этому моменту токен уже в переменных
+    окружения. Если токена нет — фильтр ничего не меняет.
+    """
+    return SecretScrubFilter([os.getenv("TELEGRAM_BOT_TOKEN", "")])
 
 
 def setup_logging(
@@ -74,6 +131,7 @@ def setup_logging(
     if not any(not isinstance(h, RotatingFileHandler) for h in marked):
         console = logging.StreamHandler()
         console.setFormatter(logging.Formatter(LOG_FORMAT, LOG_DATE_FORMAT))
+        console.addFilter(_build_scrub_filter())
         setattr(console, _MARKER_ATTR, True)
         root.addHandler(console)
 
@@ -88,6 +146,7 @@ def setup_logging(
             encoding="utf-8",
         )
         file_handler.setFormatter(logging.Formatter(LOG_FORMAT, LOG_DATE_FORMAT))
+        file_handler.addFilter(_build_scrub_filter())
         setattr(file_handler, _MARKER_ATTR, True)
         root.addHandler(file_handler)
 

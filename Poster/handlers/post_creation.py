@@ -695,7 +695,9 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     step = POST_STEPS[step_index]
     text = ctx.message(update).text or ""
 
-    logger.info(f"Получено сообщение для шага '{step['key']}': {text}")
+    # Текст в лог не пишем (Stage 14, §5): для диагностики достаточно
+    # события и названия поля; содержимое ввода — конфиденциально
+    logger.info(f"Получено сообщение для шага '{step['key']}' (длина {len(text)}).")
 
     if text.lower() == "пропустить":
         # Пропуск — пустое поле (None), а не строка-заглушка:
@@ -755,8 +757,9 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
                 _store_text_field(
                     user_data, step["key"], text, ctx.message(update).entities
                 )
+            # Текст в лог не пишем (Stage 14, §5) — только поле и длина
             logger.info(
-                f"Пользователь ввел '{step['key']}': {ctx.data(context)[step['key']]}"
+                f"Пользователь ввел '{step['key']}' (длина {len(text)}) — сохранено."
             )
 
     ctx.data(context)["current_step"] += 1
@@ -1571,7 +1574,8 @@ async def process_edit(update: Update, context: ContextTypes.DEFAULT_TYPE) -> in
     field = str(user_data.get("edit_field") or "")
     text = message.text or ""
 
-    logger.info(f"Пользователь редактирует поле '{field}' с вводом: {text}")
+    # Текст в лог не пишем (Stage 14, §5) — только событие и метаданные
+    logger.info(f"Пользователь редактирует поле '{field}' (длина {len(text)}).")
 
     step = next((s for s in POST_STEPS if s["key"] == field), None)
     if not field or step is None:
@@ -1613,7 +1617,7 @@ async def process_edit(update: Update, context: ContextTypes.DEFAULT_TYPE) -> in
         await _render_edit_prompt(
             update, context, step, error=f"Некорректный формат. {step['prompt']}"
         )
-        logger.warning(f"Некорректный ввод при редактировании поля '{field}': {text}")
+        logger.warning(f"Некорректный ввод при редактировании поля '{field}'.")
         return EDIT_FIELD
 
     if field == "image":
