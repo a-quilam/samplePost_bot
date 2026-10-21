@@ -1408,13 +1408,17 @@ class NoWorkflowTests(unittest.TestCase):
     def test_no_workflow_symbols_in_source(self):
         offenders = []
         for path in sorted(POSTER_DIR.rglob("*.py")):
-            # .venv — сторонний код: PTB 22+ содержит собственный класс
-            # PostApproval (suggested posts). Скан проверяет исходники
-            # ПРОЕКТА, библиотеки исключаются.
-            if (
-                "tests" in path.parts
-                or "__pycache__" in path.parts
-                or ".venv" in path.parts
+            # Сторонний код исключается: виртуальные окружения (любое
+            # имя: .venv, venv, .venv-ci…), кэши, тесты. Скан проверяет
+            # только исходники ПРОЕКТА: в PTB 22+ есть собственный класс
+            # PostApproval (suggested posts) — он не относится к Poster.
+            try:
+                rel = path.relative_to(POSTER_DIR)
+            except ValueError:  # pragma: no cover — вне каталога проекта
+                continue
+            if any(
+                part in ("tests", "__pycache__", "venv", "env") or part.startswith(".")
+                for part in rel.parts
             ):
                 continue
             content = path.read_text(encoding="utf-8")

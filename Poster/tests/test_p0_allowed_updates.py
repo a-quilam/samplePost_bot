@@ -19,6 +19,12 @@ build_application/init_db/setup_logging.
 import unittest
 from unittest.mock import MagicMock, patch
 
+# Пакет tests подставляет фиктивный токен в окружение (tests/__init__.py):
+# discovery грузит модули как top-level, а этот модуль — первый по
+# алфавиту и импортирует bot/config до того, как пакет кто-то тронет.
+# Импорт стоит ДО try с `import bot` намеренно — порядок значим.
+import tests  # noqa: F401
+
 try:
     from telegram import Update
 

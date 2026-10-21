@@ -90,9 +90,15 @@ class DatabasePathFromAnyCwdTests(unittest.TestCase):
 
     def test_real_working_db_untouched(self):
         # Настоящая пользовательская база: существует и не пересоздаётся
-        # импортами database из других директорий
+        # импортами database из других директорий. В чистом checkout
+        # (CI) рабочей базы нет — проверка применима только к машине
+        # разработчика; эквивалент для CI — тесты пути с временной БД.
         real_db = Path(POSTER_DIR) / "post_bot.db"
-        self.assertTrue(real_db.exists(), "рабочая база Poster/post_bot.db нужна")
+        if not real_db.exists():
+            self.skipTest(
+                "рабочая база Poster/post_bot.db отсутствует "
+                "(чистое окружение — проверка неприменима)"
+            )
         size_before = real_db.stat().st_size
         self.assertGreater(size_before, 0, "рабочая база не пуста")
 
