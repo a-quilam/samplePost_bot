@@ -157,7 +157,9 @@ make check          # приёмка перед релизом: ruff + black + m
 ```
 
 `make check` (= `make accept`) — единый релизный прогон, выполняется
-полностью локально, без живого Telegram, токена и пользовательской базы:
+полностью локально, без живого Telegram, токена и пользовательской базы;
+тот же прогон автоматически выполняется на GitHub Actions (см. раздел
+«Автоматические проверки»):
 
 * линтинг (ruff, black) и типизация (mypy);
 * unit- и интеграционные тесты: настоящий `Application.process_update`
@@ -177,6 +179,30 @@ mypy .
 python -W ignore::DeprecationWarning -m unittest discover -s tests
 make format        # автоформатирование (black + ruff --fix)
 ```
+
+## Автоматические проверки (GitHub Actions)
+
+Каждый push в `main` и каждый Pull Request в `main` автоматически
+проверяются GitHub Actions (workflow [`.github/workflows/ci.yml`](../.github/workflows/ci.yml));
+запуск вручную — через `workflow_dispatch` (кнопка «Run workflow»
+на вкладке **Actions** репозитория).
+
+* **Что выполняется**: на Ubuntu с Python 3.13 и 3.14 ставятся зависимости
+  из `requirements.txt` + `requirements-dev.txt` и запускается
+  `make check` — линтинг (ruff, black), типизация (mypy) и все тесты:
+  интеграции поверх FakeBot, миграции на временных SQLite, smoke-запуск
+  `bot.main()` с фиктивным токеном и заблокированной сетью.
+  (`make accept` — алиас `make check`, поэтому в CI прогоняется один раз.)
+* **Где смотреть результат**: вкладка **Actions** репозитория → запуск
+  **CI** → нужный прогон по версии Python; логи пошаговые, статус —
+  зелёная галочка у коммита.
+* **Локально те же проверки**: `make check PYTHON=.venv/bin/python`
+  из каталога `Poster`.
+* **Без секретов и без Telegram**: `.env` в CI не нужен — тесты сами
+  подставляют фиктивный токен (`tests/__init__.py`), Telegram Bot
+  подменяется FakeBot, базы — временные SQLite, сеть заблокирована.
+  Реальный бот в CI не запускается, действующая `post_bot.db`
+  не затрагивается.
 
 ## Команды бота
 

@@ -1,0 +1,59 @@
+# CI Poster: линтинг, типизация и все тесты — без токена и живого Telegram.
+# Описание проверок: раздел «Автоматические проверки» в Poster/README.md.
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+# Минимальные права: только чтение репозитория — без записи и деплоя
+permissions:
+  contents: read
+
+# Один прогон на ревизию: параллельные запуски устаревшей ревизии отменяются
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    name: make check (Python ${{ matrix.python-version }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        # 3.14 — версия разработки (на ней ведётся проект);
+        # 3.13 — минимальная заявленная поддерживаемая версия
+        python-version: ["3.13", "3.14"]
+
+    steps:
+      - name: Получение исходного кода
+        uses: actions/checkout@v4
+
+      - name: Настройка Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+          cache-dependency-path: |
+            Poster/requirements.txt
+            Poster/requirements-dev.txt
+
+      - name: Установка зависимостей приложения и разработки
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r Poster/requirements.txt -r Poster/requirements-dev.txt
+
+      # make check = линтинг (ruff, black) + типы (mypy) + все тесты
+      # (unit, интеграции поверх FakeBot, миграции на временных SQLite,
+      # smoke-запуск bot.main() с фиктивным токеном и заблокированной
+      # сетью). make accept — алиас check, повторный прогон не нужен.
+      # Секреты не используются: фиктивный токен тесты подставляют сами
+      # (tests/__init__.py), настоящий Telegram-бот не запускается.
+      - name: Приёмка (make check)
+        working-directory: Poster
+        run: make check
