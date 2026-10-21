@@ -408,6 +408,22 @@ class Harness:
         await self.app.initialize()
         return self
 
+    async def restart(self) -> None:
+        """
+        Имитация рестарта процесса бота (Stage 11, сценарий 22).
+
+        Старое Application завершается, создаётся НОВОЕ поверх тех же FakeBot
+        и временной БД: user_data и состояние ConversationHandler теряются —
+        как при настоящем рестарте; ref экрана и WIP-снимок остаются
+        в таблице user_states и восстанавливаются из БД.
+        """
+        if self.app is not None:
+            await self.app.shutdown()
+        self.app = bot_module.build_application()
+        self.app.updater = None
+        self.app.bot = self.bot
+        await self.app.initialize()
+
     async def close(self) -> None:
         if self.app is not None:
             await self.app.shutdown()
