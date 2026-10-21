@@ -12,9 +12,10 @@
 - настройку polling и явный allowed_updates;
 - отсутствие обращений к сети (socket заблокирован на уровне Python).
 
-Логирование не настраивается (setup_logging подменён): каталог logs/
-привязан к рабочей директории и не должен появляться в чужих каталогах —
-сам setup_logging проверен unit-тестами Stage 4.
+Логирование не настраивается (setup_logging подменён): файлы логов
+привязаны к каталогу проекта (Poster/logs/) и принадлежат действующему
+боту — смоук не пишет в действующие журналы; сам setup_logging проверен
+unit-тестами Stage 4 и Stage 14.
 
 В stdout печатается строка SMOKE_REPORT=<json>, её читает
 tests/test_stage13_smoke.py.
@@ -50,7 +51,8 @@ def main() -> int:
     import bot as bot_module
     import database
 
-    # Логи в тестовом процессе не настраиваем (LOG_DIR относительный к cwd)
+    # Логи в тестовом процессе не настраиваем: не пишем в действующие
+    # журналы пользователя (Poster/logs/)
     bot_module.setup_logging = lambda *args, **kwargs: None  # type: ignore[assignment]
 
     # run_polling подменяется: реальный опрос Telegram не запускается,

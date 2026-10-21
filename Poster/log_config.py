@@ -3,17 +3,23 @@
 Настройка логирования: консоль + файл с ротацией.
 
 Подключается в bot.py; модуль не импортирует telegram и config, поэтому
-поведение покрыто юнит-тестами (tests/test_stage4.py).
+поведение покрыто юнит-тестами (tests/test_stage4.py, tests/test_stage14_logging.py).
 
 Уровень задаётся переменной окружения LOG_LEVEL (по умолчанию INFO).
-Файл логов — logs/bot.log с ротацией: до 5 МБ × 5 старых копий.
+Файл логов — <каталог модуля>/logs/bot.log с ротацией: до 5 МБ × 5 старых
+копий. Путь привязан к каталогу проекта, а не к текущей рабочей директории:
+запуск из любого каталога пишет в Poster/logs/, случайные logs/ не создаются.
+Каталог можно переопределить параметром setup_logging(log_dir=...).
 """
 
 import logging
 import os
 from logging.handlers import RotatingFileHandler
 
-LOG_DIR = "logs"
+# Каталог логов — рядом с модулем (как BASE_DIR в database.py, Stage 12):
+# не зависит от того, из какого каталога запущен бот.
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+LOG_DIR = os.path.join(BASE_DIR, "logs")
 LOG_FILE_NAME = "bot.log"
 
 # Единый структурированный формат строки лога
