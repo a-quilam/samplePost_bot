@@ -185,10 +185,13 @@ class CommandRoutingTests(unittest.TestCase):
     @scenario_test
     async def test_commands_inside_dialog_end_it_and_save_wip_once(self, h):
         # Все команды (включая /drafts) отвечают на экране (Stage 11)
+        # /cancel: статус отмены — на экране (коммит F), уведомление
+        # о сохранении ВИП остаётся reply-сообщением
         answered_on_screen = {
             "/start": "Здравствуйте",
             "/help": "Команды:",
             "/drafts": "черновик",
+            "/cancel": "Создание поста отменено",
         }
         for cmd in self.OUTSIDE_EXPECTED:
             with self.subTest(cmd=cmd):
@@ -329,12 +332,13 @@ class RegistrationOrderTests(unittest.TestCase):
         conv = application.handlers[0][0]
         self.assertTrue(conv.allow_reentry, "перезапуск диалога должен работать")
         self.assertFalse(conv.persistent, "persistence в Stage 9 не внедряется")
-        # Четыре entry-точки: команда, inline-кнопка меню, reply-текст,
-        # открытие черновика
-        self.assertEqual(len(conv.entry_points), 4)
+        # Пять entry-точек: команда, inline-кнопка меню, reply-текст,
+        # открытие черновика, восстановление ВИП после рестарта
+        self.assertEqual(len(conv.entry_points), 5)
         entry_names = [getattr(h.callback, "__name__", "") for h in conv.entry_points]
         self.assertIn("start_post_creation", entry_names)
         self.assertIn("start_edit_draft", entry_names)
+        self.assertIn("restore_wip", entry_names, "«Продолжить пост» после рестарта")
         # Обработчик ошибок зарегистрирован
         self.assertTrue(application.error_handlers, "error_handler обязателен")
 
@@ -410,7 +414,7 @@ class ResilienceTests(unittest.TestCase):
 
         self.assertEqual(len(h.answers()), 1, "кнопка отвечена даже при сбое")
         self.assertEqual(h.dialog_state(), POST_CREATION, "остаёмся на превью")
-        self.assertIn("Не удалось отправить", h.reply_texts()[-1])
+        self.assertIn("Не удалось отправить", h.screen_text())
         self.assertEqual(
             h.user_data().get("photos"), ["photo-r1"], "данные не потеряны"
         )

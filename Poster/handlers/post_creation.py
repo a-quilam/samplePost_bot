@@ -369,7 +369,8 @@ async def _save_wip_before_exit(
     if draft_id is None:
         # Ошибка БД: кнопка «Сохранить в черновики» после завершения диалога
         # уже недоступна — подсказываем реально работающий следующий шаг
-        # (повторное «Создать пост» сохранит данные ещё раз)
+        # (повторное «Создать пост» сохранит данные ещё раз); снимок WIP
+        # в БД остаётся — после рестарта пост можно продолжить
         await ctx.message(update).reply_text(
             "Не удалось сохранить незавершённый пост: ошибка базы данных. "
             "Нажмите «✏️ Создать пост» ещё раз — я повторю попытку сохранения."
@@ -378,6 +379,9 @@ async def _save_wip_before_exit(
     await ctx.message(update).reply_text(
         f"Незавершённый пост сохранён в черновики (№{draft_id})."
     )
+    # пост надёжно в черновиках — снимок WIP чистится, чтобы меню не
+    # предлагало «Продолжить» уже сохранённое
+    screen.clear_payload(ctx.user(update).id)
     _clear_post_data(user_data)
 
 
@@ -396,6 +400,48 @@ async def start_post_creation(
     await _save_wip_before_exit(update, context)
     ctx.data(context)["current_step"] = 0  # Инициализация текущего шага
     await prompt_step(update, context)
+    return POST_CREATION
+
+
+async def restore_wip(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """
+    Точка входа «▶️ Продолжить пост» (меню при наличии WIP после рестарта).
+
+    Восстанавливает незавершённый пост из снимка в user_states и возвращает
+    диалог в то состояние, где он прервался: превью (current_step >= 9) или
+    шаг визарда. Если снимок пуст/протух — честно сообщает и завершает диалог,
+    не создавая ложного поста.
+    """
+    query = getattr(update, "callback_query", None)
+    if query is not None:
+        await query.answer()
+
+    user_data = ctx.data(context)
+    user_id = ctx.user(update).id
+    payload = screen.load_payload(user_id)
+    if not payload or is_post_empty(_post_fields(payload)):
+        # снимок пуст (пост был завершён/сохранён) — честно сообщаем
+        await screen.render_screen(
+            context,
+            user_data,
+            ctx.chat(update).id,
+            "Незавершённого поста нет — начните создание кнопкой " "«✏️ Создать пост».",
+            main_menu_keyboard(),
+        )
+        logger.info("Восстановление WIP: снимок пуст, диалог не начат.")
+        return ConversationHandler.END
+
+    _restore_wip_payload(user_data, payload)
+    # ref экрана восстанавливаем после payload: _restore_wip_payload не трогает
+    # ключ «screen», но hydrate заполняет его при отсутствии — порядок безопасен
+    screen.hydrate_screen_ref(user_data, user_id)
+    step_index = int(user_data.get("current_step") or 0)
+    logger.info(f"Восстановление WIP: шаг {step_index}, черновик в работе.")
+    if step_index >= len(POST_STEPS):
+        # прервали на превью/правке — восстанавливаем превью с кнопками
+        await review_post(update, context)
+        return POST_CREATION
+    await _render_step_screen(update, context, step_index)
     return POST_CREATION
 
 
@@ -1131,11 +1177,15 @@ async def save_draft(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool
     """
     logger.info("Сохранение поста в черновики.")
     user_data = ctx.data(context)
+    chat_id = ctx.chat(update).id
     if is_post_empty(_post_fields(user_data)):
-        await ctx.message(update).reply_text(
+        await screen.render_screen(
+            context,
+            user_data,
+            chat_id,
             "Пост пуст: заполните хотя бы одно поле или добавьте фото, "
             "чтобы сохранить черновик.",
-            reply_markup=main_menu_keyboard(),
+            main_menu_keyboard(),
         )
         logger.info("Пустой пост не сохранён — черновик не создан.")
         return False
@@ -1153,21 +1203,25 @@ async def save_draft(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool
         # После успешного сохранения данные чистим: повторные выходы не создадут
         # дубль-черновик, а пост уже надёжно в БД
         _clear_post_data(user_data)
+        # WIP-снимок чистится: пост надёжно в черновиках, «воскресать» нечему
+        screen.clear_payload(ctx.user(update).id)
         if is_update:
-            await ctx.message(update).reply_text(
-                f"Черновик {draft.id} обновлён.", reply_markup=main_menu_keyboard()
-            )
+            status = f"Черновик {draft.id} обновлён."
         else:
-            await ctx.message(update).reply_text(
-                "Пост сохранён в черновики.", reply_markup=main_menu_keyboard()
-            )
+            status = "Пост сохранён в черновики."
+        await screen.render_screen(
+            context, user_data, chat_id, status, main_menu_keyboard()
+        )
         logger.info(f"Черновик {draft.id} сохранён (обновление={is_update}).")
         return True
     except Exception as e:
         session.rollback()
-        await ctx.message(update).reply_text(
+        await screen.render_screen(
+            context,
+            user_data,
+            chat_id,
             "Произошла ошибка при сохранении черновика.",
-            reply_markup=main_menu_keyboard(),
+            main_menu_keyboard(),
         )
         logger.error(f"Ошибка при сохранении черновика: {e}")
         return False
@@ -1196,36 +1250,61 @@ async def finish_post(update: Update, context: ContextTypes.DEFAULT_TYPE) -> boo
     «Готово»: отправляет пользователю ГОТОВЫЙ пост тем же механизмом
     (send_post), что и превью, — в ТОТ ЖЕ личный чат, без посредников.
 
+    Готовый пост остаётся в чате навсегда (не удаляется и не редактируется);
+    превью — временный результат — удаляется ТОЛЬКО после успешной отправки
+    поста, чтобы не потерять визуальную опору при сбое. Ошибочный ввод и
+    сбой отправки не теряют данные и не врут об успехе.
+
     Возвращает True, если пост отправлен (цикл завершён).
     False — пустой пост или сбой отправки: пользователь остаётся
     на превью, введённые данные не теряются.
     """
     user_data = ctx.data(context)
+    chat_id = ctx.chat(update).id
 
     if is_post_empty(_post_fields(user_data)):
-        await ctx.message(update).reply_text(
-            "Пост пуст: добавьте хотя бы заголовок, текст или изображение."
+        # ошибочный ввод — обновлением экрана, потока сообщений нет
+        await screen.render_screen(
+            context,
+            user_data,
+            chat_id,
+            "Пост пуст: добавьте хотя бы заголовок, текст или изображение.",
+            main_menu_keyboard(),
         )
         return False
 
     try:
         await send_post(
             context.bot,
-            ctx.chat(update).id,
+            chat_id,
             user_data,
             _current_photos(user_data),
             heading=POST_HEADING,
         )
     except Exception as e:
         logger.error(f"Не удалось отправить готовый пост: {e}")
-        await ctx.message(update).reply_text(
-            "Не удалось отправить готовый пост. Попробуйте ещё раз."
-        )
+        # не врать об успехе: превью и данные остаются, можно повторить;
+        # отрисовка статуса — best-effort (API может быть целиком недоступен)
+        try:
+            await screen.render_screen(
+                context,
+                user_data,
+                chat_id,
+                "Не удалось отправить готовый пост. Попробуйте ещё раз.",
+                get_post_actions_keyboard(),
+            )
+        except Exception as render_error:  # noqa: BLE001 — данные важнее статуса
+            logger.error(f"Не удалось показать статус сбоя: {render_error}")
         return False
 
+    # пост отправлен → превью (временное) удаляется, пост остаётся навсегда;
+    # очистка best-effort — сбой не должен ломать завершение цикла
+    await screen.cleanup_preview(context, chat_id, user_data)
     _clear_post_data(user_data)
-    await ctx.message(update).reply_text(
-        "Пост готов.", reply_markup=main_menu_keyboard()
+    # WIP-снимок чистится: пост завершён, черновик не должен «воскреснуть»
+    screen.clear_payload(ctx.user(update).id)
+    await screen.render_screen(
+        context, user_data, chat_id, "Пост готов.", main_menu_keyboard()
     )
     logger.info("Готовый пост отправлен пользователю.")
     return True
@@ -1492,11 +1571,22 @@ async def finish_photo_edit(update: Update, context: ContextTypes.DEFAULT_TYPE) 
 async def cancel_creation(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     """
     Отменяет процесс создания поста (незавершённый пост сохраняется).
+
+    Статус отмены — на экране управления; сообщение команды /cancel —
+    временный ввод, удаляется best-effort.
     """
     await _save_wip_before_exit(update, context)
-    await ctx.message(update).reply_text(
-        "Создание поста отменено.", reply_markup=main_menu_keyboard()
+    user_data = ctx.data(context)
+    if screen.screen_ref(user_data) is None:
+        screen.hydrate_screen_ref(user_data, ctx.user(update).id)
+    await screen.render_screen(
+        context,
+        user_data,
+        ctx.chat(update).id,
+        "Создание поста отменено.",
+        main_menu_keyboard(),
     )
+    await screen.drop_user_input(update, context)
     logger.info("Пользователь отменил создание поста.")
     return ConversationHandler.END
 
@@ -1603,6 +1693,10 @@ def post_creation_handlers() -> list[BaseHandler]:
                 MessageHandler(filters.Regex("^✏️ Создать пост$"), start_post_creation),
                 # Открытие существующего черновика в редакторе (кнопка в списке черновиков)
                 CallbackQueryHandler(start_edit_draft, pattern=r"^editdraft_\d+$"),
+                # Продолжение незавершённого поста после рестарта (снимок WIP
+                # в user_states) — кнопка появляется в меню только при наличии
+                # снимка
+                CallbackQueryHandler(restore_wip, pattern=r"^restore_wip$"),
             ],
             states={
                 POST_CREATION: [
@@ -1660,6 +1754,10 @@ def post_creation_handlers() -> list[BaseHandler]:
                 CallbackQueryHandler(main_menu_during_creation, pattern=r"^main_menu$"),
                 CallbackQueryHandler(view_drafts_and_exit, pattern=r"^drafts$"),
                 CallbackQueryHandler(help_during_creation, pattern=r"^help$"),
+                # Повторное «Продолжить пост» при уже активном диалоге: без
+                # этого fallback'а кнопка проваливалась бы в stale-хендлер
+                # (ответ «Кнопка устарела») либо висела бы со спиннером
+                CallbackQueryHandler(restore_wip, pattern=r"^restore_wip$"),
             ],
             allow_reentry=True,
         ),

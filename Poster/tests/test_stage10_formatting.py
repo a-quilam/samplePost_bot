@@ -351,6 +351,7 @@ class SaveErrorTests(unittest.TestCase):
 
         await h.callback("save_draft")
 
-        self.assertIn("Произошла ошибка при сохранении черновика", h.reply_texts()[-1])
+        # отказ — на экране управления (новых сообщений нет)
+        self.assertIn("Произошла ошибка при сохранении черновика", h.screen_text())
         self.assertEqual(h.dialog_state(), POST_CREATION, "диалог остаётся на превью")
         self.assertEqual(h.user_data().get("title"), "Ценный текст", "данные целы")

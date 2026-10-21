@@ -54,7 +54,7 @@ class DraftLifecycleTests(unittest.TestCase):
         await goto_preview(h, title="Черновик в работе")
         await h.callback("save_draft")
 
-        self.assertIn("Пост сохранён в черновики", h.reply_texts()[-1])
+        self.assertIn("Пост сохранён в черновики", h.screen_text())
         self.assertIsNone(h.dialog_state())
         self.assertNotIn("title", h.user_data(), "данные чистятся после сохранения")
         drafts = h.drafts()
@@ -89,7 +89,7 @@ class DraftLifecycleTests(unittest.TestCase):
         self.assertEqual(h.dialog_state(), POST_CREATION)
         await h.callback("save_draft")
 
-        self.assertIn("Черновик 1 обновлён", h.reply_texts()[-1])
+        self.assertIn("Черновик 1 обновлён", h.screen_text())
         drafts = h.drafts()
         self.assertEqual(len(drafts), 1, "дубликатов быть не должно")
         self.assertEqual(drafts[0].title, "Отредактированный черновик")
@@ -156,7 +156,7 @@ class DraftLifecycleTests(unittest.TestCase):
         await goto_preview(h, title="Мой черновик")
         await h.callback("save_draft")
 
-        # Открытие чужого черновика — отказ, диалог НЕ начинается
+        # Открытие чужого черновика — отказ (reply entry-точки), диалог НЕ начинается
         await h.callback("editdraft_1", user_id=8)
         self.assertIn("Черновик не найден", h.reply_texts()[-1])
         self.assertIsNone(h.dialog_state(user_id=8))
@@ -199,7 +199,7 @@ class DraftLifecycleTests(unittest.TestCase):
         await h.text("Правленый ВИП")
         await h.text("/cancel")
 
-        self.assertIn("Создание поста отменено", h.reply_texts()[-1])
+        self.assertIn("Создание поста отменено", h.screen_text())
         self.assertIsNone(h.dialog_state())
         drafts = h.drafts()
         self.assertEqual(len(drafts), 1, "копия не должна создаваться")
@@ -336,7 +336,7 @@ class PhotoAlbumTests(unittest.TestCase):
         final_album = albums[-1]
         self.assertEqual([m.media for m in final_album["media"]], ["a1", "a2", "a3"])
         self.assertEqual(final_album["media"][0].caption, preview_caption)
-        self.assertEqual(h.reply_texts()[-1], "Пост готов.")
+        self.assertIn("Пост готов.", h.screen_text())
 
     @scenario_test
     async def test_late_album_photo_after_done_does_not_change_post(self, h):

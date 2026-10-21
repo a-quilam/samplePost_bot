@@ -153,11 +153,12 @@ class FullCreationFlowTests(unittest.TestCase):
         await h.callback("finish")
         self.assertIsNone(h.dialog_state())
         self.assertEqual(len(h.answers()), 1, "callback обязан быть отвечен")
-        self.assertEqual(h.reply_texts()[-1], "Пост готов.")
-        menu_buttons = h.replies()[-1]["reply_markup"].inline_keyboard
+        self.assertIn("Пост готов.", h.screen_text())
+        # меню доступно кнопками того же экрана (новых сообщений нет)
+        menu_buttons = h.screen_buttons()
         self.assertIn(
             "✏️ Создать пост",
-            [b.text for row in menu_buttons for b in row],
+            [text for text, _data in menu_buttons],
         )
 
         # ПРЕВЬЮ == ГОТОВЫЙ ПОСТ: дословно одинаковый текст и фото
@@ -303,7 +304,7 @@ class SkipAndEditTests(unittest.TestCase):
         await h.callback("save_draft")
 
         self.assertEqual(len(h.drafts()), 0, "пустой черновик не создаётся")
-        self.assertIn("Пост пуст", h.reply_texts()[-1])
+        self.assertIn("Пост пуст", h.screen_text())
         self.assertEqual(h.dialog_state(), POST_CREATION, "диалог остаётся")
         self.assertEqual(
             h.user_data().get("current_step"),
@@ -337,7 +338,7 @@ class SkipAndEditTests(unittest.TestCase):
 
         self.assertEqual(len(h.drafts()), 1, "вторая запись не появилась")
         self.assertEqual(h.drafts()[0].title, "Исходный контент", "запись не порчена")
-        self.assertIn("Пост пуст", h.reply_texts()[-1])
+        self.assertIn("Пост пуст", h.screen_text())
         self.assertEqual(h.dialog_state(), POST_CREATION, "диалог остаётся")
 
     @scenario_test
@@ -355,7 +356,7 @@ class SkipAndEditTests(unittest.TestCase):
 
         self.assertEqual(len(h.posts()), posts_before, "пустой пост не отправляется")
         self.assertEqual(len(h.answers()), answers_before + 1, "кнопка отвечена")
-        self.assertIn("Пост пуст", h.reply_texts()[-1])
+        self.assertIn("Пост пуст", h.screen_text())
         self.assertEqual(
             h.dialog_state(), POST_CREATION, "диалог должен остаться на превью"
         )

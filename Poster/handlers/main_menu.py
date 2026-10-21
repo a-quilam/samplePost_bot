@@ -55,18 +55,32 @@ async def render_main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     Рисует главное меню на существующем экране (или создаёт новый экран).
 
     После рестарта процесса ref экрана восстанавливается из БД один раз —
-    /start редактирует старое сообщение, а не плодит дубли.
+    /start редактирует старое сообщение, а не плодит дубли. Если в БД остался
+    снимок незавершённого поста (рестарт прервал диалог) — в меню добавляется
+    кнопка «▶️ Продолжить пост».
     """
     user_data = ctx.data(context)
+    user_id = ctx.user(update).id
     if screen.screen_ref(user_data) is None:
-        screen.hydrate_screen_ref(user_data, ctx.user(update).id)
+        screen.hydrate_screen_ref(user_data, user_id)
     chat_id = ctx.chat(update).id
-    await screen.render_screen(
-        context, user_data, chat_id, main_menu_text(), main_menu_keyboard()
-    )
+    keyboard = main_menu_keyboard()
+    if screen.load_payload(user_id):
+        # WIP пережил рестарт — предлагаем продолжение вместо потери
+        keyboard = InlineKeyboardMarkup(
+            [
+                *keyboard.inline_keyboard,
+                [
+                    InlineKeyboardButton(
+                        "▶️ Продолжить пост", callback_data="restore_wip"
+                    )
+                ],
+            ]
+        )
+    await screen.render_screen(context, user_data, chat_id, main_menu_text(), keyboard)
     # ref экрана закрепляется в БД; WIP-payload не трогаем (пост в работе —
     # он переживёт рестарт и будет предложен к продолжению)
-    screen.save_screen_ref(ctx.user(update).id, user_data, chat_id)
+    screen.save_screen_ref(user_id, user_data, chat_id)
 
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:

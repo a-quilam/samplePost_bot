@@ -102,9 +102,12 @@ class RecordingBot:
     харнессе, различаем send (message) и edit (edit_message).
     """
 
-    def __init__(self, fail=False):
+    def __init__(self, fail=False, fail_send_only=False):
         self.calls = []
         self.fail = fail
+        # fail_send_only: падают только send_* (имитация сбоя отправки поста),
+        # отрисовка экрана при этом работает — как у настоящего API
+        self.fail_send_only = fail_send_only
         self._next_id = 100
 
     def _record(self, kind, kwargs):
@@ -112,7 +115,12 @@ class RecordingBot:
             raise RuntimeError("telegram api down")
         self.calls.append({"type": kind, **kwargs})
 
+    def _check_send(self):
+        if self.fail_send_only:
+            raise RuntimeError("telegram api down")
+
     async def send_message(self, **kwargs):
+        self._check_send()
         self._record("message", kwargs)
         self._next_id += 1
         return SimpleNamespace(message_id=self._next_id)
@@ -130,9 +138,11 @@ class RecordingBot:
             self.calls[-1]["message_id"] = args[1]
 
     async def send_photo(self, **kwargs):
+        self._check_send()
         self._record("photo", kwargs)
 
     async def send_media_group(self, **kwargs):
+        self._check_send()
         self._record("media_group", kwargs)
         # как у реального API: sendMediaGroup возвращает список сообщений
         self._next_id += 1
@@ -303,6 +313,11 @@ def post_calls(bot):
     ]
 
 
+def screen_texts(bot):
+    """Тексты всех отрисовок экрана управления (send и edit)."""
+    return [c["text"] for c in bot.calls if c.get("disable_web_page_preview")]
+
+
 def make_session_factory():
     """Сессия над БД в памяти (отдельный engine, к post_bot.db не подключается)."""
     engine = create_engine("sqlite:///:memory:")
@@ -384,9 +399,8 @@ class FullCycleTests(_InMemoryDbMixin, unittest.TestCase):
         # Все отправки — только в личный чат пользователя
         self.assertEqual({c["chat_id"] for c in post_calls(bot)}, {777})
 
-        # подтверждение «Пост готов.» отправлено пользователю
-        confirmation = finish_update.effective_message.reply_text.await_args.args[0]
-        self.assertIn("Пост готов", confirmation)
+        # подтверждение «Пост готов.» — на экране управления
+        self.assertIn("Пост готов", screen_texts(bot)[-1])
 
         # введённые данные очищены — цикл завершён
         for key in ("title", "date", "time_start", "text", "photos", "image"):
@@ -411,20 +425,25 @@ class FullCycleTests(_InMemoryDbMixin, unittest.TestCase):
 
         self.assertFalse(asyncio.run(finish_post(update, context)))
         self.assertEqual(post_calls(bot), [])
-        reply = update.effective_message.reply_text.await_args.args[0]
-        self.assertIn("Пост пуст", reply)
+        # отказ — на экране управления
+        self.assertIn("Пост пуст", screen_texts(bot)[-1])
 
     def test_send_failure_keeps_data_and_reports(self):
-        bot = RecordingBot(fail=True)
-        user_data = {"title": "Концерт", "text": "Ждём всех!"}
+        # падает только send_* — имитация сбоя отправки готового поста;
+        # экран уже существует (ref в user_data) — статус отказа правится им
+        bot = RecordingBot(fail_send_only=True)
+        user_data = {
+            "title": "Концерт",
+            "text": "Ждём всех!",
+            "screen": {"chat_id": 777, "message_id": 5},
+        }
         context = SimpleNamespace(user_data=user_data, bot=bot)
         update = make_message_update("")
 
         self.assertFalse(asyncio.run(finish_post(update, context)))
         # Данные не потеряны, пользователь получил понятный ответ
         self.assertEqual(user_data.get("title"), "Концерт")
-        reply = update.effective_message.reply_text.await_args.args[0]
-        self.assertIn("Не удалось отправить", reply)
+        self.assertIn("Не удалось отправить", screen_texts(bot)[-1])
 
 
 @unittest.skipIf(
@@ -1338,22 +1357,23 @@ class UserFacingTextTests(_InMemoryDbMixin, unittest.TestCase):
 
         self.assertEqual(result, EDIT_FIELD)
         # ошибка ввода — обновлением экрана (новых сообщений нет)
-        screen_texts = [c["text"] for c in context.bot.calls if "text" in c]
+        shown = [c["text"] for c in context.bot.calls if "text" in c]
         self.assertTrue(
-            any("ДД.ММ.ГГГГ" in t for t in screen_texts),
+            any("ДД.ММ.ГГГГ" in t for t in shown),
             "валидация должна подсказывать формат на экране",
         )
         self.assertEqual(user_data["date"], "25.12.2026", "поле не стирается")
 
     def test_save_draft_reply_spelling(self):
+        bot = RecordingBot()
         user_data = {"current_step": len(POST_STEPS), "title": "Тест"}
-        context = SimpleNamespace(user_data=user_data, bot=RecordingBot())
+        context = SimpleNamespace(user_data=user_data, bot=bot)
         update = make_message_update("")
 
         asyncio.run(save_draft(update, context))
 
-        reply = update.effective_message.reply_text.await_args.args[0]
-        self.assertIn("Пост сохранён в черновики", reply)
+        # статус сохранения — на экране управления
+        self.assertIn("Пост сохранён в черновики", screen_texts(bot)[-1])
 
 
 @unittest.skipIf(
