@@ -223,106 +223,91 @@ class SqlitePragmaTests(unittest.TestCase):
             engine.dispose()
 
 
-class RemoveOldDraftsTests(unittest.TestCase):
-    """sync_remove_old_drafts: TTL 30 дней — старые удаляются, свежие остаются."""
+class PerpetualDraftStorageTests(unittest.TestCase):
+    """
+    Черновики хранятся бессрочно (Stage 14): TTL-очистка отключена.
+
+    Регрессии против старого поведения (удаление старше 30 дней):
+    старый черновик переживает запуск/миграции и остаётся читаемым.
+    """
 
     def setUp(self):
-        import handlers.jobs as jobs_module
-
-        self.jobs = jobs_module
-        self._orig_session_local = jobs_module.SessionLocal
         self.session_factory, self.engine = make_session_factory()
-        jobs_module.SessionLocal = self.session_factory
 
     def tearDown(self):
-        self.jobs.SessionLocal = self._orig_session_local
         self.engine.dispose()
 
-    def test_removes_old_keeps_fresh(self):
-        session = self.session_factory()
-        try:
-            make_old_draft(session, title="Старый 1")
-            make_old_draft(session, title="Старый 2")
-            session.add(Draft(user_id=111, title="Свежий", created_at=utcnow()))
-            session.commit()
-        finally:
-            session.close()
-
-        self.jobs.sync_remove_old_drafts()
-
-        session = self.session_factory()
-        try:
-            titles = {d.title for d in session.query(Draft).all()}
-        finally:
-            session.close()
-        self.assertEqual(titles, {"Свежий"})
-
-    def _titles_after_cleanup(self):
-        self.jobs.sync_remove_old_drafts()
+    def _titles(self):
         session = self.session_factory()
         try:
             return {d.title for d in session.query(Draft).all()}
         finally:
             session.close()
 
-    def test_fresh_edit_of_old_draft_survives_ttl(self):
-        # A2: created_at старше TTL, но черновик правился недавно — живёт
+    def test_old_drafts_survive_init(self):
+        # Черновики старше любого разумного TTL (40 и 400 дней) с NULL и
+        # сброшенным updated_at — запуск (create_all + _migrate) их не трогает
+        from base import Base
+        from database import _migrate
+
         session = self.session_factory()
         try:
-            session.add(
-                Draft(
-                    user_id=111,
-                    title="Правленный сегодня",
-                    created_at=utcnow() - timedelta(days=40),
-                    updated_at=utcnow(),
-                )
+            session.add_all(
+                [
+                    Draft(
+                        user_id=111,
+                        title="Давний без правок",
+                        created_at=utcnow() - timedelta(days=400),
+                        updated_at=None,
+                    ),
+                    Draft(
+                        user_id=111,
+                        title="Давний правленый",
+                        created_at=utcnow() - timedelta(days=40),
+                        updated_at=utcnow() - timedelta(days=35),
+                    ),
+                ]
             )
             session.commit()
         finally:
             session.close()
 
-        self.assertEqual(self._titles_after_cleanup(), {"Правленный сегодня"})
+        # Имитация старта бота на той же базе: init_db() = create_all + _migrate
+        Base.metadata.create_all(bind=self.engine)
+        _migrate(self.engine)
 
-    def test_removes_draft_with_both_dates_older_than_ttl(self):
-        # A2: created_at И updated_at старше TTL — удаляется
+        self.assertEqual(
+            self._titles(),
+            {"Давний без правок", "Давний правленый"},
+            "бессрочное хранение: возрастное удаление не выполняется",
+        )
+
+    def test_draft_queries_keep_old_rows_readable(self):
+        # Старая запись (created_at 40 дней назад, updated_at NULL) полностью
+        # читается ORM — updated_at informational, не условие выборки.
+        # NULL ставим сырым UPDATE: ORM при вставке подставляет default.
         session = self.session_factory()
         try:
             session.add(
                 Draft(
                     user_id=111,
-                    title="Не правился давно",
-                    created_at=utcnow() - timedelta(days=40),
-                    updated_at=utcnow() - timedelta(days=35),
-                )
-            )
-            session.commit()
-        finally:
-            session.close()
-
-        self.assertEqual(self._titles_after_cleanup(), set())
-
-    def test_removes_legacy_draft_without_updated_at(self):
-        # A2: записи до миграции (updated_at IS NULL) — срок по created_at.
-        # NULL ставим сырой вставкой: ORM при вставке подставляет default.
-        session = self.session_factory()
-        try:
-            session.add(
-                Draft(
-                    user_id=111,
-                    title="До миграции",
+                    title="Старый читаемый",
                     created_at=utcnow() - timedelta(days=40),
                 )
             )
             session.commit()
             session.execute(
                 text("UPDATE drafts SET updated_at = NULL WHERE title = :title"),
-                {"title": "До миграции"},
+                {"title": "Старый читаемый"},
             )
             session.commit()
+            session.expire_all()
+            draft = session.query(Draft).filter_by(user_id=111).one()
+            self.assertEqual(draft.title, "Старый читаемый")
+            self.assertIsNone(draft.updated_at)
+            self.assertIsNotNone(draft.created_at)
         finally:
             session.close()
-
-        self.assertEqual(self._titles_after_cleanup(), set())
 
     def test_update_refreshes_updated_at(self):
         # A2: правка существующего черновика обновляет updated_at (onupdate)

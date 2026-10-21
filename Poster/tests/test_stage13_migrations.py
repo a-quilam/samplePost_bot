@@ -10,22 +10,21 @@ Poster/post_bot.db не затрагивается):
 - существующие черновики переживают миграцию без изменений;
 - повторное применение миграций идемпотентно, user_states с WIP-снимком
   сохраняется;
-- Draft.updated_at: у легаси-записей NULL (TTL — по created_at), у новых
-  записей заполняется моделью; форматирование (Draft.formats) пишется
-  и читается после миграции.
+- Draft.updated_at: у легаси-записей NULL (норма: колонка informational),
+  у новых записей заполняется моделью; форматирование (Draft.formats) пишется
+  и читается после миграции; возраст записей на миграции не влияет
+  (бессрочное хранение, Stage 14).
 """
 
 import unittest
-from datetime import timedelta
 
 try:
-    from sqlalchemy import create_engine, func, inspect, text
+    from sqlalchemy import create_engine, inspect, text
     from sqlalchemy.orm import sessionmaker
 
     from base import Base
     from database import _migrate
-    from handlers.jobs import DRAFT_TTL_DAYS
-    from models import Draft, UserState, get_draft_formats, utcnow
+    from models import Draft, UserState, get_draft_formats
 
     INTEGRATION_IMPORT_ERROR = None
 except Exception as e:  # noqa: BLE001 — причина попадает в сообщение пропуска
@@ -172,36 +171,32 @@ class LegacySchemaMigrationsTests(unittest.TestCase):
         finally:
             session.close()
 
-    def test_ttl_filter_matches_jobs_semantics_after_migration(self):
-        """Фильтр sync_remove_old_drafts работает на мигрированной схеме."""
+    def test_migration_preserves_rows_of_any_age(self):
+        """Stage 14: бессрочное хранение — возраст записи не важен миграциям."""
         self._init_like_production()
-        session_factory = sessionmaker(bind=self.engine)
-
         with self.engine.begin() as connection:
-            # Недавно правленный СТАРЫЙ черновик — удаляться не должен
+            # Возрастной черновик: created_at давно, updated_at NULL
             connection.execute(
                 text(
-                    "INSERT INTO drafts (id, user_id, title, created_at, "
-                    "updated_at) VALUES (2, 111, 'Правленый', "
-                    "'2026-01-01 00:00:00', :now)"
-                ),
-                {"now": utcnow().isoformat(sep=" ")},
+                    "INSERT INTO drafts (id, user_id, title, created_at) "
+                    "VALUES (2, 111, 'Очень старый', '2026-01-01 00:00:00')"
+                )
             )
 
-        session = session_factory()
+        # Повторные старты (рестарты) — ничего не удаляется по возрасту
+        self._init_like_production()
+        self._init_like_production()
+
+        session = sessionmaker(bind=self.engine)()
         try:
-            cutoff = utcnow() - timedelta(days=DRAFT_TTL_DAYS)
-            # Тот же фильтр, что в handlers.jobs.sync_remove_old_drafts
-            expired = [
-                d.id
-                for d in session.query(Draft)
-                .filter(func.coalesce(Draft.updated_at, Draft.created_at) < cutoff)
-                .all()
-            ]
-            self.assertEqual(expired, [1], "легаси-запись устарела по created_at")
-            self.assertNotIn(2, expired, "недавно правленный черновик TTL не удаляет")
+            titles = {d.title for d in session.query(Draft).all()}
         finally:
             session.close()
+        self.assertEqual(
+            titles,
+            {"Старый пост", "Очень старый"},
+            "миграции не удаляют записи по возрасту (TTL отключён)",
+        )
 
 
 if __name__ == "__main__":

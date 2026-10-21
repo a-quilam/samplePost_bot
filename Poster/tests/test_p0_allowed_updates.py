@@ -10,7 +10,7 @@ Telegram Bot API хранит параметр allowed_updates между выз
 получать сообщения (/start и весь текстовый ввод).
 
 Тест не ходит в сеть и не трогает БД: main() вызывается с подменёнными
-build_application/init_db/setup_jobs/setup_logging.
+build_application/init_db/setup_logging.
 
 Запуск из каталога Poster:
     python -m unittest discover -s tests -v
@@ -41,7 +41,6 @@ class AllowedUpdatesAtStartupTest(unittest.TestCase):
             patch.object(bot_module, "logger"),
             patch.object(bot_module, "init_db"),
             patch.object(bot_module, "build_application", return_value=app),
-            patch.object(bot_module, "setup_jobs"),
         ):
             bot_module.main()
 

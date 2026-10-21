@@ -15,7 +15,6 @@ from database import init_db
 from errors import error_handler
 from handlers.callbacks import callbacks_handlers
 from handlers.drafts import drafts_handlers
-from handlers.jobs import setup_jobs
 from handlers.main_menu import main_menu_handlers
 from handlers.post_creation import post_creation_handlers
 from log_config import setup_logging
@@ -81,8 +80,8 @@ def main() -> None:
     init_db()
     application = build_application()
 
-    # Фоновые задачи
-    setup_jobs(application)
+    # Фоновых задач нет: TTL-очистка черновиков отключена (Stage 14) —
+    # черновики хранятся бессрочно, пока пользователь не удалит их сам.
 
     # Явный allowed_updates обязателен: Telegram хранит последнюю подписку
     # между вызовами getUpdates («If not specified, the previous setting will

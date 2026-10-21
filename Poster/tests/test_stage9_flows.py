@@ -20,7 +20,6 @@ from datetime import timedelta
 try:
     from sqlalchemy import update as sa_update
 
-    import handlers.jobs as jobs_module
     from handlers.post_creation import EDIT_FIELD, POST_CREATION, POST_STEPS
     from models import Draft, utcnow
     from tests.integration_harness import (
@@ -207,21 +206,21 @@ class DraftLifecycleTests(unittest.TestCase):
         self.assertNotIn("title", h.user_data())
 
     @scenario_test
-    async def test_ttl_counts_from_updated_at(self, h):
-        # updated_at имеет default=utcnow — явные метки ставим UPDATE'ом
-        # (в UPDATE onupdate не срабатывает для перечисленных колонок)
+    async def test_old_drafts_still_listed(self, h):
+        # Stage 14: бессрочное хранение — черновики любого возраста видны
+        # в списке; updated_at informational, а не условие выборки
         session = h.session_factory()
         try:
             session.add_all(
                 [
-                    Draft(user_id=7, title="Протухший"),
-                    Draft(user_id=7, title="Правленый недавно"),
+                    Draft(user_id=7, title="Давний без правок"),
+                    Draft(user_id=7, title="Давний правленый"),
                     Draft(user_id=7, title="Свежий"),
                 ]
             )
             session.commit()
-            stale = session.query(Draft).filter_by(title="Протухший").one()
-            touched = session.query(Draft).filter_by(title="Правленый недавно").one()
+            stale = session.query(Draft).filter_by(title="Давний без правок").one()
+            touched = session.query(Draft).filter_by(title="Давний правленый").one()
             fresh = session.query(Draft).filter_by(title="Свежий").one()
 
             old = utcnow() - timedelta(days=41)
@@ -241,17 +240,15 @@ class DraftLifecycleTests(unittest.TestCase):
                 .values(created_at=utcnow() - timedelta(days=1), updated_at=None)
             )
             session.commit()
-            touched_id, fresh_id = touched.id, fresh.id
+            expected_ids = {stale.id, touched.id, fresh.id}
         finally:
             session.close()
 
-        jobs_module.sync_remove_old_drafts()
-
-        remaining = sorted(d.id for d in h.drafts())
+        remaining = {d.id for d in h.drafts()}
         self.assertEqual(
             remaining,
-            sorted([touched_id, fresh_id]),
-            "удаляется только неиспользуемый старый черновик",
+            expected_ids,
+            "бессрочное хранение: возрастные черновики не исчезают из списка",
         )
 
 

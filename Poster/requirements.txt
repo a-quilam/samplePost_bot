@@ -3,8 +3,9 @@
 # python-telegram-bot v21+ (асинхронный API).
 # ВАЖНО: v20.8 не запускается на Python 3.13+ (Updater падает с AttributeError),
 # поэтому минимальная версия — 21.0.
-# Extra [job-queue] нужен для application.job_queue (handlers/jobs.py) — ставит APScheduler.
-python-telegram-bot[job-queue]>=21,<23
+# Extra [job-queue] не нужен: фоновых задач нет (TTL-очистка черновиков
+# отключена в Stage 14 — хранение бессрочное).
+python-telegram-bot>=21,<23
 
 # Загрузка переменных окружения из .env (config.py)
 python-dotenv>=1.0,<2

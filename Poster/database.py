@@ -77,8 +77,9 @@ def _migrate(bind) -> None:
             if "photos" not in columns:
                 connection.execute(text("ALTER TABLE drafts ADD COLUMN photos TEXT"))
             if "updated_at" not in columns:
-                # NULL у существующих записей — TTL для них считает срок
-                # по created_at (см. handlers.jobs.sync_remove_old_drafts).
+                # NULL у существующих записей — норма: колонка informational
+                # (время последнего редактирования), TTL-очистка отключена
+                # (Stage 14: черновики хранятся бессрочно).
                 connection.execute(
                     text("ALTER TABLE drafts ADD COLUMN updated_at DATETIME")
                 )
