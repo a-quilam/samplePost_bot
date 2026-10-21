@@ -11,7 +11,15 @@ from base import Base
 # .env может переопределить файл БД (в Docker: sqlite:////app/data/post_bot.db).
 # Пустое значение или отсутствие переменной = путь по умолчанию.
 load_dotenv()
-SQLALCHEMY_DATABASE_URL = os.getenv("DATABASE_URL") or "sqlite:///./post_bot.db"
+
+# Путь по умолчанию привязан к каталогу ЭТОГО модуля (Poster/), а НЕ к текущей
+# рабочей директории: запуск из корня репозитория, из IDE, из произвольной
+# папки, launchd/systemd должен найти ту же рабочую базу, а не создавать
+# пустой случайный post_bot.db рядом с рабочей директорией (архитектурный
+# дефект Stage 12). Абсолютный путь получается на этапе импорта.
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+DEFAULT_SQLITE_URL = "sqlite:///" + os.path.join(BASE_DIR, "post_bot.db")
+SQLALCHEMY_DATABASE_URL = os.getenv("DATABASE_URL") or DEFAULT_SQLITE_URL
 
 # Busy timeout (сек): обработчики PTB и job-пул работают с БД из разных
 # потоков/задач — ждём освобождения блокировки вместо мгновенного

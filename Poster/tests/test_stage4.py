@@ -213,10 +213,16 @@ class DatabaseUrlTests(unittest.TestCase):
 
     CODE = "import database; print(database.SQLALCHEMY_DATABASE_URL)"
 
-    def test_default_path(self):
+    def test_default_path_anchored_to_poster_dir(self):
+        # Пустая строка = default; default обязан вести в каталог Poster/
+        # независимо от рабочей директории (Stage 12, дефект «БД не в той
+        # папке») — см. также tests/test_stage12_db_path.py
         result = _run_python(self.CODE, {"DATABASE_URL": ""})
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertIn("sqlite:///./post_bot.db", result.stdout)
+        self.assertEqual(
+            result.stdout.strip(),
+            "sqlite:///" + os.path.join(POSTER_DIR, "post_bot.db"),
+        )
 
     def test_override_path(self):
         result = _run_python(
