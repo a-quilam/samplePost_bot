@@ -196,6 +196,9 @@ def _clear_post_data(user_data: dict) -> None:
         "editing_draft_id",
         "edit_field",
         "temp_messages",
+        # превью забывается, но НЕ удаляется: его удаление — явное решение
+        # на завершение цикла (коммит F), здесь — только сброс ссылок
+        "preview_messages",
     ]:
         user_data.pop(key, None)
 
@@ -845,8 +848,14 @@ async def _finish_media_done(
         return True
     text = "Фотографии не получены. Отправьте фото (альбом) или нажмите «Пропустить»."
     if user_data.get("edit_field"):
-        # режим правки поля — подсказка в контексте правки (отдельным сообщением)
-        await ctx.message(update).reply_text(text, reply_markup=get_skip_keyboard())
+        # режим правки поля: отказ — обновлением экрана (кнопка пропуска)
+        await screen.render_screen(
+            context,
+            user_data,
+            ctx.chat(update).id,
+            f"⚠️ {text}",
+            get_skip_keyboard(),
+        )
     else:
         step_index = user_data.get("current_step", 0)
         if step_index < len(POST_STEPS):
@@ -995,7 +1004,7 @@ async def send_post(
     heading: str,
     reply_markup: InlineKeyboardMarkup | None = None,
     markup_lead_text: str | None = None,
-) -> None:
+) -> list[int]:
     """
     ЕДИНАЯ отправка поста: текст / фото с подписью / медиа-группа.
 
@@ -1005,40 +1014,53 @@ async def send_post(
 
     Текст длиннее MESSAGE_TEXT_LIMIT разбивается на несколько сообщений
     (лимит Telegram — 4096); кнопки прикрепляются к первому сообщению.
+
+    Возвращает message_id отправленных сообщений (для превью — чтобы
+    заменять старое превью; для готового поста id не используется —
+    пост остаётся в чате навсегда).
     """
     text = build_post_summary(post_data, heading=heading)
 
     file_ids = [p for p in (photos or []) if p]
     chunks = split_long_text(text)
+    sent: list[int] = []
+
+    def _remember(message) -> None:
+        message_id = getattr(message, "message_id", None)
+        if message_id is not None:
+            sent.append(int(message_id))
 
     async def send_text_chunks() -> None:
         for index, chunk in enumerate(chunks):
-            await bot.send_message(
+            message = await bot.send_message(
                 chat_id=chat_id,
                 text=chunk,
                 parse_mode="HTML",
                 reply_markup=reply_markup if index == 0 else None,
             )
+            _remember(message)
 
     if not file_ids:
         await send_text_chunks()
-        return
+        return sent
 
     if len(file_ids) == 1:
         # Лимит подписи к фото — 1024 символа (считаем в UTF-16 по сырому
         # HTML): при переполнении фото уходит без подписи, текст — частями
         if utf16_len(text) <= CAPTION_TEXT_LIMIT:
-            await bot.send_photo(
+            message = await bot.send_photo(
                 chat_id=chat_id,
                 photo=file_ids[0],
                 caption=text,
                 parse_mode="HTML",
                 reply_markup=reply_markup,
             )
-            return
-        await bot.send_photo(chat_id=chat_id, photo=file_ids[0])
+            _remember(message)
+            return sent
+        message = await bot.send_photo(chat_id=chat_id, photo=file_ids[0])
+        _remember(message)
         await send_text_chunks()
-        return
+        return sent
 
     # Медиа-группа: подпись разрешена только у первого снимка
     with_caption = utf16_len(text) <= CAPTION_TEXT_LIMIT
@@ -1050,18 +1072,24 @@ async def send_post(
             )
         else:
             media.append(InputMediaPhoto(media=file_id))
-    await bot.send_media_group(chat_id=chat_id, media=media)
+    for message in await bot.send_media_group(chat_id=chat_id, media=media):
+        _remember(message)
 
     if not with_caption:
         for chunk in chunks:
-            await bot.send_message(chat_id=chat_id, text=chunk, parse_mode="HTML")
+            message = await bot.send_message(
+                chat_id=chat_id, text=chunk, parse_mode="HTML"
+            )
+            _remember(message)
     if reply_markup is not None:
         # sendMediaGroup не поддерживает кнопки — клавиатура отдельным сообщением
-        await bot.send_message(
+        message = await bot.send_message(
             chat_id=chat_id,
             text=markup_lead_text or "Выберите действие:",
             reply_markup=reply_markup,
         )
+        _remember(message)
+    return sent
 
 
 async def review_post(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
@@ -1076,15 +1104,18 @@ async def review_post(update: Update, context: ContextTypes.DEFAULT_TYPE) -> boo
     этого можно удалять временные сообщения пользователя.
     """
     logger.info("Переход к превью поста.")
-    await send_post(
+    chat_id = ctx.chat(update).id
+    message_ids = await send_post(
         context.bot,
-        ctx.chat(update).id,
+        chat_id,
         ctx.data(context),
         _current_photos(ctx.data(context)),
         heading=POST_HEADING,
         reply_markup=get_post_actions_keyboard(),
         markup_lead_text="Выберите действие:",
     )
+    # новое превью отправлено → старое заменяется (стек превью не растёт)
+    await screen.replace_preview(context, chat_id, ctx.data(context), message_ids)
     return await _render_preview_hint(update, context)
 
 
@@ -1202,38 +1233,77 @@ async def finish_post(update: Update, context: ContextTypes.DEFAULT_TYPE) -> boo
 
 async def edit_post(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     """
-    Позволяет пользователю выбрать поле для редактирования.
+    Выбор поля для редактирования — на экране управления.
 
     Список полей берётся из POST_STEPS (единый источник): русские названия
-    и ключи полей совпадают с шагами создания.
+    и ключи полей совпадают с шагами создания. Сообщение превью при этом
+    НЕ редактируется: кнопки действий остаются на превью рабочими.
     """
     logger.info("Пользователь выбрал редактирование поста.")
+    query = getattr(update, "callback_query", None)
+    if query is not None:
+        await query.answer()
     keyboard = [
         [InlineKeyboardButton(step["label"], callback_data=f"edit_{step['key']}")]
         for step in POST_STEPS
     ]
-    keyboard.append([InlineKeyboardButton("Отмена", callback_data="cancel_edit")])
-    reply_markup = InlineKeyboardMarkup(keyboard)
-    await ctx.message(update).reply_text(
-        "Выберите поле для редактирования:", reply_markup=reply_markup
+    keyboard.append([InlineKeyboardButton("◀️ Назад", callback_data="cancel_edit")])
+    keyboard.append([InlineKeyboardButton("🏠 Меню", callback_data="main_menu")])
+    await screen.render_screen(
+        context,
+        ctx.data(context),
+        ctx.chat(update).id,
+        "Выберите поле для редактирования:",
+        InlineKeyboardMarkup(keyboard),
     )
     return EDIT_FIELD
 
 
+def _edit_prompt_text(step: dict, *, error: str | None = None) -> str:
+    """Текст промпта правки поля (прежние формулировки сохранены)."""
+    if step["key"] == "image":
+        text = "Отправьте новое изображение или нажмите «Пропустить»:"
+    else:
+        text = (
+            f"Введите новое значение для «{step['label']}» " "или нажмите «Пропустить»:"
+        )
+    if error:
+        text = f"⚠️ {error}\n\n{text}"
+    return text
+
+
+async def _render_edit_prompt(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+    step: dict,
+    *,
+    error: str | None = None,
+) -> None:
+    """
+    Промпт правки поля — обновлением экрана (новых сообщений не накапливается).
+    Сообщение ввода пользователя при ошибке НЕ удаляется (не сохранено).
+    """
+    await screen.render_screen(
+        context,
+        ctx.data(context),
+        ctx.chat(update).id,
+        _edit_prompt_text(step, error=error),
+        get_skip_keyboard(),
+    )
+
+
 async def handle_edit(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     """
-    Обрабатывает выбор поля для редактирования.
+    Обрабатывает выбор поля для редактирования (промпт — на экране).
     """
     query = ctx.query(update)
     await query.answer()
     data = query.data or ""
 
     if data == "cancel_edit":
-        # Возвращаемся к обзору поста, чтобы кнопки действий продолжали работать
-        await query.edit_message_text(
-            "Редактирование отменено. Выберите действие:",
-            reply_markup=get_post_actions_keyboard(),
-        )
+        # Превью не тронуто: подсказка действий — на экране, кнопки
+        # действий остаются на самом сообщении превью
+        await _render_preview_hint(update, context)
         logger.info("Редактирование отменено пользователем.")
         return POST_CREATION
 
@@ -1242,30 +1312,18 @@ async def handle_edit(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int
     step = next((step for step in POST_STEPS if step["key"] == field_to_edit), None)
 
     if step:
-        if step["key"] == "image":
-            await query.edit_message_text(
-                "Отправьте новое изображение или нажмите 'Пропустить':",
-                reply_markup=get_skip_keyboard(),
-            )
-        else:
-            # В промпте — человекочитаемое имя поля («Время начала»),
-            # а не внутренний ключ (time_start)
-            prompt_text = (
-                f"Введите новое значение для «{step['label']}» "
-                "или нажмите 'Пропустить':"
-            )
-            await query.edit_message_text(prompt_text, reply_markup=get_skip_keyboard())
+        await _render_edit_prompt(update, context, step)
         logger.info(f"Пользователь выбрал редактировать поле '{field_to_edit}'.")
         return EDIT_FIELD
-    else:
-        # editMessageText не принимает ReplyKeyboardRemove (только inline) —
-        # правим текст без reply_markup; диалог уже завершён, reply-клавиатура
-        # главного меню остаётся у пользователя.
-        await query.edit_message_text("Неизвестное поле для редактирования.")
-        logger.warning(
-            f"Пользователь выбрал неизвестное поле для редактирования: {field_to_edit}"
-        )
-        return ConversationHandler.END
+
+    # editMessageText не принимает ReplyKeyboardRemove (только inline) —
+    # правим текст без reply_markup; диалог уже завершён, reply-клавиатура
+    # главного меню остаётся у пользователя.
+    await query.edit_message_text("Неизвестное поле для редактирования.")
+    logger.warning(
+        f"Пользователь выбрал неизвестное поле для редактирования: {field_to_edit}"
+    )
+    return ConversationHandler.END
 
 
 async def handle_stale_preview_action(
@@ -1312,9 +1370,11 @@ async def process_edit(update: Update, context: ContextTypes.DEFAULT_TYPE) -> in
     if message.photo and field != "image":
         # Фото прислали, пока редактировали другое поле: значение НЕ трогаем
         # (иначе поле стёрлось бы пустой строкой) — объясняем порядок действий
-        await message.reply_text(
-            "Здесь ожидается текст. Изображение меняется в поле «Изображение».",
-            reply_markup=get_skip_keyboard(),
+        await _render_edit_prompt(
+            update,
+            context,
+            step,
+            error="Здесь ожидается текст. Изображение меняется в поле «Изображение».",
         )
         return EDIT_FIELD
 
@@ -1335,18 +1395,20 @@ async def process_edit(update: Update, context: ContextTypes.DEFAULT_TYPE) -> in
     else:
         valid = not step["validator"] or step["validator"](text)
     if not valid:
-        await message.reply_text(
-            f"Некорректный формат. {step['prompt']}",
-            reply_markup=get_skip_keyboard(),
+        # Ошибка ввода — обновлением экрана, новых сообщений не накапливается
+        await _render_edit_prompt(
+            update, context, step, error=f"Некорректный формат. {step['prompt']}"
         )
         logger.warning(f"Некорректный ввод при редактировании поля '{field}': {text}")
         return EDIT_FIELD
 
     if field == "image":
         if not message.photo:
-            await message.reply_text(
-                "Пожалуйста, отправьте изображение или нажмите 'Пропустить'.",
-                reply_markup=get_skip_keyboard(),
+            await _render_edit_prompt(
+                update,
+                context,
+                step,
+                error="Пожалуйста, отправьте изображение или нажмите «Пропустить».",
             )
             logger.warning("Пользователь не отправил изображение при редактировании.")
             return EDIT_FIELD
@@ -1355,10 +1417,15 @@ async def process_edit(update: Update, context: ContextTypes.DEFAULT_TYPE) -> in
         # сохранения (для альбома — после «✅ Фото готово»)
         screen.track_temp(user_data, message)
         if state == "started":
-            await message.reply_text(
+            # сбор альбома: кнопка «Фото готово» — на экране, до завершения
+            # исходники НЕ удаляются
+            await screen.render_screen(
+                context,
+                user_data,
+                ctx.chat(update).id,
                 "📷 Отправьте остальные фотографии альбома, "
                 "затем нажмите «✅ Фото готово».",
-                reply_markup=get_media_done_keyboard(),
+                get_media_done_keyboard(),
             )
             logger.info(
                 f"Начат сбор медиа-группы при редактировании: "

@@ -62,13 +62,11 @@ class DraftLifecycleTests(unittest.TestCase):
         self.assertEqual(drafts[0].title, "Черновик в работе")
         self.assertEqual(drafts[0].user_id, 7)
 
-        # Список: карточка + кнопки действий
+        # Список: карточка + кнопки действий (на экране, без нового сообщения)
         await h.text("/drafts")
-        listing = h.replies()[-1]
-        self.assertIn("Ваши черновики", listing["text"])
-        self.assertEqual(listing["parse_mode"], "HTML")
+        self.assertIn("Ваши черновики", h.screen_text())
         self.assertEqual(
-            inline_buttons(listing["reply_markup"]),
+            h.screen_buttons(),
             [
                 ("✏️ Редактировать черновик 1", "editdraft_1"),
                 ("❌ Удалить черновик 1", "delete_1"),
@@ -109,30 +107,27 @@ class DraftLifecycleTests(unittest.TestCase):
             session.close()
 
         await h.text("/drafts")
-        first_page = h.replies()[-1]
-        self.assertIn("Показано 15 из 17", first_page["text"])
-        buttons = inline_buttons(first_page["reply_markup"])
+        self.assertIn("Показано 15 из 17", h.screen_text())
+        buttons = h.screen_buttons()
         self.assertIn(("Вперёд ➡️", "draftpage_15"), buttons)
         self.assertNotIn(("⬅️ Назад", "draftpage_0"), buttons, "первая страница")
         self.assertEqual(len([b for b in buttons if b[1].startswith("editdraft_")]), 15)
 
-        # Вперёд → вторая страница (редактируется то же сообщение)
+        # Вперёд → вторая страница (перерисовывается тот же экран)
         await h.callback("draftpage_15")
         self.assertEqual(len(h.answers()), 1)
-        second_page = h.calls[-1]
-        self.assertEqual(second_page["type"], "edit_message")
-        self.assertIn("Показано 2 из 17", call_text(second_page) or "")
-        buttons2 = inline_buttons(second_page["reply_markup"])
+        self.assertEqual(h.screens()[-1]["type"], "edit_message")
+        self.assertIn("Показано 2 из 17", h.screen_text())
+        buttons2 = h.screen_buttons()
         self.assertIn(("⬅️ Назад", "draftpage_0"), buttons2)
         self.assertFalse(any(data == "draftpage_15" for _, data in buttons2))
 
         # Назад → первая страница
         await h.callback("draftpage_0")
         self.assertEqual(len(h.answers()), 2)
-        back = h.calls[-1]
-        self.assertIn("Показано 15 из 17", call_text(back) or "")
+        self.assertIn("Показано 15 из 17", h.screen_text())
 
-        # Листание не порождает новых сообщений — только правка старого
+        # Листание не порождает новых сообщений — только правка экрана
         self.assertEqual(len([c for c in h.calls if c["type"] == "message"]), 1)
 
     @scenario_test
@@ -141,20 +136,20 @@ class DraftLifecycleTests(unittest.TestCase):
         await h.callback("save_draft")
         answers_before = len(h.answers())
 
-        # Чужой пользователь не может удалить (отказ + свой пустой список)
+        # Чужой пользователь не может удалить: отказ + свой пустой список
         await h.callback("delete_1", user_id=8)
-        edits = [c for c in h.calls if c["type"] == "edit_message"]
-        self.assertIn("Черновик не найден", call_text(edits[-1]) or "")
+        self.assertIn("Черновик не найден", h.screen_text())
         self.assertEqual(len(h.drafts()), 1)
-        self.assertIn("нет черновиков", h.reply_texts()[-1])
 
-        # Владелец удаляет — список сразу перерисовывается
+        # Владелец: первый шаг — подтверждение, второй — удаление
         await h.callback("delete_1")
-        edits = [c for c in h.calls if c["type"] == "edit_message"]
-        self.assertIn("Черновик 1 удалён", call_text(edits[-1]) or "")
+        self.assertIn("Удалить черновик 1?", h.screen_text())
+        self.assertEqual(len(h.drafts()), 1, "до подтверждения не удаляется")
+        await h.callback("confirmdelete_1")
+        self.assertIn("Черновик 1 удалён", h.screen_text())
+        self.assertIn("нет черновиков", h.screen_text())
         self.assertEqual(h.drafts(), [])
-        self.assertIn("нет черновиков", h.reply_texts()[-1])
-        self.assertEqual(len(h.answers()), answers_before + 2, "обе кнопки отвечены")
+        self.assertEqual(len(h.answers()), answers_before + 3, "все кнопки отвечены")
 
     @scenario_test
     async def test_foreign_user_cannot_see_or_open_draft(self, h):
@@ -167,9 +162,9 @@ class DraftLifecycleTests(unittest.TestCase):
         self.assertIsNone(h.dialog_state(user_id=8))
         self.assertIsNone(h.dialog_state())
 
-        # Список чужого пользователя пуст
+        # Список чужого пользователя пуст (на его экране)
         await h.text("/drafts", user_id=8)
-        self.assertIn("нет черновиков", h.reply_texts()[-1])
+        self.assertIn("нет черновиков", h.screen_text())
         self.assertEqual(h.drafts(user_id=8), [])
 
     @scenario_test
@@ -447,7 +442,8 @@ class PhotoAlbumTests(unittest.TestCase):
 
         self.assertEqual(h.dialog_state(), EDIT_FIELD, "правка не сорвана")
         self.assertEqual(h.user_data().get("title"), "Концерт", "значение цело")
-        self.assertIn("Изображение", h.reply_texts()[-1])
+        # отказ — обновлением экрана, значение поля не тронуто
+        self.assertIn("Изображение", h.screen_text())
 
     @scenario_test
     async def test_preview_final_invariant_with_mixed_fields(self, h):

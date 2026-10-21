@@ -443,14 +443,9 @@ class SkipAndEditTests(unittest.TestCase):
         await h.callback("cancel_edit")
 
         self.assertEqual(h.dialog_state(), POST_CREATION)
-        # Отмена редактирует сообщение меню правки (edit_message_text)
-        last = h.calls[-1]
-        self.assertEqual(last["type"], "edit_message")
-        self.assertIn("Редактирование отменено", call_text(last) or "")
-        self.assertEqual(
-            [data for _, data in inline_buttons(last["reply_markup"])],
-            ["edit_post", "save_draft", "finish"],
-        )
+        # Отмена правки: на экране — подсказка действий; сообщение превью
+        # не тронуто, его кнопки действий остаются рабочими
+        self.assertIn("Пост готов к действию", h.screen_text())
         self.assertEqual(h.posts()[-1], preview_text, "пост не изменился")
 
         await h.callback("finish")

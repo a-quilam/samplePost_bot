@@ -123,6 +123,26 @@ def track_preview(user_data: dict, message_ids: list[int]) -> None:
     user_data["preview_messages"] = [int(mid) for mid in message_ids]
 
 
+async def replace_preview(
+    context: ContextTypes.DEFAULT_TYPE,
+    chat_id: int,
+    user_data: dict,
+    new_message_ids: list[int],
+) -> None:
+    """
+    Заменяет превью: старые сообщения превью удаляются, новые запоминаются.
+
+    Вызывается ТОЛЬКО после успешной отправки нового превью — при сбое
+    отправки старое превью остаётся в чате (данные не теряются, кнопки
+    действий продолжают работать). Удаление best-effort: неудача очистки
+    не ломает диалог.
+    """
+    old = user_data.pop("preview_messages", None) or []
+    track_preview(user_data, new_message_ids)
+    if old:
+        await cleanup_messages(context.bot, chat_id, old)
+
+
 async def cleanup_messages(bot, chat_id: int, message_ids: list[int]) -> None:
     """
     Удаляет сообщения best-effort: ошибки Telegram (уже удалено, слишком

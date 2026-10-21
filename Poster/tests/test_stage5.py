@@ -713,27 +713,20 @@ class DialogUxTests(_InMemoryDbMixin, unittest.TestCase):
     def test_drafts_button_inside_dialog_shows_list_and_ends(self):
         from telegram.ext import ConversationHandler
 
-        import handlers.drafts as drafts_module
+        bot = _ScreenBot()
+        update = SimpleNamespace(
+            effective_message=SimpleNamespace(reply_text=AsyncMock()),
+            effective_user=SimpleNamespace(id=1),
+            effective_chat=SimpleNamespace(id=77),
+        )
+        context = SimpleNamespace(user_data={}, bot=bot)
 
-        session_factory, engine = make_session_factory()
-        orig = drafts_module.SessionLocal
-        drafts_module.SessionLocal = session_factory
-        try:
-            reply = AsyncMock()
-            update = SimpleNamespace(
-                effective_message=SimpleNamespace(reply_text=reply),
-                effective_user=SimpleNamespace(id=1),
-            )
-            context = SimpleNamespace(user_data={})
+        result = asyncio.run(view_drafts_and_exit(update, context))
 
-            result = asyncio.run(view_drafts_and_exit(update, context))
-
-            self.assertEqual(result, ConversationHandler.END)
-            reply.assert_awaited()
-            self.assertIn("нет черновиков", reply.await_args.args[0])
-        finally:
-            drafts_module.SessionLocal = orig
-            engine.dispose()
+        self.assertEqual(result, ConversationHandler.END)
+        # список черновиков — на экране, а не отдельным сообщением
+        self.assertTrue(bot.calls, "список должен появиться на экране")
+        self.assertIn("нет черновиков", bot.calls[-1]["text"])
 
 
 @unittest.skipIf(
@@ -816,19 +809,19 @@ class HandlerOrderTests(unittest.TestCase):
     HANDLERS_IMPORT_ERROR is not None,
     f"импорт обработчиков недоступен: {HANDLERS_IMPORT_ERROR}",
 )
-class DraftsPaginationTests(unittest.TestCase):
+class DraftsPaginationTests(_InMemoryDbMixin, unittest.TestCase):
     """Список черновиков: сортировка, лимит страницы, навигация."""
 
     def _seed(self, count: int, user_id: int = 111):
-        session_factory, engine = make_session_factory()
-        session = session_factory()
+        # та же ин-мемори БД, что патчится миксином для drafts/screen
+        session = self.session_factory()
         try:
             for i in range(count):
                 session.add(Draft(user_id=user_id, title=f"Пост {i}"))
             session.commit()
         finally:
             session.close()
-        return session_factory, engine
+        return self.session_factory, self.engine
 
     @staticmethod
     def _make_draft(draft_id: int):
@@ -916,55 +909,60 @@ class DraftsPaginationTests(unittest.TestCase):
         self.assertNotIn("листайте", text)
 
     def test_page_handler_renders_requested_page(self):
-        session_factory, engine = self._seed(20)
-        import handlers.drafts as drafts_module
-
-        orig = drafts_module.SessionLocal
-        drafts_module.SessionLocal = session_factory
+        _, engine = self._seed(20)
+        bot = _ScreenBot()
         try:
             query = SimpleNamespace(
                 data="draftpage_15",
                 answer=AsyncMock(),
                 from_user=SimpleNamespace(id=111),
-                edit_message_text=AsyncMock(),
             )
-            update = SimpleNamespace(callback_query=query)
+            update = SimpleNamespace(
+                callback_query=query,
+                effective_user=SimpleNamespace(id=111),
+                effective_chat=SimpleNamespace(id=777),
+            )
+            context = SimpleNamespace(
+                user_data={"screen": {"chat_id": 777, "message_id": 5}},
+                bot=bot,
+            )
 
-            asyncio.run(handle_drafts_page(update, SimpleNamespace(user_data={})))
+            asyncio.run(handle_drafts_page(update, context))
 
             query.answer.assert_awaited()
-            query.edit_message_text.assert_awaited()
-            text_sent = query.edit_message_text.await_args.args[0]
-            self.assertIn("из 20", text_sent)
-            markup = query.edit_message_text.await_args.kwargs["reply_markup"]
+            # листание перерисовывает ЭКРАН, а не создаёт новое сообщение
+            self.assertEqual(bot.calls[-1]["type"], "edit_message")
+            self.assertIn("из 20", bot.calls[-1]["text"])
+            markup = bot.calls[-1]["reply_markup"]
             datas = [b.callback_data for row in markup.inline_keyboard for b in row]
             self.assertIn("draftpage_0", datas)
         finally:
-            drafts_module.SessionLocal = orig
             engine.dispose()
 
     def test_page_handler_clamps_to_first_when_page_emptied(self):
-        session_factory, engine = self._seed(20)
-        import handlers.drafts as drafts_module
-
-        orig = drafts_module.SessionLocal
-        drafts_module.SessionLocal = session_factory
+        _, engine = self._seed(20)
+        bot = _ScreenBot()
         try:
             query = SimpleNamespace(
                 data="draftpage_100",
                 answer=AsyncMock(),
                 from_user=SimpleNamespace(id=111),
-                edit_message_text=AsyncMock(),
             )
-            update = SimpleNamespace(callback_query=query)
+            update = SimpleNamespace(
+                callback_query=query,
+                effective_user=SimpleNamespace(id=111),
+                effective_chat=SimpleNamespace(id=777),
+            )
+            context = SimpleNamespace(
+                user_data={"screen": {"chat_id": 777, "message_id": 5}},
+                bot=bot,
+            )
 
-            asyncio.run(handle_drafts_page(update, SimpleNamespace(user_data={})))
+            asyncio.run(handle_drafts_page(update, context))
 
-            text_sent = query.edit_message_text.await_args.args[0]
             # Страница опустела → возврат к первой (новейшие черновики сверху)
-            self.assertIn("Пост 19", text_sent)
+            self.assertIn("Пост 19", bot.calls[-1]["text"])
         finally:
-            drafts_module.SessionLocal = orig
             engine.dispose()
 
 

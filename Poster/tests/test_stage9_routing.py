@@ -113,11 +113,12 @@ class CallbackMatrixTests(unittest.TestCase):
         await goto_preview(h)
         await h.callback("edit_post")
 
-        menu = h.replies()[-1]
-        self.assertIn("Выберите поле", menu["text"])
+        # меню полей — на экране управления
+        self.assertIn("Выберите поле", h.screen_text())
         self.assertEqual(
-            [data for _, data in inline_buttons(menu["reply_markup"])],
-            [f"edit_{step['key']}" for step in POST_STEPS] + ["cancel_edit"],
+            [data for _, data in h.screen_buttons()],
+            [f"edit_{step['key']}" for step in POST_STEPS]
+            + ["cancel_edit", "main_menu"],
         )
 
     @scenario_test
@@ -161,28 +162,19 @@ class CommandRoutingTests(unittest.TestCase):
 
     @scenario_test
     async def test_commands_outside_dialog_single_reply(self, h):
-        # /drafts отвечает сообщением-списком; /start, /help, /cancel
-        # обновляют постоянный экран управления (Stage 11) — новых
-        # сообщений при этом не появляется
+        # Все команды (включая /drafts) обновляют постоянный экран
+        # управления (Stage 11) — новых сообщений при этом не появляется
         for cmd, fragment in self.OUTSIDE_EXPECTED.items():
             with self.subTest(cmd=cmd):
                 self.assertIsNone(h.dialog_state())
                 replies_before = len(h.reply_texts())
                 await h.text(cmd)
-                if cmd == "/drafts":
-                    self.assertEqual(
-                        len(h.reply_texts()) - replies_before,
-                        1,
-                        f"{cmd}: ровно один ответ",
-                    )
-                    self.assertIn(fragment, h.reply_texts()[-1])
-                else:
-                    self.assertEqual(
-                        len(h.reply_texts()) - replies_before,
-                        0,
-                        f"{cmd}: ответ — на экране, без новых сообщений",
-                    )
-                    self.assertIn(fragment, h.screen_text())
+                self.assertEqual(
+                    len(h.reply_texts()) - replies_before,
+                    0,
+                    f"{cmd}: ответ — на экране, без новых сообщений",
+                )
+                self.assertIn(fragment, h.screen_text())
                 self.assertIsNone(h.dialog_state())
 
         # /create_post вне диалога — обычная точка входа
@@ -192,9 +184,12 @@ class CommandRoutingTests(unittest.TestCase):
 
     @scenario_test
     async def test_commands_inside_dialog_end_it_and_save_wip_once(self, h):
-        # Ответы команд: /start и /help обновляют экран (Stage 11), /drafts и
-        # /cancel пока отвечают сообщением
-        answered_on_screen = {"/start": "Здравствуйте", "/help": "Команды:"}
+        # Все команды (включая /drafts) отвечают на экране (Stage 11)
+        answered_on_screen = {
+            "/start": "Здравствуйте",
+            "/help": "Команды:",
+            "/drafts": "черновик",
+        }
         for cmd in self.OUTSIDE_EXPECTED:
             with self.subTest(cmd=cmd):
                 await h.start_dialog()

@@ -196,6 +196,26 @@ class TempMessagesTests(unittest.TestCase):
         self.assertEqual(deleted, [9])
         self.assertEqual(self.user_data["temp_messages"], [5])
 
+    def test_replace_preview_deletes_old_and_tracks_new(self) -> None:
+        screen.track_preview(self.user_data, [1, 2])
+        screen.track_temp(self.user_data, self._message(7))
+
+        asyncio.run(screen.replace_preview(self.context, 777, self.user_data, [3]))
+
+        deleted = [
+            c["args"][1] for c in self.bot.calls if c["type"] == "delete_message"
+        ]
+        self.assertEqual(deleted, [1, 2], "старое превью удалено, новое цело")
+        self.assertEqual(self.user_data["preview_messages"], [3])
+        self.assertEqual(self.user_data["temp_messages"], [7], "ввод не тронут")
+
+    def test_replace_preview_first_time_keeps_new(self) -> None:
+        # превью ещё не было — ничего не удаляется, новое запоминается
+        asyncio.run(screen.replace_preview(self.context, 777, self.user_data, [4]))
+
+        self.assertEqual(self.user_data["preview_messages"], [4])
+        self.assertFalse([c for c in self.bot.calls if c["type"] == "delete_message"])
+
 
 @unittest.skipIf(
     INTEGRATION_IMPORT_ERROR is not None,

@@ -134,6 +134,9 @@ class RecordingBot:
 
     async def send_media_group(self, **kwargs):
         self._record("media_group", kwargs)
+        # как у реального API: sendMediaGroup возвращает список сообщений
+        self._next_id += 1
+        return [SimpleNamespace(message_id=self._next_id)]
 
 
 _MESSAGE_ID_SEQ = itertools.count(1)
@@ -491,11 +494,12 @@ class EditFlowTests(_InMemoryDbMixin, unittest.TestCase):
 
         asyncio.run(handle_callback_query(update, context))
 
-        reply = update.effective_message.reply_text.await_args
-        self.assertIn("Выберите поле", reply.args[0])
+        # меню полей рисуется на экране управления, не отдельным сообщением
+        record = bot.calls[-1]
+        self.assertIn("Выберите поле", record["text"])
         labels = [
             button.text
-            for row in reply.kwargs["reply_markup"].inline_keyboard
+            for row in record["reply_markup"].inline_keyboard
             for button in row
         ]
         expected = [step["label"] for step in POST_STEPS]
@@ -509,7 +513,8 @@ class EditFlowTests(_InMemoryDbMixin, unittest.TestCase):
 
         result = asyncio.run(handle_edit(update, context))
 
-        prompt = update.callback_query.edit_message_text.await_args.args[0]
+        # промпт правки — обновлением экрана (новых сообщений не накапливается)
+        prompt = bot.calls[-1]["text"]
         self.assertIn("«Время начала»", prompt)
         self.assertNotIn("time_start", prompt)  # внутренний ключ не показывается
         self.assertEqual(result, EDIT_FIELD)  # остаёмся в режиме редактирования
@@ -732,8 +737,8 @@ class PhotoGuardTests(_InMemoryDbMixin, unittest.TestCase):
 
         self.assertEqual(result, EDIT_FIELD)
         self.assertEqual(user_data["title"], "Концерт", "поле не должно стираться")
-        reply = update.effective_message.reply_text.await_args.args[0]
-        self.assertIn("Изображение", reply)
+        # отказ — обновлением экрана, значение поля цело
+        self.assertIn("Изображение", context.bot.calls[-1]["text"])
 
 
 @unittest.skipIf(
@@ -1332,8 +1337,12 @@ class UserFacingTextTests(_InMemoryDbMixin, unittest.TestCase):
         result = asyncio.run(process_edit(update, context))
 
         self.assertEqual(result, EDIT_FIELD)
-        reply = update.effective_message.reply_text.await_args.args[0]
-        self.assertIn("ДД.ММ.ГГГГ", reply, "валидация должна подсказывать формат")
+        # ошибка ввода — обновлением экрана (новых сообщений нет)
+        screen_texts = [c["text"] for c in context.bot.calls if "text" in c]
+        self.assertTrue(
+            any("ДД.ММ.ГГГГ" in t for t in screen_texts),
+            "валидация должна подсказывать формат на экране",
+        )
         self.assertEqual(user_data["date"], "25.12.2026", "поле не стирается")
 
     def test_save_draft_reply_spelling(self):

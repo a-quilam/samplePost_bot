@@ -203,12 +203,12 @@ class EasterEggSilenceTests(unittest.TestCase):
             wizard_texts.append(h.screen_text())
         self.assert_no_secret(wizard_texts, "промптах шагов")
 
-        # Превью (пустое) → меню правки и промпты каждого поля
+        # Превью (пустое) → меню правки и промпты каждого поля — на экране
         await h.callback("edit_post")
-        edit_texts = [h.reply_texts()[-1]]
+        edit_texts = [h.screen_text()]
         for step in POST_STEPS:
             await h.callback(f"edit_{step['key']}")
-            edit_texts.append(str(h.calls[-1].get("text") or ""))
+            edit_texts.append(h.screen_text())
             await h.text("Пропустить")
         self.assert_no_secret(edit_texts, "промптах редактирования")
         self.assertEqual(h.dialog_state(), POST_CREATION)

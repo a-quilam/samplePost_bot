@@ -249,3 +249,58 @@ class CleanupResilienceTests(unittest.TestCase):
         self.assertEqual(h.dialog_state(), POST_CREATION)
         self.assertIn("Шаг 2 из", h.screen_text())
         self.assertNotIn(update.message.message_id, h.deleted_ids())
+
+
+@unittest.skipIf(
+    INTEGRATION_IMPORT_ERROR is not None,
+    f"интеграционное окружение недоступно: {INTEGRATION_IMPORT_ERROR}",
+)
+class PreviewReplacementTests(unittest.TestCase):
+    """Превью — заменяемое временное сообщение: стек старых превью не растёт."""
+
+    @scenario_test
+    async def test_second_preview_replaces_first(self, h):
+        from handlers.post_creation import POST_CREATION
+
+        await goto_preview(h, title="Первый вариант")
+        first_ids = list(h.user_data().get("preview_messages") or [])
+        self.assertTrue(first_ids, "id первого превью запомнены")
+        previews_before = len(h.post_records())
+
+        # правка поля → новое превью; старое удаляется, стек не растёт
+        await h.callback("edit_post")
+        await h.callback("edit_title")
+        await h.text("Второй вариант")
+        self.assertEqual(h.dialog_state(), POST_CREATION)
+
+        self.assertEqual(
+            len(h.post_records()), previews_before + 1, "ровно одно новое превью"
+        )
+        deleted = h.deleted_ids()
+        for message_id in first_ids:
+            self.assertIn(message_id, deleted, "старое превью удалено")
+        # id нового превью запомнены вместо старых
+        new_ids = h.user_data().get("preview_messages") or []
+        self.assertTrue(new_ids)
+        self.assertFalse(set(new_ids) & set(first_ids), "превью не дублируется")
+
+    @scenario_test
+    async def test_preview_not_deleted_on_send_failure(self, h):
+        # сбой отправки нового превью → старое остаётся, данные не теряются
+        await goto_preview(h, title="Стабильный пост")
+        first_ids = list(h.user_data().get("preview_messages") or [])
+
+        await h.callback("edit_post")
+        await h.callback("edit_title")
+        h.bot.errors_by_type["message"] = BadRequest("bot was blocked")
+        try:
+            await h.text("Новый заголовок")
+        except Exception:  # noqa: BLE001 — сбой API доходит до вызывающего
+            pass
+        h.bot.errors_by_type.pop("message", None)
+
+        # старое превью не удалено — данные видимы, кнопки действий целы
+        deleted = h.deleted_ids()
+        for message_id in first_ids:
+            self.assertNotIn(message_id, deleted)
+        self.assertEqual(h.user_data().get("title"), "Новый заголовок")

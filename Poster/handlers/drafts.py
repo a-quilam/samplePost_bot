@@ -1,4 +1,13 @@
 # handlers/drafts.py
+"""
+Черновики: список, листание, удаление с подтверждением (Stage 11).
+
+Список черновиков живёт на ЭКРАНЕ управления (utils.screen): открытие,
+листание страниц и удаление перерисовывают его, а не плодят сообщения.
+Удаление — двухшаговое (подтверждение), чтобы случайное нажатие «❌»
+не уничтожало работу. Чужие черновики недоступны: проверка user_id
+повторяется и при подтверждении.
+"""
 
 from html import escape as html_escape
 
@@ -12,6 +21,7 @@ from telegram.ext import (
 
 from database import SessionLocal
 from models import Draft
+from utils import screen
 from utils import tg_context as ctx
 
 # Страница списка черновиков: 2 кнопки на черновик + навигация/меню.
@@ -21,6 +31,9 @@ DRAFTS_PAGE_SIZE = 15
 
 # Префикс callback листания: draftpage_<offset>
 PAGE_PREFIX = "draftpage_"
+
+# Префикс подтверждения удаления: confirmdelete_<id>
+CONFIRM_PREFIX = "confirmdelete_"
 
 
 def _h(value: object) -> str:
@@ -123,18 +136,63 @@ def build_drafts_message(
     return message_text, InlineKeyboardMarkup(keyboard)
 
 
-async def view_drafts(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    # Вызывается и по кнопке reply-клавиатуры («📝 Черновики»), и после
-    # удаления черновика из callback — effective_message работает в обоих случаях.
-    message = ctx.message(update)
+def _menu_button_keyboard() -> InlineKeyboardMarkup:
+    """Кнопка возврата в меню для пустого списка (экран не должен быть тупиком)."""
+    return InlineKeyboardMarkup(
+        [[InlineKeyboardButton("↩️ Главное меню", callback_data="main_menu")]]
+    )
+
+
+async def _render_drafts_screen(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+    *,
+    offset: int = 0,
+    notice: str | None = None,
+) -> None:
+    """
+    Рисует список черновиков на экране управления.
+
+    notice — короткий статус перед списком («Черновик N удалён.»),
+    чтобы действие получило видимый результат без нового сообщения.
+    """
     user_id = ctx.user(update).id
+    user_data = ctx.data(context)
+    if screen.screen_ref(user_data) is None:
+        screen.hydrate_screen_ref(user_data, user_id)
     session: Session = SessionLocal()
     try:
-        drafts, total = fetch_user_drafts(session, user_id, offset=0)
+        drafts, total = fetch_user_drafts(session, user_id, offset=offset)
+        if not drafts and total > 0 and offset > 0:
+            # запрошенная страница опустела (черновики удалили) — возврат
+            # к первой, как и раньше
+            offset = 0
+            drafts, total = fetch_user_drafts(session, user_id, offset=0)
     finally:
         session.close()
-    text, markup = build_drafts_message(drafts, offset=0, total=total)
-    await message.reply_text(text, parse_mode="HTML", reply_markup=markup)
+    text, markup = build_drafts_message(drafts, offset=offset, total=total)
+    if markup is None:
+        markup = _menu_button_keyboard()
+    if notice:
+        text = f"{notice}\n\n{text}"
+    await screen.render_screen(
+        context,
+        user_data,
+        ctx.chat(update).id,
+        text,
+        reply_markup=markup,
+    )
+
+
+async def view_drafts(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """
+    Список черновиков на экране (кнопка меню, команда /drafts, выход из
+    диалога). Сообщение команды — временный ввод: удаляется best-effort
+    после того, как список показан на экране (в callback-контексте
+    drop_user_input ничего не делает).
+    """
+    await _render_drafts_screen(update, context)
+    await screen.drop_user_input(update, context)
 
 
 async def handle_drafts_page(
@@ -143,9 +201,8 @@ async def handle_drafts_page(
     """
     Листание списка черновиков: callback draftpage_<offset>.
 
-    Страница перерисовывается в том же сообщении (edit_message_text);
-    если запрошенная страница опустела (черновики удалили) — возврат
-    к первой странице.
+    Страница перерисовывается на том же экране (edit); если запрошенная
+    страница опустела (черновики удалили) — возврат к первой странице.
     """
     query = ctx.query(update)
     await query.answer()
@@ -154,46 +211,84 @@ async def handle_drafts_page(
         offset = int((query.data or f"{PAGE_PREFIX}0")[len(PAGE_PREFIX) :])
     except ValueError:
         offset = 0
-    offset = max(offset, 0)
-
-    session: Session = SessionLocal()
-    try:
-        drafts, total = fetch_user_drafts(session, query.from_user.id, offset)
-        if not drafts and total > 0:
-            offset = 0
-            drafts, total = fetch_user_drafts(session, query.from_user.id, 0)
-    finally:
-        session.close()
-
-    text, markup = build_drafts_message(drafts, offset=offset, total=total)
-    await query.edit_message_text(text, parse_mode="HTML", reply_markup=markup)
+    await _render_drafts_screen(update, context, offset=max(offset, 0))
 
 
 async def delete_draft(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """
-    Удаление черновика: удаляется только СВОЙ черновик (по user_id),
-    чужие и несуществующие недоступны.
+    Первый шаг удаления: подтверждение на экране.
+
+    Сам черновик пока НЕ удаляется — только вопрос «Удалить черновик N?»
+    с кнопками «✅ Да, удалить»/«◀️ Нет, к списку». Чужой/несуществующий
+    черновик — отказ без подтверждения.
     """
     query = ctx.query(update)
     await query.answer()
     data = query.data or "delete_0"
     draft_id = int(data.split("_")[1])
     session: Session = SessionLocal()
-    draft = session.query(Draft).filter(Draft.id == draft_id).first()
     try:
-        if draft is None or draft.user_id != query.from_user.id:
-            text = "Черновик не найден."
-        else:
-            session.delete(draft)
-            session.commit()
-            text = f"Черновик {draft_id} удалён."
-    except Exception:
-        session.rollback()
-        text = "Ошибка при удалении черновика."
+        draft = session.query(Draft).filter(Draft.id == draft_id).first()
+        own = draft is not None and draft.user_id == query.from_user.id
+        title = draft.title if draft is not None and own else None
     finally:
         session.close()
-    await query.edit_message_text(text)
-    await view_drafts(update, context)
+    if not own:
+        # Удаление чужого/несуществующего черновика невозможно: отказ +
+        # актуальный список вместо подтверждения
+        await _render_drafts_screen(update, context, notice="Черновик не найден.")
+        return
+    await screen.render_screen(
+        context,
+        ctx.data(context),
+        ctx.chat(update).id,
+        f"❓ Удалить черновик {draft_id}?\n\n"
+        f"📢 {_h(title)}\n\n"
+        "Действие необратимо.",
+        reply_markup=InlineKeyboardMarkup(
+            [
+                [
+                    InlineKeyboardButton(
+                        "✅ Да, удалить",
+                        callback_data=f"{CONFIRM_PREFIX}{draft_id}",
+                    )
+                ],
+                [
+                    InlineKeyboardButton(
+                        "◀️ Нет, к списку", callback_data=f"{PAGE_PREFIX}0"
+                    )
+                ],
+            ]
+        ),
+    )
+
+
+async def confirm_delete_draft(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> None:
+    """
+    Второй шаг удаления: подтверждено → удаляется ТОЛЬКО СВОЙ черновик
+    (user_id проверяется повторно — чужие и несуществующие недоступны),
+    затем список перерисовывается на экране со статусом удаления.
+    """
+    query = ctx.query(update)
+    await query.answer()
+    data = query.data or f"{CONFIRM_PREFIX}0"
+    draft_id = int(data[len(CONFIRM_PREFIX) :])
+    session: Session = SessionLocal()
+    notice = "Черновик не найден."
+    try:
+        draft = session.query(Draft).filter(Draft.id == draft_id).first()
+        if draft is not None and draft.user_id == query.from_user.id:
+            session.delete(draft)
+            session.commit()
+            notice = f"Черновик {draft_id} удалён."
+    except Exception:
+        session.rollback()
+        notice = "Ошибка при удалении черновика."
+    finally:
+        session.close()
+    await _render_drafts_screen(update, context, notice=notice)
 
 
 def drafts_handlers() -> list[BaseHandler]:
@@ -201,5 +296,6 @@ def drafts_handlers() -> list[BaseHandler]:
     # здесь он не регистрируется, чтобы избежать конфликта двух обработчиков.
     return [
         CallbackQueryHandler(delete_draft, pattern=r"^delete_\d+$"),
+        CallbackQueryHandler(confirm_delete_draft, pattern=r"^confirmdelete_\d+$"),
         CallbackQueryHandler(handle_drafts_page, pattern=r"^draftpage_\d+$"),
     ]

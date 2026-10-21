@@ -10,6 +10,7 @@
 
 import asyncio
 import unittest
+from types import SimpleNamespace
 
 from sqlalchemy import create_engine, inspect, text
 from sqlalchemy.orm import sessionmaker
@@ -109,6 +110,7 @@ class StubBot:
                 "reply_markup": reply_markup,
             }
         )
+        return SimpleNamespace(message_id=len(self.calls))
 
     async def send_photo(
         self, chat_id, photo, caption=None, parse_mode=None, reply_markup=None
@@ -123,9 +125,12 @@ class StubBot:
                 "reply_markup": reply_markup,
             }
         )
+        return SimpleNamespace(message_id=len(self.calls))
 
     async def send_media_group(self, chat_id, media):
         self.calls.append({"type": "media_group", "chat_id": chat_id, "media": media})
+        # как у реального API: sendMediaGroup возвращает список сообщений
+        return [SimpleNamespace(message_id=len(self.calls))]
 
 
 @unittest.skipIf(
