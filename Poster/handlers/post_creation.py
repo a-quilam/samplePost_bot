@@ -467,7 +467,16 @@ async def restore_wip(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int
     step_index = int(user_data.get("current_step") or 0)
     logger.info(f"Восстановление WIP: шаг {step_index}, черновик в работе.")
     if step_index >= len(POST_STEPS):
-        # прервали на превью/правке — восстанавливаем превью с кнопками
+        edit_field = user_data.get("edit_field")
+        step = next(
+            (step for step in POST_STEPS if step["key"] == edit_field), None
+        )
+        if step:
+            # прервали на правке поля → восстанавливаем промпт правки
+            await _render_edit_prompt(update, context, step)
+            logger.info(f"Восстановление WIP: правка поля '{edit_field}'.")
+            return EDIT_FIELD
+        # прервали на превью — восстанавливаем превью с кнопками
         await review_post(update, context)
         return POST_CREATION
     await _render_step_screen(update, context, step_index)
@@ -1607,13 +1616,18 @@ async def finish_post(update: Update, context: ContextTypes.DEFAULT_TYPE) -> boo
 
 async def edit_post(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     """
-    Выбор поля для редактирования — на экране управления.
+    Меню выбора поля для редактирования — на экране управления (Stage 16).
 
     Список полей берётся из POST_STEPS (единый источник): русские названия
-    и ключи полей совпадают с шагами создания. Сообщение превью при этом
-    НЕ редактируется: кнопки действий остаются на превью рабочими.
+    и ключи полей совпадают с шагами создания. Состояние диалога при открытии
+    меню НЕ меняется: состояние редактирования (EDIT_FIELD) наступает только
+    вместе с выбранным полем (handle_edit) — «редактирование без выбранного
+    поля» невозможно в принципе.
+
+    Сообщение превью при этом НЕ редактируется: кнопки действий остаются
+    на превью рабочими.
     """
-    logger.info("Пользователь выбрал редактирование поста.")
+    logger.info("Пользователь открыл меню редактирования поста.")
     query = getattr(update, "callback_query", None)
     if query is not None:
         await query.answer()
@@ -1630,16 +1644,41 @@ async def edit_post(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
         "Выберите поле для редактирования:",
         InlineKeyboardMarkup(keyboard),
     )
-    return EDIT_FIELD
+    return POST_CREATION
 
 
-def _edit_prompt_text(step: dict, *, error: str | None = None) -> str:
-    """Текст промпта правки поля (прежние формулировки сохранены)."""
+def _current_field_display(user_data: dict, key: str) -> str:
+    """Человекочитаемое текущее значение поля для промпта правки (Stage 16)."""
+    if key == "image":
+        photos = _current_photos(user_data)
+        if not photos:
+            return "не задано"
+        count = len(photos)
+        # русская плюрализация: 1 фотография, 2–4 фотографии, 5 фотографий
+        if count % 10 == 1 and count % 100 != 11:
+            word = "фотография"
+        elif count % 10 in (2, 3, 4) and count % 100 not in (12, 13, 14):
+            word = "фотографии"
+        else:
+            word = "фотографий"
+        return f"{count} {word}"
+    value = user_data.get(key)
+    return str(value) if value else "не задано"
+
+
+def _edit_prompt_text(step: dict, user_data: dict, *, error: str | None = None) -> str:
+    """Текст промпта правки поля: текущее значение + прежние формулировки."""
+    current = _current_field_display(user_data, step["key"])
     if step["key"] == "image":
-        text = "Отправьте новое изображение или нажмите «Пропустить»:"
+        text = (
+            f"Текущее значение: {current}.\n"
+            "Отправьте новое изображение или нажмите «Пропустить»:"
+        )
     else:
         text = (
-            f"Введите новое значение для «{step['label']}» " "или нажмите «Пропустить»:"
+            f"Текущее значение: {current}.\n"
+            f"Введите новое значение для «{step['label']}» "
+            "или нажмите «Пропустить»:"
         )
     if error:
         text = f"⚠️ {error}\n\n{text}"
@@ -1661,7 +1700,7 @@ async def _render_edit_prompt(
         context,
         ctx.data(context),
         ctx.chat(update).id,
-        _edit_prompt_text(step, error=error),
+        _edit_prompt_text(step, ctx.data(context), error=error),
         get_skip_keyboard(),
     )
 
@@ -1687,17 +1726,21 @@ async def handle_edit(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int
 
     if step:
         await _render_edit_prompt(update, context, step)
+        # выбранное поле фиксируется в снимке WIP: рестарт восстановит
+        # именно эту правку (Stage 16, дефект №4)
+        sync_wip(update, context)
         logger.info(f"Пользователь выбрал редактировать поле '{field_to_edit}'.")
         return EDIT_FIELD
 
-    # editMessageText не принимает ReplyKeyboardRemove (только inline) —
-    # правим текст без reply_markup; диалог уже завершён, reply-клавиатура
-    # главного меню остаётся у пользователя.
-    await query.edit_message_text("Неизвестное поле для редактирования.")
+    # Неизвестное поле: диалог НЕ завершаем (Stage 16) — честный ответ
+    # тостом и возврат к превью с рабочими кнопками
+    ctx.data(context).pop("edit_field", None)
+    await query.answer("Неизвестное поле для редактирования")
+    await _render_preview_hint(update, context)
     logger.warning(
         f"Пользователь выбрал неизвестное поле для редактирования: {field_to_edit}"
     )
-    return ConversationHandler.END
+    return POST_CREATION
 
 
 async def handle_stale_preview_action(
@@ -1764,6 +1807,8 @@ async def process_edit(update: Update, context: ContextTypes.DEFAULT_TYPE) -> in
         else:
             # сохранение не подтверждено → сообщение остаётся до него
             screen.track_failed_input(user_data, field, message)
+        # правка завершена: поле больше не «в редактировании»
+        user_data.pop("edit_field", None)
         # Возвращаемся в POST_CREATION: кнопки действий должны остаться рабочими
         return POST_CREATION
 
@@ -1844,6 +1889,8 @@ async def process_edit(update: Update, context: ContextTypes.DEFAULT_TYPE) -> in
         # сохранение не подтверждено → сообщение ввода НЕ удаляется, но его
         # id запоминается до следующего успешного принятия поля
         screen.track_failed_input(user_data, field, message)
+    # правка завершена: поле больше не «в редактировании»
+    user_data.pop("edit_field", None)
     return POST_CREATION
 
 
@@ -1863,6 +1910,8 @@ async def handle_skip_edit(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         # пропуск — решение по полю: неудачные попытки поля убираются
         # best-effort (Stage 16, дефект №1)
         await _accept_input(update, context, str(field))
+    # правка завершена: поле больше не «в редактировании»
+    ctx.data(context).pop("edit_field", None)
     return POST_CREATION
 
 
@@ -1881,6 +1930,8 @@ async def finish_photo_edit(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         await screen.cleanup_temps(context, ctx.chat(update).id, ctx.data(context))
         # и неудачные текстовые попытки этапа изображения уходят в очистку
         await _accept_input(update, context, "image")
+    # правка завершена: поле больше не «в редактировании»
+    ctx.data(context).pop("edit_field", None)
     return POST_CREATION
 
 
@@ -2031,6 +2082,14 @@ def post_creation_handlers() -> list[BaseHandler]:
                     CallbackQueryHandler(
                         handle_callback_query,
                         pattern="^(skip|back|save_draft|finish|edit_post|media_done)$",
+                    ),
+                    # Выбор поля в меню редактирования (Stage 16, дефект №4):
+                    # EDIT_FIELD наступает ТОЛЬКО вместе с выбранным полем.
+                    # «Редактировать» (edit_post) выше ловится своим точным
+                    # паттерном — этот обработчик его не перехватывает
+                    CallbackQueryHandler(
+                        handle_edit,
+                        pattern=r"^edit_(?!post$)[a-z_]+$|^cancel_edit$",
                     ),
                 ],
                 EDIT_FIELD: [

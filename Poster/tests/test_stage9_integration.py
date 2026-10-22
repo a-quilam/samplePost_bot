@@ -379,7 +379,9 @@ class SkipAndEditTests(unittest.TestCase):
         for key, new_value in NEW_VALUES.items():
             with self.subTest(field=key):
                 await h.callback("edit_post")
-                self.assertEqual(h.dialog_state(), EDIT_FIELD)
+                # Меню выбора поля — POST_CREATION; EDIT_FIELD наступает
+                # только вместе с выбранным полем (Stage 16, дефект №4)
+                self.assertEqual(h.dialog_state(), POST_CREATION)
 
                 await h.callback(f"edit_{key}")
                 # Промпт правки редактирует INLINE-сообщение меню
@@ -440,7 +442,9 @@ class SkipAndEditTests(unittest.TestCase):
         preview_text = h.posts()[-1]
 
         await h.callback("edit_post")
-        self.assertEqual(h.dialog_state(), EDIT_FIELD)
+        # Меню выбора поля — состояние POST_CREATION: EDIT_FIELD наступает
+        # только вместе с выбранным полем (Stage 16, дефект №4)
+        self.assertEqual(h.dialog_state(), POST_CREATION)
         await h.callback("cancel_edit")
 
         self.assertEqual(h.dialog_state(), POST_CREATION)
