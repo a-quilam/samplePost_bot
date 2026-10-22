@@ -38,6 +38,7 @@ try:
         Update,
         User,
     )
+    from telegram.error import BadRequest
     from telegram.ext import ConversationHandler
 
     import bot as bot_module
@@ -78,6 +79,10 @@ class FakeBot:
       доставка длинного поста или превью из нескольких частей);
     - send_* возвращают фиктивные Message с растущим message_id — так
       продукт запоминает id экрана/превью (как от настоящего Telegram);
+    - edit_message_text реалистично отвечает «message is not modified»,
+      когда текст и клавиатура НЕ изменились (настоящий Telegram в этом
+      случае бросает BadRequest — Stage 16: «повторная отрисовка не
+      изменила сообщение» не должна выглядеть как успех);
     - атрибута defaults нет намеренно: Message.reply_text проверяет его
       через hasattr и без него корректно обходится.
     """
@@ -94,6 +99,28 @@ class FakeBot:
         # kind -> разрешено ещё N успешных вызовов, далее все падают
         self.fail_after: dict[str, int] = {}
         self._next_message_id = 100
+        # (chat_id, message_id) -> (text, reply_markup-подпись): реализм
+        # «message is not modified» у настоящего Telegram
+        self._message_content: dict[tuple[int, int], tuple[Any, Any]] = {}
+
+    def _markup_signature(self, markup: Any) -> Any:
+        """Сравнимая подпись клавиатуры (для детекции идентичного edit'а)."""
+        if markup is None:
+            return None
+        try:
+            return repr(markup)
+        except Exception:  # noqa: BLE001 — непредставимая клавиатура сравнивается как объект
+            return id(markup)
+
+    def _remember_content(self, kwargs: dict, message: Any) -> None:
+        """Запоминает последнее содержимое сообщения бота (текст/фото)."""
+        text = kwargs.get("text")
+        if text is None:
+            text = kwargs.get("caption")
+        self._message_content[(message.chat.id, message.message_id)] = (
+            text,
+            self._markup_signature(kwargs.get("reply_markup")),
+        )
 
     def _record(self, kind: str, args: tuple, kwargs: dict) -> None:
         if kind in self.fail_types:
@@ -147,11 +174,15 @@ class FakeBot:
     # —— методы, которые реально зовут обработчики ——
     async def send_message(self, *args: Any, **kwargs: Any) -> Any:
         self._record("message", args, kwargs)
-        return self._make_message({**kwargs, "args": args})
+        message = self._make_message({**kwargs, "args": args})
+        self._remember_content(kwargs, message)
+        return message
 
     async def send_photo(self, *args: Any, **kwargs: Any) -> Any:
         self._record("photo", args, kwargs)
-        return self._make_message({**kwargs, "args": args})
+        message = self._make_message({**kwargs, "args": args})
+        self._remember_content(kwargs, message)
+        return message
 
     async def send_media_group(self, *args: Any, **kwargs: Any) -> list:
         self._record("media_group", args, kwargs)
@@ -161,7 +192,25 @@ class FakeBot:
         self._record("callback_answer", args, kwargs)
 
     async def edit_message_text(self, *args: Any, **kwargs: Any) -> None:
+        # Реализм Telegram: идентичное содержимое (текст + клавиатура) —
+        # BadRequest «message is not modified», сообщение НЕ считается
+        # изменённым и в записи вызова не появляется. Явные инъекции теста
+        # (fail_types/errors_by_type/fail_after) важнее этой эмуляции.
+        injected = any(
+            "edit_message" in container
+            for container in (self.fail_types, self.errors_by_type, self.fail_after)
+        )
+        key = (kwargs.get("chat_id"), kwargs.get("message_id"))
+        current = self._message_content.get(key)
+        proposed = (
+            kwargs.get("text"),
+            self._markup_signature(kwargs.get("reply_markup")),
+        )
+        if not injected and current is not None and current == proposed:
+            raise BadRequest("message is not modified")
         self._record("edit_message", args, kwargs)
+        if key[0] is not None and key[1] is not None:
+            self._message_content[key] = proposed
 
     async def delete_message(self, *args: Any, **kwargs: Any) -> None:
         self._record("delete_message", args, kwargs)
@@ -401,6 +450,8 @@ class Harness:
         # message_id сообщений пользователя растут, как у настоящего Telegram:
         # очистка временного ввода (удаление сообщений) проверяется по id
         self._user_msg_seq = 0
+        # счётчик сообщений «ниже экрана» (text_from_below, Stage 16)
+        self._below_seq = 0
 
     def _next_user_msg_id(self) -> int:
         self._user_msg_seq += 1
@@ -458,6 +509,7 @@ class Harness:
         chat_id: int | None = None,
         user_id: int | None = None,
         entities: list[MessageEntity] | None = None,
+        message_id: int | None = None,
     ) -> Update:
         self._update_seq += 1
         return await self.feed(
@@ -466,13 +518,22 @@ class Harness:
                 chat_id=chat_id if chat_id is not None else self.chat_id,
                 user_id=user_id if user_id is not None else self.user_id,
                 update_id=self._update_seq,
-                message_id=self._next_user_msg_id(),
+                message_id=(
+                    message_id
+                    if message_id is not None
+                    else self._next_user_msg_id()
+                ),
                 entities=entities,
             )
         )
 
     async def callback(
-        self, data: str, *, chat_id: int | None = None, user_id: int | None = None
+        self,
+        data: str,
+        *,
+        chat_id: int | None = None,
+        user_id: int | None = None,
+        message_id: int | None = None,
     ) -> Update:
         self._update_seq += 1
         return await self.feed(
@@ -481,6 +542,7 @@ class Harness:
                 chat_id=chat_id if chat_id is not None else self.chat_id,
                 user_id=user_id if user_id is not None else self.user_id,
                 update_id=self._update_seq,
+                message_id=message_id if message_id is not None else 2,
             )
         )
 
@@ -573,6 +635,26 @@ class Harness:
         if record is None:
             return []
         return inline_buttons(record.get("reply_markup"))
+
+    def screen_message_id(self) -> int | None:
+        """message_id текущего экрана по user_data (None — экрана не было)."""
+        ref = self.user_data().get("screen")
+        return int(ref["message_id"]) if isinstance(ref, dict) else None
+
+    async def text_from_below(
+        self, text: str, **kwargs: Any
+    ) -> Update:
+        """
+        Сообщение пользователя НИЖЕ текущего экрана.
+
+        В реальном чате id сообщений пользователя растут и всегда новее
+        старого сообщения-экрана (Stage 16: навигация должна пересоздавать
+        экран рядом с вводом). В обычных тестах id небольшие и re-anchor
+        не срабатывает — намеренно, чтобы не менять поведение старых сценариев.
+        """
+        base = max(self.screen_message_id() or 0, 100)
+        self._below_seq += 1
+        return await self.text(text, message_id=base + self._below_seq, **kwargs)
 
     def edits(self) -> list[dict]:
         """Все edit_message_text (перерисовки экрана и превью)."""

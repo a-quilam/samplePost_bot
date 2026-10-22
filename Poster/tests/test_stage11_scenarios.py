@@ -66,7 +66,7 @@ class Stage11ScenarioTests(unittest.TestCase):
 
     @scenario_test
     async def test_02_repeated_start_edits_existing_screen(self, h):
-        """2. Повторный /start редактирует существующий экран, а не плодит."""
+        """2. Повторный /start не плодит сообщений: экран тот же, меню на месте."""
         first = await h.text("/start")
         ref_before = h.user_data()["screen"]["message_id"]
 
@@ -74,12 +74,21 @@ class Stage11ScenarioTests(unittest.TestCase):
 
         self.assertEqual(h.user_data()["screen"]["message_id"], ref_before)
         self.assertEqual(len(screen_sends(h)), 1, "новое сообщение не создано")
+        # Настоящий Telegram отвечает «message is not modified» на идентичную
+        # перерисовку (Stage 16, реализм FakeBot): меню уже на экране —
+        # новая правка не нужна и не порождает событий
+        self.assertEqual(h.screen_text(), GREETING)
+        self.assertIn(second.message.message_id, h.deleted_ids())
+        self.assertIn(first.message.message_id, h.deleted_ids())
+
+        # Изменившееся меню редактирует ТОТ ЖЕ экран, а не создаёт новый
+        await h.start_dialog()
+        await h.text("/start")
+        self.assertEqual(h.user_data()["screen"]["message_id"], ref_before)
         last = h.screens()[-1]
         self.assertEqual(last["type"], "edit_message")
         self.assertEqual(last["message_id"], ref_before, "правится тот же экран")
         self.assertEqual(h.screen_text(), GREETING)
-        self.assertIn(second.message.message_id, h.deleted_ids())
-        self.assertIn(first.message.message_id, h.deleted_ids())
 
     @scenario_test
     async def test_03_start_during_creation_saves_nonempty_wip_once(self, h):
