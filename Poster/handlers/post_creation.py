@@ -1,6 +1,7 @@
 import hashlib
 import logging
 from collections.abc import Awaitable, Callable, Sequence
+from datetime import date
 from typing import Any
 
 from sqlalchemy.orm import Session
@@ -33,7 +34,7 @@ from models import (
     get_draft_photos,
     photos_to_json,
 )
-from utils import screen
+from utils import calendar_view, screen
 from utils import tg_context as ctx
 from utils.formatter import format_text
 from utils.tg_html import entities_to_html, escape_html, split_html, utf16_len
@@ -74,7 +75,8 @@ POST_STEPS: list[dict[str, Any]] = [
         "label": "Дата",
         "prompt": (
             "Введите дату события (ДД.ММ.ГГГГ, 17.11, 1711, «17 ноября», "
-            "«сегодня», «завтра») или нажмите 'Пропустить':"
+            "«сегодня», «завтра»), выберите её кнопками ниже "
+            "или нажмите 'Пропустить':"
         ),
         "validator": validate_date,
         "normalizer": normalize_date,
@@ -148,15 +150,42 @@ def get_skip_keyboard():
     return InlineKeyboardMarkup(keyboard)
 
 
+def _calendar_category_rows() -> list[list[InlineKeyboardButton]]:
+    """
+    Верхний уровень календаря: три способа выбрать дату.
+
+    Кнопки присутствуют и на шаге «Дата» визарда, и в промпте правки даты —
+    календарь не создаёт отдельного сценария, а дополняет ввод текстом.
+    """
+    return [
+        [InlineKeyboardButton("На этой неделе", callback_data="cal_week")],
+        [InlineKeyboardButton("На следующей неделе", callback_data="cal_nextweek")],
+        [InlineKeyboardButton("Другая", callback_data="cal_other")],
+    ]
+
+
+def get_date_edit_keyboard() -> InlineKeyboardMarkup:
+    """Клавиатура промпта правки даты: календарь + пропуск обновления."""
+    keyboard = _calendar_category_rows()
+    keyboard.append([InlineKeyboardButton("Пропустить", callback_data="skip")])
+    return InlineKeyboardMarkup(keyboard)
+
+
 def get_step_keyboard(step_index: int):
     """
     Клавиатура экрана шага визарда: пропуск + навигация.
+
+    На шаге «Дата» сверху добавляются три кнопки кнопочного календаря
+    (Stage 17); остальные шаги не меняются.
 
     «◀️ Назад» возвращает на предыдущий шаг (данные не теряются), «🏠 Меню»
     завершает диалог с сохранением WIP. На первом шаге кнопки «Назад» нет —
     возвращаться некуда.
     """
-    keyboard = [[InlineKeyboardButton("⏭ Пропустить", callback_data="skip")]]
+    keyboard: list[list[InlineKeyboardButton]] = []
+    if 0 <= step_index < len(POST_STEPS) and POST_STEPS[step_index]["key"] == "date":
+        keyboard.extend(_calendar_category_rows())
+    keyboard.append([InlineKeyboardButton("⏭ Пропустить", callback_data="skip")])
     navigation = []
     if step_index > 0:
         navigation.append(InlineKeyboardButton("◀️ Назад", callback_data="back"))
@@ -901,6 +930,514 @@ async def handle_back(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int
         logger.info(f"Возврат на шаг {user_data['current_step'] + 1}.")
     await prompt_step(update, context)
     return POST_CREATION
+
+
+# —— кнопочный календарь даты (Stage 17) ————————————————————————————————
+#
+# Календарь — НЕ отдельный сценарий: это дополнительный способ заполнить то
+# же поле «Дата» на том же шаге визарда (и в промпте правки даты). Уровни
+# навигации (категории → диапазон → неделя → день) рисуются на ЕДИНОМ
+# экране через screen.render_screen: новых сообщений не появляется.
+#
+# Состояние уровня НЕ хранится в user_data: каждый callback несёт только
+# календарные данные (индекс периода, дату начала недели, конкретный день),
+# а вид пересчитывается от «сегодня» в момент нажатия. Поэтому:
+# - устаревшая кнопка после полуночи пересчитывается по новой дате;
+# - подделанный callback не может выбрать дату вне [сегодня, горизонт];
+# - callback-данные короткие и не содержат пользовательского текста.
+
+
+def _calendar_mode(user_data: dict) -> str | None:
+    """
+    Режим календаря: "create" (шаг «Дата»), "edit" (правка даты) или None.
+
+    Контекст проверяется на КАЖДОМ нажатии: кнопка календаря, оставшаяся
+    после ухода с шага даты или завершения правки, не должна менять данные.
+    """
+    step_index = user_data.get("current_step", 0)
+    if step_index < len(POST_STEPS) and POST_STEPS[step_index]["key"] == "date":
+        return "create"
+    if user_data.get("edit_field") == "date":
+        return "edit"
+    return None
+
+
+def _calendar_state(mode: str) -> int:
+    """Состояние ConversationHandler для текущего режима календаря."""
+    return EDIT_FIELD if mode == "edit" else POST_CREATION
+
+
+def _context_state(user_data: dict) -> int:
+    """Состояние диалога по данным (для устаревших кнопок календаря)."""
+    edit_field = user_data.get("edit_field")
+    if edit_field and any(step["key"] == edit_field for step in POST_STEPS):
+        return EDIT_FIELD
+    return POST_CREATION
+
+
+def _parse_calendar_date(raw: str) -> date | None:
+    """Дата из callback-данных (ISO); None — данные повреждены/подделаны."""
+    try:
+        return date.fromisoformat(raw)
+    except (TypeError, ValueError):
+        return None
+
+
+def _date_step_index() -> int:
+    """Индекс шага «Дата» в POST_STEPS (единый источник шагов)."""
+    return next(index for index, step in enumerate(POST_STEPS) if step["key"] == "date")
+
+
+async def _render_current_context(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> None:
+    """
+    Перерисовывает АКТУАЛЬНЫЙ экран диалога (после устаревшей кнопки).
+
+    Пустой экран не появляется: пользователь видит тот шаг/правку/превью,
+    где находится сейчас.
+    """
+    user_data = ctx.data(context)
+    edit_field = user_data.get("edit_field")
+    if edit_field:
+        step = next((step for step in POST_STEPS if step["key"] == edit_field), None)
+        if step is not None:
+            await _render_edit_prompt(update, context, step)
+            return
+    step_index = int(user_data.get("current_step") or 0)
+    if step_index < len(POST_STEPS):
+        await _render_step_screen(update, context, step_index)
+    else:
+        await _render_preview_hint(update, context)
+
+
+async def _render_calendar_root(
+    update: Update, context: ContextTypes.DEFAULT_TYPE, mode: str
+) -> None:
+    """Корень календаря: шаг «Дата» (создание) или промпт правки даты."""
+    if mode == "edit":
+        step = next(step for step in POST_STEPS if step["key"] == "date")
+        await _render_edit_prompt(update, context, step)
+        return
+    await _render_step_screen(update, context, _date_step_index())
+
+
+async def _calendar_reject(
+    query,
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+    mode: str,
+    message: str,
+) -> int:
+    """
+    Отказ по недопустимой/устаревшей кнопке: понятное объяснение + свежий
+    корень календаря (даты пересчитаны от текущего «сегодня»).
+    """
+    await query.answer(message, show_alert=True)
+    await _render_calendar_root(update, context, mode)
+    return _calendar_state(mode)
+
+
+async def _render_calendar_days(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+    *,
+    start: date,
+    end: date,
+    back: str,
+    title: str,
+) -> None:
+    """Экран дней интервала: кнопки строго «дд.мм (дв)», по три в ряд."""
+    days = calendar_view.days_between(start, end)
+    buttons = [
+        InlineKeyboardButton(
+            calendar_view.format_day(day),
+            callback_data=f"cal_day:{day.isoformat()}",
+        )
+        for day in days
+    ]
+    rows = [buttons[index : index + 3] for index in range(0, len(buttons), 3)]
+    rows.append([InlineKeyboardButton("◀️ Назад", callback_data=back)])
+    await screen.render_screen(
+        context,
+        ctx.data(context),
+        ctx.chat(update).id,
+        title,
+        InlineKeyboardMarkup(rows),
+    )
+
+
+async def _render_calendar_categories(
+    update: Update, context: ContextTypes.DEFAULT_TYPE, *, today: date
+) -> None:
+    """Уровень «Другая»: два двухнедельных диапазона и «Дальше»."""
+    ranges = calendar_view.other_ranges(today)
+    rows = [
+        [
+            InlineKeyboardButton(
+                calendar_view.format_range(start, end),
+                callback_data=f"cal_range:{index}",
+            )
+        ]
+        for index, (start, end) in enumerate(ranges)
+    ]
+    pairs = calendar_view.month_pairs(today, calendar_view.horizon_end(today))
+    if pairs:
+        rows.append([InlineKeyboardButton("Дальше", callback_data="cal_months:0")])
+    rows.append([InlineKeyboardButton("◀️ Назад", callback_data="cal_root")])
+    await screen.render_screen(
+        context,
+        ctx.data(context),
+        ctx.chat(update).id,
+        "📅 Другая дата. Выберите период:",
+        InlineKeyboardMarkup(rows),
+    )
+
+
+async def _render_calendar_range_weeks(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+    *,
+    index: int,
+    start: date,
+    end: date,
+) -> None:
+    """Недели выбранного двухнедельного диапазона."""
+    weeks = calendar_view.weeks_covering(start, end)
+    rows = [
+        [
+            InlineKeyboardButton(
+                calendar_view.format_range(week_start, week_end),
+                callback_data=f"cal_rweek:{index}:{week_start.isoformat()}",
+            )
+        ]
+        for week_start, week_end in weeks
+    ]
+    rows.append([InlineKeyboardButton("◀️ Назад", callback_data="cal_other")])
+    await screen.render_screen(
+        context,
+        ctx.data(context),
+        ctx.chat(update).id,
+        f"📅 Период {calendar_view.format_range(start, end)}. Выберите неделю:",
+        InlineKeyboardMarkup(rows),
+    )
+
+
+async def _render_calendar_months(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+    *,
+    pairs: list[list[tuple[int, int]]],
+    index: int,
+) -> None:
+    """Пара календарных месяцев + «Дальше» и возврат."""
+    pair = pairs[index]
+    month_buttons = [
+        InlineKeyboardButton(
+            calendar_view.format_month((year, month)),
+            callback_data=f"cal_month:{year}-{month:02d}",
+        )
+        for year, month in pair
+    ]
+    rows = [month_buttons]
+    if index + 1 < len(pairs):
+        rows.append(
+            [InlineKeyboardButton("Дальше", callback_data=f"cal_months:{index + 1}")]
+        )
+    back = f"cal_months:{index - 1}" if index > 0 else "cal_other"
+    rows.append([InlineKeyboardButton("◀️ Назад", callback_data=back)])
+    await screen.render_screen(
+        context,
+        ctx.data(context),
+        ctx.chat(update).id,
+        "📅 Выберите месяц:",
+        InlineKeyboardMarkup(rows),
+    )
+
+
+async def _render_calendar_month_weeks(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+    *,
+    key: tuple[int, int],
+    allowed: tuple[date, date],
+    back: str,
+) -> None:
+    """Недели выбранного месяца (только его дни и только до горизонта)."""
+    weeks = calendar_view.month_weeks(key, allowed)
+    rows = [
+        [
+            InlineKeyboardButton(
+                calendar_view.format_range(week_start, week_end),
+                callback_data=f"cal_mweek:{week_start.isoformat()}",
+            )
+        ]
+        for week_start, week_end in weeks
+    ]
+    rows.append([InlineKeyboardButton("◀️ Назад", callback_data=back)])
+    await screen.render_screen(
+        context,
+        ctx.data(context),
+        ctx.chat(update).id,
+        f"📅 {calendar_view.format_month(key)}. Выберите неделю:",
+        InlineKeyboardMarkup(rows),
+    )
+
+
+async def _apply_calendar_day(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+    day: date,
+    mode: str,
+) -> int:
+    """
+    Сохраняет выбранную кнопкой дату в ТО ЖЕ поле, что и текстовый ввод.
+
+    Создание: дата → следующий шаг визарда (снимок WIP пишется prompt_step).
+    Правка: дата → обновлённое превью, режим правки завершается.
+    """
+    user_data = ctx.data(context)
+    user_data["date"] = day.strftime("%d.%m.%Y")
+    # Форматирование исходного текста к выбранной кнопкой дате неприменимо
+    _set_field_html(user_data, "date", None)
+    logger.info(f"Дата выбрана кнопками календаря: {user_data['date']}.")
+
+    if mode == "edit":
+        # правка завершена: признак снимается ДО снимка WIP, иначе рестарт
+        # вернул бы в промпт уже завершённой правки даты (Stage 17)
+        user_data.pop("edit_field", None)
+        synced = await review_post(update, context)
+        if synced:
+            # дата надёжно сохранена → неудачные текстовые попытки поля уходят
+            await _accept_input(update, context, "date")
+        return POST_CREATION
+
+    user_data["current_step"] = int(user_data.get("current_step") or 0) + 1
+    if await prompt_step(update, context):
+        await _accept_input(update, context, "date")
+    return POST_CREATION
+
+
+async def handle_calendar(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """
+    Навигация кнопочного календаря даты (Stage 17).
+
+    Уровни: корень (категории) → «Другая» → диапазон → неделя → день.
+    Каждое нажатие отвечает ровно один раз (спиннер не зависает), меняет
+    существующий экран и не создаёт параллельного сценария создания поста.
+    """
+    query = ctx.query(update)
+    user_data = ctx.data(context)
+    mode = _calendar_mode(user_data)
+    if mode is None:
+        # кнопка нажата уже после ухода с шага даты/из правки даты
+        await query.answer("Кнопка устарела: календарь уже неактуален.")
+        await _render_current_context(update, context)
+        return _context_state(user_data)
+
+    today = calendar_view.app_today_value()
+    horizon = calendar_view.horizon_end(today)
+    allowed = (today, horizon)
+    data = query.data or ""
+    parts = data.split(":")
+    action = parts[0]
+
+    if action == "cal_root":
+        await query.answer()
+        await _render_calendar_root(update, context, mode)
+        return _calendar_state(mode)
+
+    if action == "cal_week":
+        start, end = calendar_view.current_week(today)
+        await query.answer()
+        await _render_calendar_days(
+            update,
+            context,
+            start=start,
+            end=end,
+            back="cal_root",
+            title=(
+                f"📅 Текущая неделя: {calendar_view.format_range(start, end)}. "
+                "Выберите дату:"
+            ),
+        )
+        return _calendar_state(mode)
+
+    if action == "cal_nextweek":
+        start, end = calendar_view.next_week(today)
+        await query.answer()
+        await _render_calendar_days(
+            update,
+            context,
+            start=start,
+            end=end,
+            back="cal_root",
+            title=(
+                f"📅 Следующая неделя: {calendar_view.format_range(start, end)}. "
+                "Выберите дату:"
+            ),
+        )
+        return _calendar_state(mode)
+
+    if action == "cal_other":
+        await query.answer()
+        await _render_calendar_categories(update, context, today=today)
+        return _calendar_state(mode)
+
+    if action == "cal_range":
+        if len(parts) != 2 or parts[1] not in ("0", "1"):
+            return await _calendar_reject(
+                query, update, context, mode, "Кнопка календаря устарела."
+            )
+        index = int(parts[1])
+        start, end = calendar_view.other_ranges(today)[index]
+        await query.answer()
+        await _render_calendar_range_weeks(
+            update, context, index=index, start=start, end=end
+        )
+        return _calendar_state(mode)
+
+    if action == "cal_rweek":
+        week_start = _parse_calendar_date(parts[2]) if len(parts) == 3 else None
+        if len(parts) != 3 or parts[1] not in ("0", "1") or week_start is None:
+            return await _calendar_reject(
+                query, update, context, mode, "Кнопка календаря устарела."
+            )
+        index = int(parts[1])
+        start, end = calendar_view.other_ranges(today)[index]
+        week = next(
+            (
+                (week_start_value, week_end_value)
+                for week_start_value, week_end_value in calendar_view.weeks_covering(
+                    start, end
+                )
+                if week_start_value == week_start
+            ),
+            None,
+        )
+        if week is None:
+            return await _calendar_reject(
+                query, update, context, mode, "Кнопка календаря устарела."
+            )
+        await query.answer()
+        await _render_calendar_days(
+            update,
+            context,
+            start=week[0],
+            end=week[1],
+            back=f"cal_range:{index}",
+            title=(
+                f"📅 {calendar_view.format_range(week[0], week[1])}. " "Выберите дату:"
+            ),
+        )
+        return _calendar_state(mode)
+
+    if action == "cal_months":
+        pairs = calendar_view.month_pairs(today, horizon)
+        if len(parts) != 2 or not parts[1].isdigit():
+            return await _calendar_reject(
+                query, update, context, mode, "Кнопка календаря устарела."
+            )
+        index = int(parts[1])
+        if not 0 <= index < len(pairs):
+            return await _calendar_reject(
+                query, update, context, mode, "Кнопка календаря устарела."
+            )
+        await query.answer()
+        await _render_calendar_months(update, context, pairs=pairs, index=index)
+        return _calendar_state(mode)
+
+    if action == "cal_month":
+        if len(parts) != 2 or parts[1].count("-") != 1:
+            return await _calendar_reject(
+                query, update, context, mode, "Кнопка календаря устарела."
+            )
+        year_text, month_text = parts[1].split("-")
+        if not (year_text.isdigit() and month_text.isdigit()):
+            return await _calendar_reject(
+                query, update, context, mode, "Кнопка календаря устарела."
+            )
+        key = (int(year_text), int(month_text))
+        if not 1 <= key[1] <= 12:
+            return await _calendar_reject(
+                query, update, context, mode, "Кнопка календаря устарела."
+            )
+        if not calendar_view.month_weeks(key, allowed):
+            return await _calendar_reject(
+                query, update, context, mode, "Кнопка календаря устарела."
+            )
+        await query.answer()
+        pair = calendar_view.pair_index(today, key)
+        back = f"cal_months:{pair}" if pair is not None else "cal_other"
+        await _render_calendar_month_weeks(
+            update, context, key=key, allowed=allowed, back=back
+        )
+        return _calendar_state(mode)
+
+    if action == "cal_mweek":
+        week_start = _parse_calendar_date(parts[1]) if len(parts) == 2 else None
+        if week_start is None:
+            return await _calendar_reject(
+                query, update, context, mode, "Кнопка календаря устарела."
+            )
+        key = (week_start.year, week_start.month)
+        week = next(
+            (
+                (week_start_value, week_end_value)
+                for week_start_value, week_end_value in calendar_view.month_weeks(
+                    key, allowed
+                )
+                if week_start_value == week_start
+            ),
+            None,
+        )
+        if week is None:
+            return await _calendar_reject(
+                query, update, context, mode, "Кнопка календаря устарела."
+            )
+        await query.answer()
+        await _render_calendar_days(
+            update,
+            context,
+            start=week[0],
+            end=week[1],
+            back=f"cal_month:{key[0]}-{key[1]:02d}",
+            title=(
+                f"📅 {calendar_view.format_month(key)}: "
+                f"{calendar_view.format_range(week[0], week[1])}. "
+                "Выберите дату:"
+            ),
+        )
+        return _calendar_state(mode)
+
+    if action == "cal_day":
+        day = _parse_calendar_date(parts[1]) if len(parts) == 2 else None
+        if day is None:
+            return await _calendar_reject(
+                query, update, context, mode, "Кнопка календаря устарела."
+            )
+        if day < today:
+            return await _calendar_reject(
+                query,
+                update,
+                context,
+                mode,
+                "Эта дата уже прошла — календарь обновлён.",
+            )
+        if day > horizon:
+            return await _calendar_reject(
+                query,
+                update,
+                context,
+                mode,
+                "Дата за пределами горизонта 12 месяцев — календарь обновлён.",
+            )
+        await query.answer()
+        return await _apply_calendar_day(update, context, day, mode)
+
+    return await _calendar_reject(
+        query, update, context, mode, "Кнопка календаря устарела."
+    )
 
 
 async def _render_photo_rejection(
@@ -1673,6 +2210,13 @@ def _edit_prompt_text(step: dict, user_data: dict, *, error: str | None = None) 
             f"Текущее значение: {current}.\n"
             "Отправьте новое изображение или нажмите «Пропустить»:"
         )
+    elif step["key"] == "date":
+        # Stage 17: у поля даты есть и текстовый ввод, и кнопочный календарь
+        text = (
+            f"Текущее значение: {current}.\n"
+            "Введите новое значение для «Дата» или выберите дату "
+            "кнопками ниже, либо нажмите «Пропустить»:"
+        )
     else:
         text = (
             f"Текущее значение: {current}.\n"
@@ -1694,13 +2238,19 @@ async def _render_edit_prompt(
     """
     Промпт правки поля — обновлением экрана (новых сообщений не накапливается).
     Сообщение ввода пользователя при ошибке НЕ удаляется (не сохранено).
+
+    Для даты к кнопке пропуска добавляется кнопочный календарь (Stage 17):
+    правка даты кнопками даёт то же поле, что и ввод текстом.
     """
+    keyboard = (
+        get_date_edit_keyboard() if step["key"] == "date" else get_skip_keyboard()
+    )
     await screen.render_screen(
         context,
         ctx.data(context),
         ctx.chat(update).id,
         _edit_prompt_text(step, ctx.data(context), error=error),
-        get_skip_keyboard(),
+        keyboard,
     )
 
 
@@ -2026,7 +2576,8 @@ async def main_menu_during_creation(
 # Глобальные callback'и (main_menu, delete_, draftpage_, editdraft_) сюда
 # НЕ входят — ими занимаются свои хендлеры.
 STALE_DIALOG_CALLBACK_PATTERN = (
-    r"^(?:skip|back|media_done|save_draft|finish|cancel_edit|edit_[a-z_]+)$"
+    r"^(?:skip|back|media_done|save_draft|finish|cancel_edit|edit_[a-z_]+"
+    r"|cal_[a-z0-9:_-]+)$"
 )
 
 
@@ -2082,6 +2633,9 @@ def post_creation_handlers() -> list[BaseHandler]:
                     ),
                     MessageHandler(filters.PHOTO, handle_photo),
                     MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message),
+                    # Кнопочный календарь даты (Stage 17): уровни меняют
+                    # существующий экран; контекст шага проверяется внутри
+                    CallbackQueryHandler(handle_calendar, pattern=r"^cal_"),
                     CallbackQueryHandler(
                         handle_callback_query,
                         pattern="^(skip|back|save_draft|finish|edit_post|media_done)$",
@@ -2112,6 +2666,9 @@ def post_creation_handlers() -> list[BaseHandler]:
                     ),
                     CallbackQueryHandler(finish_photo_edit, pattern="^media_done$"),
                     CallbackQueryHandler(handle_skip_edit, pattern="^skip$"),
+                    # Календарь даты доступен и при правке поля «Дата»:
+                    # кнопка дня сохраняет значение и возвращает к превью
+                    CallbackQueryHandler(handle_calendar, pattern=r"^cal_"),
                     MessageHandler(filters.PHOTO, process_edit),
                     MessageHandler(filters.TEXT & ~filters.COMMAND, process_edit),
                 ],
