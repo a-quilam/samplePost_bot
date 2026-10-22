@@ -6,7 +6,7 @@ from dotenv import load_dotenv
 from sqlalchemy import create_engine, event, inspect, text
 from sqlalchemy.orm import sessionmaker
 
-import models  # noqa: F401 — регистрирует Draft/UserState/User/Place/PlaceName
+import models  # noqa: F401 — регистрирует Draft/UserState/User/Place/PlaceName/PlaceSession
 from base import Base
 from migrations import run_migrations
 
@@ -106,8 +106,9 @@ def init_db() -> None:
     Готовит базу к работе: миграции схемы → легаси-таблицы → старые колонки.
 
     Порядок важен:
-    1. `run_migrations` создаёт фундамент Stage 19A и журнал версий; на
-       старой базе пользовательские данные не затрагиваются;
+    1. `run_migrations` создаёт фундамент Stage 19A/19B и журнал версий; на
+       старой базе пользовательские данные не затрагиваются, а перед первым
+       ожидающим DDL автоматически создаётся WAL-aware копия;
     2. `create_all` создаёт отсутствующие таблицы Draft/UserState (легаси-
        базлайн; новые таблицы уже существуют и пропускаются);
     3. `_migrate` добавляет колонки, которых нет в очень старых `drafts`.

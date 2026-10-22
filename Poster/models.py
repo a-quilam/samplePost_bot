@@ -136,12 +136,12 @@ class User(Base):
 
 class Place(Base):
     """
-    Место справочника (Stage 19A).
+    Место справочника (Stage 19A/19B).
 
     Названия живут отдельно (`place_names`): каноническое — строка с
-    `is_canonical=1`, альтернативные появятся на следующем этапе справочника.
-    Администратор и стандартный шаблон появятся отдельными таблицами на
-    следующих этапах.
+    `is_canonical=1`, альтернативные — соседние строки. Администратор и
+    стандартный шаблон появятся отдельными таблицами на следующих этапах;
+    создатель места не получает административных прав.
     """
 
     __tablename__ = "places"
@@ -153,6 +153,10 @@ class Place(Base):
         nullable=True,
         index=True,
     )
+    # Необязательные контакты. В Stage 19B их нельзя заполнить через бота;
+    # карточка показывает поля только при наличии данных (без пустых строк).
+    address: Mapped[str | None] = mapped_column(Text, nullable=True)
+    url: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime, default=utcnow, nullable=False
     )
@@ -163,7 +167,7 @@ class Place(Base):
 
 class PlaceName(Base):
     """
-    Название места: каноническое или (в будущем) альтернативное.
+    Название места: каноническое или альтернативное.
 
     Ограничения БД:
     - `name` и `name_search` не пустые после trim (CHECK);
@@ -216,6 +220,30 @@ class PlaceName(Base):
             f"<PlaceName(id={self.id}, place_id={self.place_id}, "
             f"name={self.name}, canonical={self.is_canonical})>"
         )
+
+
+class PlaceSession(Base):
+    """
+    Ограниченное состояние Telegram-сценария выбора/создания места.
+
+    Хранится ОТДЕЛЬНО от WIP-поста (`user_states.payload`): навигация по
+    справочнику не должна менять незавершённый пост. Ключ — Telegram user ID:
+    состояние интерфейса не является доменной связью с `users.id`; строка
+    создаётся при первом входе в раздел «Места» и очищается при /start,
+    /cancel или возврате в главное меню. Payload — небольшой JSON (фаза,
+    выбранные id, введённое название), а не копия данных справочника.
+    """
+
+    __tablename__ = "place_sessions"
+
+    telegram_user_id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    payload: Mapped[str] = mapped_column(Text, nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime, default=utcnow, onupdate=utcnow, nullable=False
+    )
+
+    def __repr__(self) -> str:
+        return f"<PlaceSession(telegram_user_id={self.telegram_user_id})>"
 
 
 # --- Фотографии поста (медиа-группы) -----------------------------------------

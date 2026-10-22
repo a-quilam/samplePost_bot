@@ -1,6 +1,6 @@
 # migrations.py
 """
-Нумерованные миграции схемы SQLite (Stage 19A).
+Нумерованные миграции схемы SQLite (Stage 19A/19B).
 
 Механизм свой, а не Alembic: проект — однофайловая SQLite-база с полностью
 ручными, добавочными изменениями схемы. Alembic добавил бы зависимость,
@@ -16,7 +16,10 @@
   (`BEGIN IMMEDIATE`): DDL в SQLite транзакционен, поэтому сбой посреди
   миграции не оставляет полуприменённое состояние;
 - `BEGIN IMMEDIATE` + `busy_timeout` защищают от конкурентной инициализации:
-  второй процесс ждёт, затем видит уже применённые версии.
+  второй процесс ждёт, затем видит уже применённые версии;
+- перед первым ожидающим DDL существующей непустой базы автоматически
+  создаётся WAL-aware копия (SQLite Backup API + integrity_check). Сбой
+  копии отменяет миграцию; готовые копии не удаляются.
 
 Ограничение: миграции требуют файловую SQLite (не `:memory:`) — приложение
 всегда работает с файлом; для временных баз тесты используют временные файлы.
@@ -31,9 +34,13 @@ from __future__ import annotations
 
 import hashlib
 import logging
+import os
 import sqlite3
+import tempfile
 from collections.abc import Sequence
 from dataclasses import dataclass
+from datetime import datetime, timezone
+from pathlib import Path
 
 from sqlalchemy.engine import Engine
 
@@ -41,6 +48,10 @@ logger = logging.getLogger(__name__)
 
 # Столько же, сколько у основного движка (database.SQLITE_BUSY_TIMEOUT_SECONDS).
 BUSY_TIMEOUT_MS = 30_000
+
+# Копия делается в каталоге рядом с базой: `post_bot.db.backup-...`.
+# Пользовательские файлы с другими именами приложение не трогает.
+BACKUP_SUFFIX = ".backup-"
 
 _JOURNAL_DDL = (
     "CREATE TABLE IF NOT EXISTS schema_migrations ("
@@ -82,6 +93,10 @@ class MigrationError(RuntimeError):
 
 class IncompatibleSchemaError(MigrationError):
     """Схема базы несовместима с кодом (новее, изменена или с разрывом)."""
+
+
+class BackupError(MigrationError):
+    """Не удалось безопасно скопировать базу — миграцию начинать нельзя."""
 
 
 # --- Версия 1: минимальный фундамент справочника мест -----------------------
@@ -150,7 +165,32 @@ MIGRATION_1_USERS_PLACES = Migration(
     ),
 )
 
-DEFAULT_MIGRATIONS: tuple[Migration, ...] = (MIGRATION_1_USERS_PLACES,)
+# --- Версия 2: контакты места и состояние сценария «Места» -----------------
+
+MIGRATION_2_PLACE_CONTACTS_UI = Migration(
+    version=2,
+    name="place_contacts_and_ui_state",
+    statements=(
+        # Необязательные контакты для карточки; Stage 19B их только читает.
+        "ALTER TABLE places ADD COLUMN address TEXT",
+        "ALTER TABLE places ADD COLUMN url TEXT",
+        # Состояние Telegram-сценария выбора места хранится отдельно от
+        # WIP-поста в user_states. Ключ — Telegram user ID (интерфейсное
+        # состояние), payload ограничен фазой и выбранными id.
+        """
+        CREATE TABLE place_sessions (
+            telegram_user_id INTEGER NOT NULL PRIMARY KEY,
+            payload TEXT NOT NULL,
+            updated_at DATETIME NOT NULL
+        )
+        """,
+    ),
+)
+
+DEFAULT_MIGRATIONS: tuple[Migration, ...] = (
+    MIGRATION_1_USERS_PLACES,
+    MIGRATION_2_PLACE_CONTACTS_UI,
+)
 
 LATEST_VERSION = DEFAULT_MIGRATIONS[-1].version if DEFAULT_MIGRATIONS else 0
 
@@ -221,6 +261,139 @@ def _validate_journal(
             )
 
 
+def _open_source_connection(path: str) -> sqlite3.Connection:
+    """
+    Соединение с исходной базой для чтения/backup.
+
+    Сначала пробуем строго read-only URI: backup не должен менять рабочую
+    базу. Для WAL-базы после аварийного завершения может отсутствовать
+    `-shm`; в этом случае SQLite иногда не открывает файл только для чтения.
+    Тогда используется обычное соединение (оно не меняет пользовательские
+    данные, но позволяет SQLite корректно прочитать WAL).
+    """
+    uri = Path(path).resolve().as_uri() + "?mode=ro"
+    connection: sqlite3.Connection | None = None
+    try:
+        connection = sqlite3.connect(uri, uri=True, timeout=BUSY_TIMEOUT_MS / 1000)
+        connection.execute("SELECT count(*) FROM sqlite_master").fetchone()
+        return connection
+    except sqlite3.Error:
+        if connection is not None:
+            try:
+                connection.close()
+            except sqlite3.Error:
+                pass
+    return sqlite3.connect(path, timeout=BUSY_TIMEOUT_MS / 1000)
+
+
+def _has_pending_migrations(path: str, migrations: Sequence[Migration]) -> bool:
+    """
+    Есть ли что применять — без записи в базу.
+
+    Новый/пустой файл ещё не содержит пользовательских данных: копия не
+    нужна. Для существующей базы читаем только журнал; его отсутствие на
+    старой базе означает, что ожидают все миграции.
+    """
+    try:
+        if not os.path.exists(path) or os.path.getsize(path) == 0:
+            return False
+        connection = _open_source_connection(path)
+        try:
+            journal_exists = connection.execute(
+                "SELECT 1 FROM sqlite_master "
+                "WHERE type='table' AND name='schema_migrations'"
+            ).fetchone()
+            if journal_exists is None:
+                return bool(migrations)
+            row = connection.execute(
+                "SELECT count(*) FROM schema_migrations"
+            ).fetchone()
+            applied = int(row[0]) if row is not None else 0
+            return applied < len(migrations)
+        finally:
+            connection.close()
+    except (sqlite3.Error, OSError) as exc:
+        raise BackupError(
+            "Не удалось прочитать состояние базы перед миграцией, поэтому "
+            f"безопасная резервная копия невозможна: {exc}"
+        ) from exc
+
+
+def _backup_destination(path: str) -> Path:
+    """Уникальное имя рядом с базой; существующие файлы не перезаписываются."""
+    base = Path(path)
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
+    candidate = base.with_name(f"{base.name}{BACKUP_SUFFIX}{stamp}-p{os.getpid()}")
+    counter = 1
+    while candidate.exists():
+        candidate = base.with_name(
+            f"{base.name}{BACKUP_SUFFIX}{stamp}-p{os.getpid()}-{counter}"
+        )
+        counter += 1
+    return candidate
+
+
+def create_database_backup(path: str) -> Path:
+    """
+    Создаёт согласованную копию SQLite через Backup API.
+
+    Прямое копирование только основного файла при WAL потеряло бы последние
+    зафиксированные транзакции. `Connection.backup()` читает базу как SQLite,
+    включая WAL, и создаёт цельный снимок. Копия сначала пишется во временный
+    файл, проверяется `PRAGMA integrity_check` и только затем атомарно
+    переименовывается. Готовые копии никогда не удаляются.
+    """
+    source_path = Path(path)
+    temp_name: str | None = None
+    source: sqlite3.Connection | None = None
+    target: sqlite3.Connection | None = None
+    try:
+        if not source_path.exists() or source_path.stat().st_size == 0:
+            raise BackupError(f"Нет базы для копирования: {path}")
+        destination = _backup_destination(path)
+        fd, temp_name = tempfile.mkstemp(
+            prefix=f"{source_path.name}.backup-tmp-", dir=str(source_path.parent)
+        )
+        os.close(fd)
+        # Не удаляем файл: mkstemp сразу создал его с правами 0600. SQLite
+        # открывает пустой файл как пустую базу и пишет копию уже без окна,
+        # в котором файл мог бы получить более широкие права.
+        source = _open_source_connection(path)
+        target = sqlite3.connect(
+            temp_name,
+            timeout=BUSY_TIMEOUT_MS / 1000,
+            isolation_level=None,
+        )
+        source.backup(target)
+        row = target.execute("PRAGMA integrity_check").fetchone()
+        if row is None or str(row[0]).lower() != "ok":
+            raise BackupError("Резервная копия не прошла проверку целостности SQLite.")
+        target.close()
+        target = None
+        source.close()
+        source = None
+        os.chmod(temp_name, 0o600)
+        os.replace(temp_name, destination)
+    except BackupError:
+        raise
+    except Exception as exc:
+        raise BackupError(
+            f"Не удалось создать резервную копию перед миграцией: {exc}"
+        ) from exc
+    finally:
+        if target is not None:
+            target.close()
+        if source is not None:
+            source.close()
+        if temp_name is not None and os.path.exists(temp_name):
+            try:
+                os.unlink(temp_name)
+            except OSError:
+                logger.warning("Не удалось удалить временный файл копии %s", temp_name)
+    logger.info("Создана резервная копия базы перед миграцией: %s", destination)
+    return destination
+
+
 def run_migrations(
     engine: Engine,
     migrations: Sequence[Migration] = DEFAULT_MIGRATIONS,
@@ -239,6 +412,11 @@ def run_migrations(
     """
     _validate_migrations(migrations)
     path = _sqlite_file_path(engine)
+
+    # Защита пользовательских данных: копия создаётся ДО первой блокировки
+    # и любой DDL. Если копию сделать нельзя, миграция не начинается.
+    if _has_pending_migrations(path, migrations):
+        create_database_backup(path)
 
     connection = sqlite3.connect(
         path,
