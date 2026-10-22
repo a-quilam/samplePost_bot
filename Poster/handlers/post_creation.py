@@ -419,6 +419,9 @@ async def start_post_creation(
     if query is not None:
         # вход по inline-кнопке «✏️ Создать пост»: спиннер не должен висеть
         await query.answer()
+    # навигация сообщением ниже экрана → первый шаг рядом с вводом
+    # (Stage 16, дефект №7; callback — guard-пропуск)
+    await screen.reanchor_screen(update, context)
     logger.info("Начало создания поста.")
     await _save_wip_before_exit(update, context)
     user_data = ctx.data(context)
@@ -1942,6 +1945,9 @@ async def cancel_creation(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     Статус отмены — на экране управления; сообщение команды /cancel —
     временный ввод, удаляется best-effort.
     """
+    # навигация сообщением ниже экрана → статус рядом с вводом
+    # (Stage 16, дефект №7; callback — guard-пропуск)
+    await screen.reanchor_screen(update, context)
     await _save_wip_before_exit(update, context)
     user_data = ctx.data(context)
     if screen.screen_ref(user_data) is None:

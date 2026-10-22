@@ -191,6 +191,9 @@ async def view_drafts(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     после того, как список показан на экране (в callback-контексте
     drop_user_input ничего не делает).
     """
+    # навигация сообщением ниже экрана → список рядом с вводом
+    # (Stage 16, дефект №7; callback — guard-пропуск)
+    await screen.reanchor_screen(update, context)
     await _render_drafts_screen(update, context)
     await screen.drop_user_input(update, context)
 

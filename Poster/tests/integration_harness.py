@@ -652,7 +652,11 @@ class Harness:
         экран рядом с вводом). В обычных тестах id небольшие и re-anchor
         не срабатывает — намеренно, чтобы не менять поведение старых сценариев.
         """
-        base = max(self.screen_message_id() or 0, 100)
+        base = max(
+            self.screen_message_id() or 0,
+            getattr(self.bot, "_next_message_id", 0),
+            100,
+        )
         self._below_seq += 1
         return await self.text(text, message_id=base + self._below_seq, **kwargs)
 

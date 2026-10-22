@@ -365,3 +365,44 @@ def save_screen_ref(user_id: int, user_data: dict, chat_id: int) -> None:
     """
     _ref, payload = load_state(user_id)
     save_state(user_id, user_data, chat_id, payload)
+
+
+async def reanchor_screen(update: Any, context: ContextTypes.DEFAULT_TYPE) -> bool:
+    """
+    Пересоздаёт экран рядом с вводом пользователя (Stage 16, дефект №7).
+
+    Вызывается при навигации ПОЛЬЗОВАТЕЛЬСКИМ СООБЩЕНИЕМ (команда или текст
+    кнопки меню): сообщение-экран остаётся ВЫШЕ по чату, чем ввод, и ответ
+    бота пользователь не видит. Перед отрисовкой нового экрана старое
+    сообщение удаляется best-effort, ref очищается в user_data и в БД
+    (WIP-payload сохраняется) — следующий render_screen создаёт НОВОЕ
+    сообщение уже рядом с последним вводом пользователя.
+
+    Callback-навигация (кнопки на экране) и сообщения НЕ новее экрана
+    не пересоздают экран: он и так рядом с вводом — ничего не делается.
+    Удаление best-effort: отказ Telegram не прерывает навигацию.
+    """
+    user_data = ctx.data(context)
+    ref = screen_ref(user_data)
+    if ref is None:
+        # после рестарта процесса ref известен только БД — восстанавливаем
+        ref = hydrate_screen_ref(user_data, ctx.user(update).id)
+    if ref is None:
+        return False
+    if getattr(update, "callback_query", None) is not None:
+        return False  # кнопки нажаты на самом экране — он и так рядом
+    message = getattr(update, "effective_message", None)
+    if message is None or message.message_id <= ref["message_id"]:
+        return False  # сообщение не новее экрана — пересоздание не нужно
+
+    await cleanup_messages(context.bot, ref["chat_id"], [ref["message_id"]])
+    user_data.pop("screen", None)
+    try:
+        # ref в БД очищается с сохранением WIP-payload (отказ БД best-effort)
+        user_id = ctx.user(update).id
+        _ref, payload = load_state(user_id)
+        save_state(user_id, user_data, ref["chat_id"], payload)
+    except Exception as e:  # noqa: BLE001 — навигация не должна прерываться
+        logger.info(f"Не удалось очистить ref экрана в БД ({e}) — продолжаем.")
+    logger.info("Экран пересоздаётся рядом с вводом пользователя.")
+    return True

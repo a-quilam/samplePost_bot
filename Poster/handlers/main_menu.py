@@ -59,6 +59,10 @@ async def render_main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     снимок незавершённого поста (рестарт прервал диалог) — в меню добавляется
     кнопка «▶️ Продолжить пост».
     """
+    # навигация пользовательским сообщением → старый экран удаляется,
+    # новый создаётся рядом с вводом (Stage 16, дефект №7); callback —
+    # guard-пропуск, кнопки и так на экране
+    await screen.reanchor_screen(update, context)
     user_data = ctx.data(context)
     user_id = ctx.user(update).id
     if screen.screen_ref(user_data) is None:
@@ -114,6 +118,8 @@ def help_text() -> str:
 
 async def render_help(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Справка на экране управления (с возвратом в главное меню)."""
+    # навигация сообщением ниже экрана → новый экран рядом с вводом
+    await screen.reanchor_screen(update, context)
     keyboard = InlineKeyboardMarkup(
         [[InlineKeyboardButton("◀️ Главное меню", callback_data="main_menu")]]
     )
@@ -151,6 +157,8 @@ async def cancel_without_dialog(
     update: Update, context: ContextTypes.DEFAULT_TYPE
 ) -> None:
     """/cancel без активного диалога: раньше попадал в «Неизвестная команда»."""
+    # навигация сообщением ниже экрана → новый экран рядом с вводом
+    await screen.reanchor_screen(update, context)
     user_data = ctx.data(context)
     if screen.screen_ref(user_data) is None:
         screen.hydrate_screen_ref(user_data, ctx.user(update).id)
@@ -171,6 +179,8 @@ async def outside_dialog_hint(
     обслуживает сам.
     """
     message = ctx.message(update)
+    # навигация сообщением ниже экрана → подсказка рядом с вводом
+    await screen.reanchor_screen(update, context)
     user_data = ctx.data(context)
     if screen.screen_ref(user_data) is None:
         screen.hydrate_screen_ref(user_data, ctx.user(update).id)
