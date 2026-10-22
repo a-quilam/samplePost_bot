@@ -3,7 +3,17 @@
 import json
 from datetime import datetime, timezone
 
-from sqlalchemy import DateTime, Integer, String, Text
+from sqlalchemy import (
+    CheckConstraint,
+    DateTime,
+    ForeignKey,
+    Index,
+    Integer,
+    String,
+    Text,
+    UniqueConstraint,
+    text,
+)
 from sqlalchemy.orm import Mapped, mapped_column
 
 from base import Base  # Импортируем Base из base.py
@@ -87,6 +97,124 @@ class UserState(Base):
         return (
             f"<UserState(user_id={self.user_id}, "
             f"screen_message_id={self.screen_message_id})>"
+        )
+
+
+# --- Справочник мест: пользователи и места (Stage 19A) -----------------------
+
+
+class User(Base):
+    """
+    Участник бота, известный локальной базе.
+
+    `id` — внутренний суррогатный ключ для будущих связей (администраторы
+    мест, владельцы шаблонов и кирпичиков). `telegram_user_id` — постоянный
+    идентификатор Telegram, единственный внешний идентификатор пользователя:
+    username меняется и не является ключом.
+    """
+
+    __tablename__ = "users"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    telegram_user_id: Mapped[int] = mapped_column(Integer, nullable=False, unique=True)
+    username: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    full_name: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime, default=utcnow, nullable=False
+    )
+    updated_at: Mapped[datetime | None] = mapped_column(
+        DateTime, default=utcnow, onupdate=utcnow, nullable=True
+    )
+    last_seen_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+
+    def __repr__(self) -> str:
+        return (
+            f"<User(id={self.id}, telegram_user_id={self.telegram_user_id}, "
+            f"username={self.username})>"
+        )
+
+
+class Place(Base):
+    """
+    Место справочника (Stage 19A).
+
+    Названия живут отдельно (`place_names`): каноническое — строка с
+    `is_canonical=1`, альтернативные появятся на следующем этапе справочника.
+    Администратор и стандартный шаблон появятся отдельными таблицами на
+    следующих этапах.
+    """
+
+    __tablename__ = "places"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    created_by_user_id: Mapped[int | None] = mapped_column(
+        Integer,
+        ForeignKey("users.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime, default=utcnow, nullable=False
+    )
+
+    def __repr__(self) -> str:
+        return f"<Place(id={self.id}, created_by={self.created_by_user_id})>"
+
+
+class PlaceName(Base):
+    """
+    Название места: каноническое или (в будущем) альтернативное.
+
+    Ограничения БД:
+    - `name` и `name_search` не пустые после trim (CHECK);
+    - `is_canonical` — только 0/1;
+    - в одном месте не бывает двух одинаковых нормализованных названий
+      (UNIQUE `place_id` + `name_search`);
+    - у места не больше одного канонического названия (частичный
+      уникальный индекс). Наличие хотя бы одного названия обеспечивает
+      прикладной слой (`place_store.create_place`), а не триггер.
+    """
+
+    __tablename__ = "place_names"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    place_id: Mapped[int] = mapped_column(
+        Integer,
+        ForeignKey("places.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    name: Mapped[str] = mapped_column(Text, nullable=False)
+    name_search: Mapped[str] = mapped_column(Text, nullable=False, index=True)
+    is_canonical: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    created_by_user_id: Mapped[int | None] = mapped_column(
+        Integer,
+        ForeignKey("users.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime, default=utcnow, nullable=False
+    )
+
+    __table_args__ = (
+        CheckConstraint("length(trim(name)) > 0", name="ck_place_names_name_not_empty"),
+        CheckConstraint(
+            "length(trim(name_search)) > 0", name="ck_place_names_search_not_empty"
+        ),
+        CheckConstraint("is_canonical IN (0, 1)", name="ck_place_names_is_canonical"),
+        UniqueConstraint("place_id", "name_search", name="uq_place_names_place_search"),
+        Index(
+            "ux_place_names_one_canonical",
+            "place_id",
+            unique=True,
+            sqlite_where=text("is_canonical = 1"),
+        ),
+    )
+
+    def __repr__(self) -> str:
+        return (
+            f"<PlaceName(id={self.id}, place_id={self.place_id}, "
+            f"name={self.name}, canonical={self.is_canonical})>"
         )
 
 
