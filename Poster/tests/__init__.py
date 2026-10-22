@@ -29,13 +29,10 @@ if not os.environ.get("TELEGRAM_BOT_TOKEN"):
 
 # Настоящий post_bot.db тестам недоступен ВООБЩЕ: unit-тесты зовут
 # обработчики напрямую (без интеграционного каркаса) и могут дойти до
-# записи состояния (sync_wip → screen.save_state). DATABASE_URL
-# направляется в одноразовый файл во временном каталоге — реальная БД
-# пользователя не изменяется никогда. Тесты, которым важен путь БД
-# (test_stage12_db_path), работают в subprocess с явным DATABASE_URL
-# и от этой настройки не зависят.
-if not os.environ.get("DATABASE_URL"):
-    _TEST_DB_DIR = tempfile.mkdtemp(prefix="poster-test-db-")
-    os.environ["DATABASE_URL"] = "sqlite:///" + os.path.join(
-        _TEST_DB_DIR, "test_bot.db"
-    )
+# записи состояния (sync_wip → screen.save_state). DATABASE_URL ВСЕГДА
+# перенаправляется в одноразовый файл во временном каталоге — даже если
+# разработчик экспортировал DATABASE_URL на рабочую базу. Тесты, которым
+# важен путь БД (test_stage12_db_path, smoke Stage 13), работают в
+# subprocess с явным DATABASE_URL и от этой настройки не зависят.
+_TEST_DB_DIR = tempfile.mkdtemp(prefix="poster-test-db-")
+os.environ["DATABASE_URL"] = "sqlite:///" + os.path.join(_TEST_DB_DIR, "test_bot.db")
