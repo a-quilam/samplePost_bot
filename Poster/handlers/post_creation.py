@@ -197,6 +197,9 @@ def _clear_post_data(user_data: dict) -> None:
         "editing_draft_id",
         "edit_field",
         "temp_messages",
+        # Неудачный ввод текущего сценария: после завершения/сохранения
+        # поста его сообщения больше не относятся к сценарию — не трогаем
+        "failed_input_messages",
         # превью забывается, но НЕ удаляется: его удаление — явное решение
         # на завершение цикла (коммит F), здесь — только сброс ссылок
         "preview_messages",
@@ -536,6 +539,15 @@ def _wip_payload(user_data: dict) -> dict:
     # Прогресс частичной отправки готового поста: повторная попытка после
     # рестарта досылает только недостаающее (Stage 12, §6)
     payload["post_delivery"] = dict(user_data.get("post_delivery") or {})
+    # Идентификаторы неудачного ввода текущего сценария (Stage 16, дефект №1):
+    # после рестарта они продолжают удаляться при принятии корректного значения
+    failed = user_data.get("failed_input_messages")
+    if isinstance(failed, dict) and failed:
+        payload["failed_input_messages"] = {
+            str(key): [int(mid) for mid in (ids or [])]
+            for key, ids in failed.items()
+            if ids
+        }
     return payload
 
 
@@ -562,6 +574,14 @@ def _restore_wip_payload(user_data: dict, payload: dict) -> None:
         ]
     if isinstance(payload.get("post_delivery"), dict) and payload["post_delivery"]:
         user_data["post_delivery"] = dict(payload["post_delivery"])
+    failed = payload.get("failed_input_messages")
+    if isinstance(failed, dict) and failed:
+        # Идентификаторы неудачного ввода переживают рестарт (Stage 16)
+        user_data["failed_input_messages"] = {
+            str(key): [int(mid) for mid in (ids or [])]
+            for key, ids in failed.items()
+            if ids
+        }
 
 
 def sync_wip(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
@@ -579,6 +599,33 @@ def sync_wip(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
     return screen.save_state(
         ctx.user(update).id, user_data, ctx.chat(update).id, payload
     )
+
+
+async def _accept_input(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+    field_key: str,
+    *,
+    drop_input: bool = True,
+) -> None:
+    """
+    Поле надёжно сохранено → убираются НЕУДАЧНЫЕ вводы этого поля и сам
+    текущий ввод пользователя (Stage 16, дефект №1).
+
+    Вызывается ТОЛЬКО после того, как состояние подтверждённо записано
+    в БД (sync_wip/review_post вернули True): при сбое сохранения ничего
+    не удаляется преждевременно. Удаление best-effort — отказ Telegram
+    не ломает диалог (сообщение просто остаётся в чате).
+
+    drop_input=False — для путей, где исходное сообщение пользователя уже
+    уходит в очистку отдельно (фото — через cleanup_temps).
+    """
+    user_data = ctx.data(context)
+    stale = screen.forget_failed_inputs(user_data, field_key)
+    if stale:
+        await screen.cleanup_messages(context.bot, ctx.chat(update).id, stale)
+    if drop_input:
+        await screen.drop_user_input(update, context)
 
 
 def _filled_summary(user_data: dict) -> str:
@@ -714,7 +761,11 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             valid = not step["validator"] or step["validator"](text)
         if not valid:
             # Ошибка — на том же экране; сообщение пользователя НЕ удаляется
-            # (оно может содержать полезный ввод для исправления)
+            # (пользователь видит, что именно не получилось), но его id
+            # запоминается: уйдет в очистку после принятия поля (Stage 16)
+            screen.track_failed_input(
+                ctx.data(context), step["key"], ctx.message(update)
+            )
             await _render_step_screen(
                 update,
                 context,
@@ -734,10 +785,19 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
                     await screen.cleanup_temps(
                         context, ctx.chat(update).id, ctx.data(context)
                     )
+                    # фото принято: текстовые попытки «введите изображение»
+                    # этого же этапа уходят в очистку (Stage 16); сам снимок
+                    # уже убран cleanup_temps — повторно не трогаем
+                    await _accept_input(
+                        update, context, "image", drop_input=False
+                    )
                 await review_post(update, context)
                 # Остаёмся в POST_CREATION, чтобы кнопки действий после обзора работали
                 return POST_CREATION
             else:
+                screen.track_failed_input(
+                    ctx.data(context), "image", ctx.message(update)
+                )
                 await _render_step_screen(
                     update,
                     context,
@@ -765,8 +825,13 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     ctx.data(context)["current_step"] += 1
     if await prompt_step(update, context):
         # поле подтверждённо сохранено (user_data + снимок WIP в БД) —
-        # временное сообщение ввода убирается из чата best-effort
-        await screen.drop_user_input(update, context)
+        # убираются неудачные попытки этого поля и само сообщение ввода
+        await _accept_input(update, context, step["key"])
+    else:
+        # сохранение не подтверждено → сообщение ввода НЕ удаляется, но его
+        # id запоминается: уйдёт в очистку при следующем успешном принятии
+        # поля (Stage 16, дефект №1)
+        screen.track_failed_input(ctx.data(context), step["key"], ctx.message(update))
     return POST_CREATION
 
 
@@ -786,7 +851,9 @@ async def handle_skip(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int
     logger.info(f"Пользователь пропустил поле '{step['key']}'.")
 
     ctx.data(context)["current_step"] += 1
-    await prompt_step(update, context)
+    if await prompt_step(update, context):
+        # пропуск — решение по полю: неудачные попытки этого поля убираются
+        await _accept_input(update, context, step["key"])
     return POST_CREATION
 
 
@@ -977,6 +1044,9 @@ async def handle_callback_query(
                 await screen.cleanup_temps(
                     context, ctx.chat(update).id, ctx.data(context)
                 )
+                # фото принято: текстовые попытки этого этапа уходят
+                # в очистку (Stage 16, дефект №1)
+                await _accept_input(update, context, "image")
             await prompt_step(update, context)
         else:
             # Устаревшая кнопка после завершения сбора: напоминаем про
@@ -1601,8 +1671,12 @@ async def process_edit(update: Update, context: ContextTypes.DEFAULT_TYPE) -> in
         logger.info(f"Пользователь пропустил обновление поля '{field}'.")
         synced = await review_post(update, context)
         if synced:
-            # пропуск принят и сохранён → временное сообщение ввода убираем
-            await screen.drop_user_input(update, context)
+            # пропуск принят и сохранён → убираются неудачные попытки поля
+            # и само сообщение ввода (Stage 16, дефект №1)
+            await _accept_input(update, context, field)
+        else:
+            # сохранение не подтверждено → сообщение остаётся до него
+            screen.track_failed_input(user_data, field, message)
         # Возвращаемся в POST_CREATION: кнопки действий должны остаться рабочими
         return POST_CREATION
 
@@ -1613,7 +1687,9 @@ async def process_edit(update: Update, context: ContextTypes.DEFAULT_TYPE) -> in
     else:
         valid = not step["validator"] or step["validator"](text)
     if not valid:
-        # Ошибка ввода — обновлением экрана, новых сообщений не накапливается
+        # Ошибка ввода — обновлением экрана, новых сообщений не накапливается;
+        # id неудачного сообщения запоминается до принятия поля (Stage 16)
+        screen.track_failed_input(user_data, field, message)
         await _render_edit_prompt(
             update, context, step, error=f"Некорректный формат. {step['prompt']}"
         )
@@ -1622,6 +1698,7 @@ async def process_edit(update: Update, context: ContextTypes.DEFAULT_TYPE) -> in
 
     if field == "image":
         if not message.photo:
+            screen.track_failed_input(user_data, "image", message)
             await _render_edit_prompt(
                 update,
                 context,
@@ -1670,9 +1747,16 @@ async def process_edit(update: Update, context: ContextTypes.DEFAULT_TYPE) -> in
         if field == "image":
             # file_id сохранён → исходник фото уходит в очистку best-effort
             await screen.cleanup_temps(context, ctx.chat(update).id, user_data)
+            # неудачные текстовые попытки этапа — в очистку; снимок уже убран
+            await _accept_input(update, context, field, drop_input=False)
         else:
-            # поле подтверждённо сохранено → временное сообщение ввода убираем
-            await screen.drop_user_input(update, context)
+            # поле подтверждённо сохранено → неудачные попытки поля и сообщение
+            # ввода убираются best-effort (Stage 16, дефект №1)
+            await _accept_input(update, context, field)
+    elif field != "image":
+        # сохранение не подтверждено → сообщение ввода НЕ удаляется, но его
+        # id запоминается до следующего успешного принятия поля
+        screen.track_failed_input(user_data, field, message)
     return POST_CREATION
 
 
@@ -1687,7 +1771,11 @@ async def handle_skip_edit(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     if field:
         _apply_skip(ctx.data(context), str(field))
         logger.info(f"Пользователь пропустил обновление поля '{field}'.")
-    await review_post(update, context)
+    synced = await review_post(update, context)
+    if synced and field:
+        # пропуск — решение по полю: неудачные попытки поля убираются
+        # best-effort (Stage 16, дефект №1)
+        await _accept_input(update, context, str(field))
     return POST_CREATION
 
 
@@ -1704,6 +1792,8 @@ async def finish_photo_edit(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     if synced:
         # все file_id сохранены и сбор завершён → исходники альбома удаляются
         await screen.cleanup_temps(context, ctx.chat(update).id, ctx.data(context))
+        # и неудачные текстовые попытки этапа изображения уходят в очистку
+        await _accept_input(update, context, "image")
     return POST_CREATION
 
 

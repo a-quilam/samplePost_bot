@@ -114,6 +114,40 @@ def track_temp(user_data: dict, message: Message | None) -> None:
         temps.append(message.message_id)
 
 
+def track_failed_input(
+    user_data: dict, field_key: str, message: Message | None
+) -> None:
+    """
+    Запоминает НЕУДАЧНЫЙ ввод пользователя по полю (Stage 16, дефект №1).
+
+    Сообщение остаётся в чате, пока пользователь видит ошибку; его id
+    хранится в состоянии текущего сценария (user_data + снимок WIP) и
+    удаляется, когда поле будет надёжно принято (см. forget_failed_inputs).
+    """
+    if message is None or not hasattr(message, "message_id"):
+        return
+    failed: dict = user_data.setdefault("failed_input_messages", {})
+    ids: list = failed.setdefault(str(field_key), [])
+    if message.message_id not in ids:
+        ids.append(message.message_id)
+
+
+def forget_failed_inputs(user_data: dict, field_key: str) -> list[int]:
+    """
+    Забирает и сбрасывает id неудачных вводов поля (значение принято).
+
+    Возвращает ids для удаления best-effort; пустой список — если неудач
+    не было. Вызывается ТОЛЬКО после подтверждённого сохранения состояния.
+    """
+    failed = user_data.get("failed_input_messages")
+    if not isinstance(failed, dict):
+        return []
+    ids = failed.pop(str(field_key), None) or []
+    if not failed:
+        user_data.pop("failed_input_messages", None)
+    return [int(mid) for mid in ids]
+
+
 def track_preview(user_data: dict, message_ids: list[int]) -> None:
     """
     Запоминает сообщения текущего превью (текст/фото/альбом). Превью —
