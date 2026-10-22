@@ -735,17 +735,23 @@ class PhotoGuardTests(_InMemoryDbMixin, unittest.TestCase):
         self.assertEqual(user_data["current_step"], 0)
         self.assertNotIn("photos", user_data)
 
-    def test_photo_at_preview_points_to_edit_button(self):
+    def test_photo_at_preview_updates_preview_with_photo(self):
+        # Stage 16 (дефект №5): фото на превью принимается в набор,
+        # превью обновляется — «добавление ещё одной фотографии» работает
         user_data = {"current_step": len(POST_STEPS)}
         bot = RecordingBot()
         context = SimpleNamespace(user_data=user_data, bot=bot)
         update = make_message_update(photo=[SimpleNamespace(file_id="f1")])
 
-        asyncio.run(handle_photo(update, context))
+        result = asyncio.run(handle_photo(update, context))
 
-        screens = [c for c in bot.calls if c.get("disable_web_page_preview")]
-        self.assertTrue(screens, "подсказка должна появиться на экране")
-        self.assertIn("Редактировать", screens[-1]["text"])
+        self.assertEqual(result, POST_CREATION)
+        self.assertEqual(user_data["photos"], ["f1"])
+        self.assertEqual(user_data["image"], "f1")
+        self.assertEqual(user_data["current_step"], len(POST_STEPS))
+        photos = [c for c in bot.calls if c["type"] == "photo"]
+        self.assertTrue(photos, "превью должно отправиться с фото")
+        self.assertEqual(photos[-1]["photo"], "f1")
 
     def test_photo_during_other_field_edit_keeps_value(self):
         user_data = {"edit_field": "title", "title": "Концерт"}

@@ -193,6 +193,7 @@ def _clear_post_data(user_data: dict) -> None:
         "photos",
         "formats",
         "pending_media",
+        "finished_media",
         "last_rejected_media",
         "editing_draft_id",
         "edit_field",
@@ -219,6 +220,7 @@ def _apply_skip(user_data: dict, key: str) -> None:
         user_data["image"] = None
         user_data["photos"] = []
         user_data.pop("pending_media", None)
+        user_data.pop("finished_media", None)
         # собранные исходники альбома в очистку НЕ уходят: их данные
         # отброшены, трекинг снимается — сообщения остаются в чате
         user_data.pop("temp_messages", None)
@@ -270,13 +272,19 @@ def _store_text_field(
         _set_field_html(user_data, key, None)
 
 
-def _store_photo(user_data: dict, message: Message) -> str:
+def _store_photo(user_data: dict, message: Message, *, replace_existing: bool = False) -> str:
     """
     Сохраняет фотографию в user_data (одиночное фото или альбом).
     Возвращает состояние записи:
       "continued" — фото добавлено в уже начатый альбом (молча),
       "started"   — начат новый альбом (нужна кнопка «✅ Фото готово»),
-      "single"    — одиночное фото (готово к превью).
+      "single"    — одиночное фото.
+
+    Визард (replace_existing=False) НАКАПЛИВАЕТ набор: одиночная
+    фотография, альбом и второй альбом добавляются к уже собранным
+    (Stage 16, дефект №5) — ничего не теряется из-за порядка отправки.
+    Правка поля «Изображение» (replace_existing=True) заменяет набор
+    новым: редактирование — это осознанная замена значения поля.
     """
     file_id = message.photo[-1].file_id
     media_group_id = message.media_group_id
@@ -285,12 +293,20 @@ def _store_photo(user_data: dict, message: Message) -> str:
         return "continued"
     if media_group_id:
         user_data["pending_media"] = media_group_id
-        user_data["photos"] = [file_id]
-        user_data["image"] = file_id
+        if replace_existing:
+            user_data["photos"] = [file_id]
+        else:
+            user_data.setdefault("photos", []).append(file_id)
+        user_data["image"] = user_data["photos"][0]
         return "started"
-    user_data["photos"] = [file_id]
-    user_data["image"] = file_id
-    user_data.pop("pending_media", None)
+    if replace_existing:
+        user_data["photos"] = [file_id]
+        user_data.pop("pending_media", None)
+        user_data.pop("finished_media", None)
+    else:
+        user_data.setdefault("photos", []).append(file_id)
+        # открытый альбом продолжает принимать фото: одиночка его не закрывает
+        user_data["image"] = user_data["photos"][0]
     return "single"
 
 
@@ -531,6 +547,7 @@ def _wip_payload(user_data: dict) -> dict:
     payload["editing_draft_id"] = user_data.get("editing_draft_id")
     payload["edit_field"] = user_data.get("edit_field")
     payload["pending_media"] = user_data.get("pending_media")
+    payload["finished_media"] = user_data.get("finished_media")
     # Сообщения текущего превью: превью, показанное до рестарта, должно
     # заменяться, а не копиться (Stage 12, §6 — «превью не накапливаются»)
     payload["preview_messages"] = [
@@ -568,6 +585,8 @@ def _restore_wip_payload(user_data: dict, payload: dict) -> None:
         user_data["edit_field"] = payload["edit_field"]
     if payload.get("pending_media"):
         user_data["pending_media"] = payload["pending_media"]
+    if payload.get("finished_media"):
+        user_data["finished_media"] = payload["finished_media"]
     if payload.get("preview_messages"):
         user_data["preview_messages"] = [
             int(mid) for mid in payload["preview_messages"]
@@ -907,17 +926,22 @@ async def _render_photo_rejection(
 
 async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     """
-    Приём фотографий на шаге изображения.
+    Приём фотографий: шаг изображения и дополнение показанного превью.
 
-    Одиночная фотография — сразу к превью (прежнее поведение).
-    Медиа-группа (альбом) приходит отдельными сообщениями с одним
-    media_group_id: первое показывает кнопку «✅ Фото готово», остальные
-    молча добавляются в список. Шаг завершается кнопкой — без таймеров
-    и гонок с кнопками «Сохранить в черновики»/«Готово».
+    Визард НАКАПЛИВАЕТ набор (Stage 16, дефект №5): одиночная фотография,
+    альбом, второй альбом и отдельные снимки подряд складываются в ОДИН
+    список file_id — порядок отправки ничего не теряет. Этап изображения
+    завершается кнопкой «✅ Фото готово»; одиночное фото при ПУСТОМ наборе
+    сразу показывает превью (прежнее поведение).
 
-    Исходники фото — временные сообщения: удаляются ТОЛЬКО после того, как
-    все file_id сохранены и сбор альбома завершён кнопкой. Отклонённые фото
-    (не на шаге изображения) не сохраняются — и не удаляются.
+    Превью принимает новые фото: одиночное фото добавляется и превью
+    обновляется; новый альбом начинает сбор (кнопка «✅ Фото готово»).
+    Запоздавшие фото ЗАВЕРШЁННОГО альбома (гонка с кнопкой «Фото готово»)
+    не меняют данные поста — уходят в объяснение (правило Stage 9).
+
+    Исходники фото — временные сообщения: удаляются ТОЛЬКО после того,
+    как все file_id сохранены и сбор завершён. Отклонённые фото не
+    сохраняются — и не удаляются.
     """
     message = ctx.message(update)
     if not message.photo:
@@ -930,25 +954,27 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> in
         step_index < len(POST_STEPS) and POST_STEPS[step_index]["key"] == "image"
     )
 
-    # Продолжение уже начатой медиа-группы — только пока активен шаг
-    # изображения: добавляем молча, не спамим подтверждениями на каждое фото.
-    # После «✅ Фото готово» (шаг завершён) запоздавшие фото того же альбома
-    # НЕ меняют данные поста — иначе финальный пост содержал бы больше фото,
-    # чем показано в превью. Такие фото уходят в общую ветку отклонения ниже.
-    if (
-        media_group_id
-        and at_image_step
-        and user_data.get("pending_media") == media_group_id
-    ):
+    # Продолжение уже начатого альбома — молча добавляем, не спамим
+    # подтверждениями на каждое фото (и на шаге изображения, и на превью)
+    if media_group_id and user_data.get("pending_media") == media_group_id:
         user_data.setdefault("photos", []).append(message.photo[-1].file_id)
-        # file_id принят → исходник уйдёт в очистку вместе с альбомом
         screen.track_temp(user_data, message)
         return POST_CREATION
 
-    if not at_image_step:
-        # Фото вне шага изображения: НЕ теряем молча — объясняем, где менять
-        # фото. Альбом отвечаем ОДНИМ рендером экрана: без дедупликации каждое
-        # фото альбома породило бы свой промпт (спам в чат).
+    # Гонка с кнопкой «✅ Фото готово»: фото ЗАВЕРШЁННОГО альбома не меняет
+    # уже подтверждённый набор — иначе итог содержал бы больше фото, чем
+    # показано в превью (правило Stage 9, тесты 18/cleanup)
+    if media_group_id and user_data.get("finished_media") == media_group_id:
+        if user_data.get("last_rejected_media") == media_group_id:
+            return POST_CREATION
+        user_data["last_rejected_media"] = media_group_id
+        await _render_photo_rejection(update, context)
+        return POST_CREATION
+
+    if not at_image_step and step_index < len(POST_STEPS):
+        # Шаг текстового поля: фото к нему не относится — НЕ теряем молча,
+        # объясняем, где менять фото. Альбом отвечаем ОДНИМ рендером экрана
+        # (без дедупликации каждое фото альбома породило бы свой промпт).
         if media_group_id:
             if user_data.get("last_rejected_media") == media_group_id:
                 return POST_CREATION
@@ -956,8 +982,13 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> in
         await _render_photo_rejection(update, context)
         return POST_CREATION
 
+    # Шаг изображения ИЛИ состояние «превью показано»: набор накапливается
+    at_preview = not at_image_step
+    had_photos = bool(user_data.get("photos"))
     state = _store_photo(user_data, message)
     screen.track_temp(user_data, message)
+    if state == "continued":
+        return POST_CREATION
     if state == "started":
         await screen.render_screen(
             context,
@@ -969,14 +1000,38 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> in
         )
         logger.info(f"Начат сбор медиа-группы {media_group_id}.")
         return POST_CREATION
-    if state == "single":
-        # Одиночная фотография — как раньше: сразу к превью. file_id
-        # сохранён → снимок WIP в БД → исходники можно удалять.
-        user_data["current_step"] += 1
+
+    # state == "single"
+    if at_preview:
+        # превью уже показано → фото добавлено в набор, превью обновляется
+        # (после подтверждённого сохранения снимка WIP снимки можно удалять)
         if sync_wip(update, context):
             await screen.cleanup_temps(context, ctx.chat(update).id, user_data)
         await review_post(update, context)
-    # "continued" — запоздавшее фото альбома уже добавлено в список
+        return POST_CREATION
+
+    if had_photos:
+        # набор уже собран (например, альбом завершён, шаг вернули «Назад»):
+        # одиночка добавлена — этап завершается кнопкой «✅ Фото готово»
+        await screen.render_screen(
+            context,
+            user_data,
+            ctx.chat(update).id,
+            "📷 Фотографии добавлены к набору. Нажмите «✅ Фото готово», "
+            "когда закончите.",
+            get_media_done_keyboard(),
+        )
+        return POST_CREATION
+    if user_data.get("pending_media"):
+        return POST_CREATION  # открытый альбом продолжает собираться
+
+    # первое фото → сразу к превью (прежнее поведение одиночки):
+    # file_id принят → снимок WIP в БД → исходники можно удалять
+    user_data["current_step"] += 1
+    if sync_wip(update, context):
+        await screen.cleanup_temps(context, ctx.chat(update).id, user_data)
+        await _accept_input(update, context, "image", drop_input=False)
+    await review_post(update, context)
     return POST_CREATION
 
 
@@ -991,6 +1046,10 @@ async def _finish_media_done(
     photos = user_data.get("photos") or []
     if photos:
         user_data["image"] = photos[0]
+        # сбор завершён: запоздавшие фото ЭТОГО альбома больше не принимаются
+        pending = user_data.pop("pending_media", None)
+        if pending:
+            user_data["finished_media"] = pending
         return True
     text = "Фотографии не получены. Отправьте фото (альбом) или нажмите «Пропустить»."
     if user_data.get("edit_field"):
@@ -1048,6 +1107,17 @@ async def handle_callback_query(
                 # в очистку (Stage 16, дефект №1)
                 await _accept_input(update, context, "image")
             await prompt_step(update, context)
+        elif ctx.data(context).get("pending_media"):
+            # сбор начат уже на показанном превью → фиксируем набор
+            # и обновляем превью (после подтверждённого сохранения)
+            if not await _finish_media_done(update, context):
+                return POST_CREATION
+            if sync_wip(update, context):
+                await screen.cleanup_temps(
+                    context, ctx.chat(update).id, ctx.data(context)
+                )
+                await _accept_input(update, context, "image")
+            await review_post(update, context)
         else:
             # Устаревшая кнопка после завершения сбора: напоминаем про
             # действия по превью, второй превью не шлём
@@ -1130,6 +1200,10 @@ def build_post_summary(post_data: dict, *, heading: str) -> str:
 # укладываются в лимит и после разбора разметки Telegram — с запасом.
 MESSAGE_TEXT_LIMIT = 4000
 CAPTION_TEXT_LIMIT = 1000
+# Лимит Telegram на снимки в одной медиа-группе (sendMediaGroup): набор
+# больше лимита (Stage 16: фото накапливаются из нескольких альбомов)
+# разбивается на группы, чтобы отправка не падала
+MEDIA_GROUP_LIMIT = 10
 
 
 def split_long_text(text: str, limit: int = MESSAGE_TEXT_LIMIT) -> list[str]:
@@ -1282,22 +1356,35 @@ async def send_post(
             await _perform(_text_runner(index, with_markup=index == 0))
         return sent
 
-    # Медиа-группа: подпись разрешена только у первого снимка
+    # Медиа-группа: Telegram принимает не более MEDIA_GROUP_LIMIT снимков
+    # в одной группе (Stage 16: набор накапливается из нескольких альбомов
+    # и одиночных фото) — больший набор отправляем группами; подпись
+    # разрешена только у первого снимка ПЕРВОЙ группы
     with_caption = utf16_len(text) <= CAPTION_TEXT_LIMIT
-    media = []
-    for index, file_id in enumerate(file_ids):
-        if index == 0 and with_caption:
-            media.append(
-                InputMediaPhoto(media=file_id, caption=text, parse_mode="HTML")
-            )
-        else:
-            media.append(InputMediaPhoto(media=file_id))
+    groups = [
+        file_ids[index : index + MEDIA_GROUP_LIMIT]
+        for index in range(0, len(file_ids), MEDIA_GROUP_LIMIT)
+    ]
 
-    async def group_runner() -> None:
-        for message in await bot.send_media_group(chat_id=chat_id, media=media):
-            _remember(message)
+    def _group_runner(group_index: int):
+        async def runner() -> None:
+            media = []
+            for index, file_id in enumerate(groups[group_index]):
+                if group_index == 0 and index == 0 and with_caption:
+                    media.append(
+                        InputMediaPhoto(
+                            media=file_id, caption=text, parse_mode="HTML"
+                        )
+                    )
+                else:
+                    media.append(InputMediaPhoto(media=file_id))
+            for message in await bot.send_media_group(chat_id=chat_id, media=media):
+                _remember(message)
 
-    await _perform(group_runner)
+        return runner
+
+    for group_index in range(len(groups)):
+        await _perform(_group_runner(group_index))
 
     if not with_caption:
         for index in range(len(chunks)):
@@ -1707,7 +1794,7 @@ async def process_edit(update: Update, context: ContextTypes.DEFAULT_TYPE) -> in
             )
             logger.warning("Пользователь не отправил изображение при редактировании.")
             return EDIT_FIELD
-        state = _store_photo(user_data, message)
+        state = _store_photo(user_data, message, replace_existing=True)
         # file_id принят → исходник уходит в очистку после подтверждённого
         # сохранения (для альбома — после «✅ Фото готово»)
         screen.track_temp(user_data, message)

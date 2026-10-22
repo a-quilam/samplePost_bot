@@ -420,13 +420,14 @@ class PhotoAlbumTests(unittest.TestCase):
         self.assertEqual(h.user_data().get("title"), "Концерт")
         self.assertNotIn("photos", h.user_data())
 
-        # На превью — путь к замене через «Редактировать»
+        # На превью — фото принимается в набор, превью обновляется
+        # (Stage 16, дефект №5: «добавление ещё одной фотографии»)
         await h.goto_step(step_index("image"))
         await h.text("Пропустить")
         posts_before = len(h.posts())
         await h.photo("stray-2")
-        self.assertIn("Редактировать", h.screen_text())
-        self.assertEqual(len(h.posts()), posts_before)
+        self.assertEqual(len(h.posts()), posts_before + 1, "превью обновлено")
+        self.assertEqual(h.user_data().get("photos"), ["stray-2"])
         self.assertEqual(h.dialog_state(), POST_CREATION)
 
     @scenario_test
