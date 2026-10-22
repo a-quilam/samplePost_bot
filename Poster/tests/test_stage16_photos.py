@@ -58,15 +58,11 @@ class PhotoAccumulationTests(unittest.TestCase):
         await h.photo("alb1-2", media_group_id="mg-1")
         await h.photo("alb2-1", media_group_id="mg-2")
 
-        self.assertEqual(
-            h.user_data().get("photos"), ["alb1-1", "alb1-2", "alb2-1"]
-        )
+        self.assertEqual(h.user_data().get("photos"), ["alb1-1", "alb1-2", "alb2-1"])
 
         await h.callback("media_done")
         preview_album = [c for c in h.calls if c["type"] == "media_group"][-1]
-        self.assertEqual(
-            album_media(preview_album), ["alb1-1", "alb1-2", "alb2-1"]
-        )
+        self.assertEqual(album_media(preview_album), ["alb1-1", "alb1-2", "alb2-1"])
 
     @scenario_test
     async def test_several_singles_in_a_row(self, h):
@@ -80,9 +76,7 @@ class PhotoAccumulationTests(unittest.TestCase):
         self.assertEqual(h.user_data().get("current_step"), len(POST_STEPS))
 
         await h.photo("solo-3")
-        self.assertEqual(
-            h.user_data().get("photos"), ["solo-1", "solo-2", "solo-3"]
-        )
+        self.assertEqual(h.user_data().get("photos"), ["solo-1", "solo-2", "solo-3"])
         preview_album = [c for c in h.calls if c["type"] == "media_group"][-1]
         self.assertEqual(album_media(preview_album), ["solo-1", "solo-2", "solo-3"])
 
@@ -97,9 +91,7 @@ class PhotoAccumulationTests(unittest.TestCase):
         await h.photo("alb-2", media_group_id="mg-a")
         await h.callback("media_done")
 
-        self.assertEqual(
-            h.user_data().get("photos"), ["solo-1", "alb-1", "alb-2"]
-        )
+        self.assertEqual(h.user_data().get("photos"), ["solo-1", "alb-1", "alb-2"])
         preview_album = [c for c in h.calls if c["type"] == "media_group"][-1]
         self.assertEqual(album_media(preview_album), ["solo-1", "alb-1", "alb-2"])
 
@@ -113,9 +105,7 @@ class PhotoAccumulationTests(unittest.TestCase):
         await h.photo("alb-2", media_group_id="mg-a")
         await h.callback("media_done")
 
-        self.assertEqual(
-            h.user_data().get("photos"), ["alb-1", "solo-mid", "alb-2"]
-        )
+        self.assertEqual(h.user_data().get("photos"), ["alb-1", "solo-mid", "alb-2"])
 
     @scenario_test
     async def test_media_group_limit_chunking(self, h):
@@ -143,9 +133,7 @@ class PhotoAccumulationTests(unittest.TestCase):
         ]
         final_ids = [fid for c in final_groups for fid in album_media(c)]
         self.assertEqual(final_ids, expected)
-        self.assertTrue(
-            all(len(c["media"]) <= MEDIA_GROUP_LIMIT for c in final_groups)
-        )
+        self.assertTrue(all(len(c["media"]) <= MEDIA_GROUP_LIMIT for c in final_groups))
 
     @scenario_test
     async def test_draft_saves_all_accumulated_photos(self, h):
@@ -159,9 +147,7 @@ class PhotoAccumulationTests(unittest.TestCase):
 
         drafts = h.drafts()
         self.assertEqual(len(drafts), 1)
-        self.assertEqual(
-            drafts[0].photos, '["keep-1", "keep-2", "keep-3"]'
-        )
+        self.assertEqual(drafts[0].photos, '["keep-1", "keep-2", "keep-3"]')
 
     @scenario_test
     async def test_edit_image_replaces_set(self, h):

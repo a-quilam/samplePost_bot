@@ -66,7 +66,16 @@ class TimeCommaParserTest(unittest.TestCase):
 
     def test_dangerous_comma_forms_stay_invalid(self):
         """Произвольная строка с запятыми часами не становится."""
-        for text in ("1,2", "18,3", "18,300", "18,,30", "в18,30", "18,30,45", ",30", "18,"):
+        for text in (
+            "1,2",
+            "18,3",
+            "18,300",
+            "18,,30",
+            "в18,30",
+            "18,30,45",
+            ",30",
+            "18,",
+        ):
             self.assertIsNone(parse_time_flexible(text), text)
 
 
