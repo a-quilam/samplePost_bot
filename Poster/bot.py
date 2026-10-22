@@ -45,7 +45,12 @@ def build_application() -> Application:
     # нарровинг для mypy (build_application типизирован, в отличие от старого main)
     if not TELEGRAM_BOT_TOKEN:
         raise RuntimeError("TELEGRAM_BOT_TOKEN не задан — см. .env.example")
-    application = ApplicationBuilder().token(TELEGRAM_BOT_TOKEN).build()
+    # job_queue(None): боту НЕ нужны периодические задачи (Stage 14, §1.2 —
+    # TTL-задача удалена). PTB 22 собирает JobQueue автоматически, только если
+    # в окружении есть APScheduler (остался транзитивной зависимостью) — без
+    # явного отключения процесс поднимал бы простаивающий планировщик. Одно
+    # предупреждение «No JobQueue set up» при старте — ожидаемое и разовое.
+    application = ApplicationBuilder().token(TELEGRAM_BOT_TOKEN).job_queue(None).build()
 
     # Обработчики создания поста (ConversationHandler) — первыми
     for handler in post_creation_handlers():

@@ -109,7 +109,9 @@ class FakeBot:
             return None
         try:
             return repr(markup)
-        except Exception:  # noqa: BLE001 — непредставимая клавиатура сравнивается как объект
+        except (
+            Exception
+        ):  # noqa: BLE001 — непредставимая клавиатура сравнивается как объект
             return id(markup)
 
     def _remember_content(self, kwargs: dict, message: Any) -> None:
@@ -200,7 +202,7 @@ class FakeBot:
             "edit_message" in container
             for container in (self.fail_types, self.errors_by_type, self.fail_after)
         )
-        key = (kwargs.get("chat_id"), kwargs.get("message_id"))
+        key = (int(kwargs.get("chat_id") or 0), int(kwargs.get("message_id") or 0))
         current = self._message_content.get(key)
         proposed = (
             kwargs.get("text"),
@@ -209,7 +211,7 @@ class FakeBot:
         if not injected and current is not None and current == proposed:
             raise BadRequest("message is not modified")
         self._record("edit_message", args, kwargs)
-        if key[0] is not None and key[1] is not None:
+        if kwargs.get("chat_id") is not None and kwargs.get("message_id") is not None:
             self._message_content[key] = proposed
 
     async def delete_message(self, *args: Any, **kwargs: Any) -> None:
@@ -519,9 +521,7 @@ class Harness:
                 user_id=user_id if user_id is not None else self.user_id,
                 update_id=self._update_seq,
                 message_id=(
-                    message_id
-                    if message_id is not None
-                    else self._next_user_msg_id()
+                    message_id if message_id is not None else self._next_user_msg_id()
                 ),
                 entities=entities,
             )
@@ -641,9 +641,7 @@ class Harness:
         ref = self.user_data().get("screen")
         return int(ref["message_id"]) if isinstance(ref, dict) else None
 
-    async def text_from_below(
-        self, text: str, **kwargs: Any
-    ) -> Update:
+    async def text_from_below(self, text: str, **kwargs: Any) -> Update:
         """
         Сообщение пользователя НИЖЕ текущего экрана.
 

@@ -272,7 +272,9 @@ def _store_text_field(
         _set_field_html(user_data, key, None)
 
 
-def _store_photo(user_data: dict, message: Message, *, replace_existing: bool = False) -> str:
+def _store_photo(
+    user_data: dict, message: Message, *, replace_existing: bool = False
+) -> str:
     """
     Сохраняет фотографию в user_data (одиночное фото или альбом).
     Возвращает состояние записи:
@@ -471,9 +473,7 @@ async def restore_wip(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int
     logger.info(f"Восстановление WIP: шаг {step_index}, черновик в работе.")
     if step_index >= len(POST_STEPS):
         edit_field = user_data.get("edit_field")
-        step = next(
-            (step for step in POST_STEPS if step["key"] == edit_field), None
-        )
+        step = next((step for step in POST_STEPS if step["key"] == edit_field), None)
         if step:
             # прервали на правке поля → восстанавливаем промпт правки
             await _render_edit_prompt(update, context, step)
@@ -819,9 +819,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
                     # фото принято: текстовые попытки «введите изображение»
                     # этого же этапа уходят в очистку (Stage 16); сам снимок
                     # уже убран cleanup_temps — повторно не трогаем
-                    await _accept_input(
-                        update, context, "image", drop_input=False
-                    )
+                    await _accept_input(update, context, "image", drop_input=False)
                 await review_post(update, context)
                 # Остаёмся в POST_CREATION, чтобы кнопки действий после обзора работали
                 return POST_CREATION
@@ -1384,9 +1382,7 @@ async def send_post(
             for index, file_id in enumerate(groups[group_index]):
                 if group_index == 0 and index == 0 and with_caption:
                     media.append(
-                        InputMediaPhoto(
-                            media=file_id, caption=text, parse_mode="HTML"
-                        )
+                        InputMediaPhoto(media=file_id, caption=text, parse_mode="HTML")
                     )
                 else:
                     media.append(InputMediaPhoto(media=file_id))
