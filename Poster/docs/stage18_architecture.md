@@ -1,10 +1,16 @@
 # Stage 18 — архитектура мест, кирпичиков, шаблонов и администрирования
 
-**Статус:** проект (анализ и проектирование). Исполняемый код, модели БД и
-настоящая база в этот этап не затрагивались.
+**Статус:** архитектурный проект. Stage 19A реализовал только безопасный
+фундамент: журнал миграций и таблицы `users`, `places`, `place_names`
+(без Telegram-интерфейса, поиска, альтернативных названий, шаблонов и
+администрирования). Остальные сущности ниже — проект будущих этапов; в коде
+их ещё нет.
 
-Базовая ревизия кода: `edf997172275988cbde70aef369793a2efc5d2a7`
-(Stage 17: кнопочный календарь даты; 591 тест; CI Python 3.13 и 3.14).
+Базовая ревизия Stage 18: `b7b9b9512f9d14bd51010240924666c8940c4bdb`
+(проект архитектуры; 591 тест). После Stage 19A — 622 теста, CI Python 3.13
+и 3.14. Реализованная схема и правила миграций описаны в
+[`docs/migrations.md`](migrations.md); этот документ остаётся целевой
+архитектурой.
 
 ## Содержание
 
@@ -34,8 +40,11 @@
 
 | Модуль | Строк | Ответственность |
 |---|---:|---|
-| `models.py` | 154 | SQLAlchemy-модели `Draft` и `UserState`; сериализация `photos`/`formats` в JSON |
-| `database.py` | ~90 | Движок SQLite (WAL, busy_timeout 30 с), `create_all` + ручные добавочные миграции `_migrate()` |
+| `models.py` | 281 | SQLAlchemy-модели `Draft`, `UserState`, `User`, `Place`, `PlaceName`; сериализация `photos`/`formats` в JSON |
+| `database.py` | 115 | Движок SQLite (WAL, busy_timeout, `foreign_keys=ON`), `create_all` легаси-таблиц, легаси-бэкфилл `_migrate()` |
+| `migrations.py` | 296 | Нумерованные миграции схемы: журнал версий, контрольные суммы, транзакции, защита от конкурентного запуска |
+| `user_store.py` | 80 | UPSERT пользователя по постоянному Telegram user ID |
+| `place_store.py` | 105 | Нормализация названия, атомарное создание места + канонического названия |
 | `handlers/post_creation.py` | 2705 | Визард из 9 шагов, превью, редактирование, фото/медиагруппы, календарь Stage 17, черновики-точки входа |
 | `handlers/main_menu.py` | 230 | Главный экран, /start, /help, подсказка вне диалога |
 | `handlers/drafts.py` | 304 | Список/листание/удаление черновиков на экране управления |
@@ -48,14 +57,16 @@
 | `utils/validators.py` | 132 | `normalize_date/time/url`; опасные схемы URL отклоняются |
 | `utils/lotto.py` | 413 | «Полседьмого», «без четверти семь» и т. п. |
 | `bot.py` | 101 | Сборка `Application`; порядок хендлеров; `allowed_updates=ALL_TYPES` |
-| `tests/*` | ~30 файлов | 591 тест; каркас `integration_harness.py` (FakeBot, `frozen_today`, временная SQLite) |
+| `tests/*` | ~33 файла | 622 теста; каркас `integration_harness.py` (FakeBot, `frozen_today`, временная SQLite); Stage 19A — миграции и ограничения схемы |
 
 ### 1.2. Основные факты, от которых отталкивается проект
 
-- **Две таблицы.** `Draft` — 9 полей анкеты + `photos` (JSON file_id),
-  `formats` (JSON HTML-представлений), `created_at/updated_at`;
-  `UserState` — `user_id` PK, `chat_id`, `screen_message_id`, `payload` (JSON WIP),
-  `updated_at`. Таблицы пользователей и ролей нет: `user_id` используется напрямую.
+- **Легаси-таблицы.** `Draft` — 9 полей анкеты + `photos` (JSON file_id,
+  независимая коллекция вложений), `formats` (JSON HTML-представлений),
+  `created_at/updated_at`; `UserState` — `user_id` PK, `chat_id`,
+  `screen_message_id`, `payload` (JSON WIP), `updated_at`. Stage 19A добавил
+  инфраструктурные `users`, `places`, `place_names` и журнал
+  `schema_migrations`; Telegram-интерфейса у них пока нет.
 - **Регистр полей жёстко прошит** в `POST_STEPS` (список словарей
   `key/label/prompt/validator/normalizer`): на нём построены визард, редактор,
   сводка `build_post_summary`, `DRAFT_FIELD_KEYS`, клавиатуры и WIP-снимок.
@@ -78,9 +89,12 @@
 - **Форматирование:** пользовательский ввод с entities сохраняется
   дословно + HTML в `user_data["formats"][key]`; плоский текст проходит
   типографику (`format_text`) и экранируется один раз при рендере.
-- **Миграции:** только добавочные (`ALTER TABLE ADD COLUMN`, идемпотентно);
-  схема новых таблиц — через `create_all`. Фреймворка версионирования
-  схемы (`schema_migrations`) пока нет — Stage 18 предлагает его (§3.10, §9).
+- **Миграции:** с Stage 19A — нумерованный механизм `migrations.py` с журналом
+  `schema_migrations`, контрольными суммами DDL и транзакционным применением
+  (подробно — [`docs/migrations.md`](migrations.md)). Старый `_migrate()`
+  остался только для очень старых `drafts` (добавление колонок
+  `photos/formats/updated_at`); новые изменения схемы идут только через
+  нумерованные миграции.
 - **Тесты:** изолированы от настоящего токена и БД (`tests/__init__.py`
   подставляет фиктивный токен и `DATABASE_URL` во временный каталог);
   интеграция через `Application.process_update`, время замораживается
@@ -94,7 +108,7 @@
 | `POST_STEPS` в `post_creation.py` | Метки/промпты/валидаторы завязаны на один список | Реестр кирпичиков (Stage 22) должен заменить его без смены форматов хранения |
 | `build_post_summary` | Сводка перечисляет поля фиксированным списком | При шаблонах (Stage 23+) сводка заменяется рендером шаблона |
 | Поле `place_url` — 8-й шаг, в конце анкеты | Если место выбрано из справочника, вопрос лишний | Адаптивное создание (Stage 27) отсекает известные значения |
-| Фото-логика привязана к индексу шага «Изображение» | `handle_photo` знает шаг по `current_step` | При адаптивном создании шаг определяется кирпичиком `фото` |
+| Фото-логика привязана к индексу шага «Изображение» | `handle_photo` знает шаг по `current_step` | При адаптивном создании фотографии остаются отдельным, необязательным потоком вложений; шаблон и кирпичики на него не влияют |
 | Список черновиков печатает 4 поля | Не знает про произвольные поля | Карточки по кирпичикам, ограничение числа строк (Stage 28) |
 | `handlers/drafts.db` (28 КБ) и пустой `responsible_persons.db` рядом с кодом | Остаточные локальные файлы сентября 2024; в git не попадали | Не использовать и не трогать в Stage 18; убрать отдельным техкоммитом в будущих этапах |
 
@@ -103,6 +117,8 @@
 - Один интерфейсный экран, re-anchor, best-effort очистка, проверка
   «очистка только после подтверждённого сохранения».
 - WIP/рестарт, черновики, редактирование, медиагруппы, календарь Stage 17.
+- Фотографии — независимые вложения анонса, а не кирпичик и не узел
+  текстового шаблона; приём фото/альбомов Stage 12–17 не меняется.
 - Все текущие тесты как регрессионный базис.
 
 ---
@@ -110,12 +126,12 @@
 ## 2. Перечень сущностей и их взаимосвязей
 
 ```
-users ──1:N── drafts
+users (id, telegram_user_id)
   │  1
-  ├──< user_states             (WIP-снимок, ref экрана)
+  ├──< user_states             (WIP-снимок, ref экрана; user_id = Telegram ID)
   │
   ├──N:M> places ──1:N── place_names        (каноническое + альтернативы)
-  │ place_admins ─(place_id 1:1 админ)── places
+  │ place_admins ─(place_id 0..1 админ)── places
   │
   ├──< bricks                  (типизированный реестр полей)
   │      scope = system | place(place_id) | personal(owner_user_id)
@@ -123,29 +139,42 @@ users ──1:N── drafts
   ├──< templates ──1:N── template_versions
   │      kind = place(place_id) | personal(owner_user_id)
   │
-  ├──< brick_proposals         (согласование кирпичиков)
+  ├──< brick_proposals         (согласование кирпичиков; без срока)
   │      target = place(place_id-админ рассматривает) | global(суперадмин)
   │
   ├──< admin_transfers         (передача админки места, срок 24 ч)
   │
   └──< draft_values            (значения произвольных кирпичиков в анонсе)
          draft_id n:1 drafts, brick_id n:1 bricks
+
+drafts.image / drafts.photos   (вложения анонса: фото/альбомы — НЕ кирпичик
+                                 и не узел шаблона; живут отдельно от секций)
 ```
 
 Ключевые свойства связей:
 
+- **Пользователь.** `users.id` — внутренний ключ для будущих связей;
+  `users.telegram_user_id` — постоянный внешний идентификатор (UNIQUE).
+  `Draft.user_id` и `UserState.user_id` — легаси-значения Telegram ID,
+  они не переделываются в FK.
 - **Место ↔ названия.** Каноническое название — строка `place_names` с
-  флагом `is_canonical` (ровно одна на место); альтернативы — соседние строки.
-  Показ имени в анонсе берётся из указанного места, но можно указать
+  флагом `is_canonical` (не более одной на место); альтернативы — соседние
+  строки. Показ имени в анонсе берётся из указанного места, но можно указать
   выбранную альтернативу; это поле АНОНСА, а не нового места.
-- **Место ↔ админ.** `place_admins` — ровно одна строка на место (PK по
-  `place_id`); смена админа — атомарный UPDATE этой строки.
+- **Место ↔ админ.** `place_admins` — не более одной строки на место (PK по
+  `place_id`); администратора может не быть вовсе. Смена админа — атомарный
+  UPDATE этой строки.
 - **Кирпичик.** Полиморфная принадлежность: `system` (без владельца),
   `place` (место), `personal` (пользователь). Значения кирпичиков в черновике
   — в `draft_values`; шаблоны ссылаются на кирпичики по `brick_id`.
+  Фотографии кирпичиком не являются.
 - **Шаблон ↔ версии.** `template_versions` хранит историю секций;
   черновик сохраняет собственный снимок применённого шаблона, поэтому
   правка шаблона никогда не меняет старые черновики и превью (§9).
+- **Вложения анонса.** Фотографии — самостоятельная коллекция конкретного
+  анонса (существующие `Draft.image`/`Draft.photos`): не входят в
+  `template_snapshot`, `draft_values` или `extras_json`, не задаются
+  составом кирпичиков и не блокируют создание анонса при отсутствии.
 - **Заявки (`brick_proposals`) и передачи (`admin_transfers`)** —
   отдельные сущности-процессы; они не смешиваются с самими кирпичиками,
   шаблонами и анонсами (согласование касается только кирпичиков).
@@ -154,81 +183,108 @@ users ──1:N── drafts
 
 ## 3. Предлагаемая схема SQLAlchemy/SQLite
 
-Все изменения добавочные: новые таблицы через `create_all`, новые колонки —
-через механизм миграций §9. Ниже — целевая схема (язык DDL — SQLite,
-в моделях — SQLAlchemy 2.0 `Mapped[]`, как в существующих `models.py`).
+Все изменения только добавочные. С Stage 19A новые таблицы и колонки идут
+через нумерованные миграции [`docs/migrations.md`](migrations.md), а не через
+`create_all`: он остаётся только легаси-базлайном `drafts`/`user_states`.
+Ниже — целевая схема (SQLite; в моделях — SQLAlchemy 2.0 `Mapped[]`).
+Таблицы, уже созданные в Stage 19A, помечены явно; остальное — проект
+будущих этапов, в текущей базе этих объектов нет.
 
 ### 3.1. `users`
 
+**Stage 19A — реализовано** (без `is_superadmin`; колонка появится в Stage 20):
+
 ```sql
 CREATE TABLE users (
-    user_id       INTEGER PRIMARY KEY,          -- Telegram user id (постоянный!)
-    username      TEXT,                          -- последнее увиденное (без @)
-    full_name     TEXT,                          -- first/last name для карточек
-    is_superadmin INTEGER NOT NULL DEFAULT 0,
-    created_at    DATETIME NOT NULL,
-    updated_at    DATETIME,
-    last_seen_at  DATETIME
+    id               INTEGER PRIMARY KEY,       -- внутренний ID для связей
+    telegram_user_id INTEGER NOT NULL UNIQUE,   -- постоянный Telegram user id
+    username         TEXT,                      -- последнее увиденное (без @)
+    full_name        TEXT,                      -- first/last name для карточек
+    created_at       DATETIME NOT NULL,
+    updated_at       DATETIME,
+    last_seen_at     DATETIME
 );
 ```
 
-- Создаётся лениво при первом контакте с ботом (`/start`, любой ввод).
+- `telegram_user_id` уникален на уровне БД; username — справочное поле,
+  которое может меняться и не является идентификатором.
+- В Stage 19A есть только слой хранения (`user_store.get_or_create_user`,
+  атомарный UPSERT). Подключение к обработчикам Telegram и роли — будущие
+  этапы; из текущего визарда пользователи не создаются.
 - Роль суперадмина: список постоянных Telegram user id в конфигурации
-  (`.env: SUPERADMIN_USER_IDS`, разделитель «,»). Колонка `is_superadmin`
-  — проекция конфигурации на момент миграции/старта, **источник истины — env**:
-  так нельзя «назначить суперадмина через БД» и роль выживает после
-  очистки БД. username — не идентификатор (меняется пользователем).
+  (`.env: SUPERADMIN_USER_IDS`, разделитель «,»). Источник истины — env;
+  колонка `is_superadmin` (Stage 20) будет лишь проекцией. username — не
+  идентификатор (меняется пользователем). Суперадмин назначает админа места
+  по Telegram user ID, который приложение переводит во внутренний `users.id`.
 
 ### 3.2. `places` и `place_names`
 
+**Stage 19A — реализовано** (минимальный фундамент; альтернативные названия
+появятся после 19B — рекомендация Stage 20; схема уже это поддерживает):
+
 ```sql
 CREATE TABLE places (
-    id             INTEGER PRIMARY KEY,
-    url            TEXT,          -- если известна (нормализованный URL, §7.7)
-    address        TEXT,
-    comment        TEXT,          -- служебная полка будущего (часы работы и т.п.)
-    is_active      INTEGER NOT NULL DEFAULT 1,
-    created_by     INTEGER REFERENCES users(user_id),
-    created_at     DATETIME NOT NULL,
-    updated_at     DATETIME
+    id                 INTEGER PRIMARY KEY,
+    created_by_user_id INTEGER REFERENCES users(id) ON DELETE SET NULL,
+    created_at         DATETIME NOT NULL
 );
+CREATE INDEX ix_places_created_by_user_id ON places(created_by_user_id);
 
 CREATE TABLE place_names (
-    id           INTEGER PRIMARY KEY,
-    place_id     INTEGER NOT NULL REFERENCES places(id) ON DELETE CASCADE,
-    name         TEXT NOT NULL,            -- как показываем (орфография пользователя)
-    name_search  TEXT NOT NULL,            -- нормализовано для поиска (§5.6)
-    is_canonical INTEGER NOT NULL,         -- 0|1; ровно одна на место
-    created_by   INTEGER REFERENCES users(user_id),
-    created_at   DATETIME NOT NULL,
+    id                 INTEGER PRIMARY KEY,
+    place_id           INTEGER NOT NULL REFERENCES places(id) ON DELETE CASCADE,
+    name               TEXT NOT NULL,       -- как показываем (орфография пользователя)
+    name_search        TEXT NOT NULL,       -- нормализовано для поиска (§5.6)
+    is_canonical       INTEGER NOT NULL,    -- 0|1; не более одной на место
+    created_by_user_id INTEGER REFERENCES users(id) ON DELETE SET NULL,
+    created_at         DATETIME NOT NULL,
+    CHECK (length(trim(name)) > 0),
+    CHECK (length(trim(name_search)) > 0),
+    CHECK (is_canonical IN (0, 1)),
     UNIQUE (place_id, name_search)
 );
-CREATE INDEX ix_place_names_search ON place_names(name_search);
-CREATE UNIQUE INDEX ux_place_names_canonical
+CREATE INDEX ix_place_names_place_id ON place_names(place_id);
+CREATE INDEX ix_place_names_name_search ON place_names(name_search);
+CREATE UNIQUE INDEX ux_place_names_one_canonical
     ON place_names(place_id) WHERE is_canonical = 1;
 ```
 
 - `UNIQUE (place_id, name_search)` запрещает дубли названия внутри одного
   места, но не между местами: похожие названия **не** сливаются неявно.
+- Частичный уникальный индекс допускает не более одной канонической строки;
+  наличие хотя бы одной обеспечивает прикладной слой
+  (`place_store.create_place` создаёт место и каноническое название в одной
+  транзакции). В базе место без названий технически возможно, но публичного
+  API для этого нет.
+- `created_by_user_id` — внутренний `users.id`, не Telegram ID. Создатель
+  места **не** получает административных прав.
+- Будущие колонки места (`url`, `address`, `comment`, `is_active`,
+  `updated_at`) появятся отдельной добавочной миграцией на этапе
+  справочника/кабинетов; в Stage 19A их нет.
 - Каноническое название переименовывается админом места (или суперадмином):
-  это UPDATE строки с флагом, а не создание нового места.
+  это UPDATE строки с флагом, а не создание нового места (Stage 20+).
 - Подсказка при создании места (`«Такое место уже есть?»`) использует
-  `name_search` + похожесть (§5.6), решение всегда за пользователем.
+  `name_search` + похожесть (§5.6), решение всегда за пользователем —
+  это будущий Stage 19B, в 19A поиска ещё нет.
 
 ### 3.3. `place_admins`
 
+**Не реализовано в Stage 19A** (Stage 20):
+
 ```sql
 CREATE TABLE place_admins (
-    place_id      INTEGER PRIMARY KEY REFERENCES places(id) ON DELETE CASCADE,
-    admin_user_id INTEGER NOT NULL REFERENCES users(user_id),
-    granted_by    INTEGER REFERENCES users(user_id),
-    since         DATETIME NOT NULL
+    place_id          INTEGER PRIMARY KEY REFERENCES places(id) ON DELETE CASCADE,
+    admin_user_id     INTEGER NOT NULL REFERENCES users(id),
+    granted_by_user_id INTEGER REFERENCES users(id),
+    since             DATETIME NOT NULL
 );
 ```
 
 - PK по `place_id` = «не более одного администратора» на уровне схемы.
+  У места может быть **ноль или один** действующий администратор.
 - При создании места строка **не создаётся** (админа нет); суперадмин
-  назначает его позже (Stage 20).
+  назначает его позже по постоянному Telegram user ID (Stage 20).
+- Создатель места автоматически админом не становится.
 
 ### 3.4. `bricks` — реестр кирпичиков
 
@@ -237,15 +293,15 @@ CREATE TABLE bricks (
     id            INTEGER PRIMARY KEY,
     code          TEXT NOT NULL,     -- как пишут в шаблоне: [ссылка_места]
     title         TEXT NOT NULL,     -- человекочитаемое: «Ссылка места»
-    type          TEXT NOT NULL,     -- short_text|long_text|date|time|url|number|photos|choice
+    type          TEXT NOT NULL,     -- short_text|long_text|date|time|url|number|choice
     rules_json    TEXT,              -- валидация/интерфейс типа (§3.5)
     display       TEXT,              -- как показывать (текст/ссылка/строка карточки)
     source        TEXT NOT NULL,     -- ask|place|derived: откуда берётся значение
     scope         TEXT NOT NULL,     -- system|place|personal
     place_id      INTEGER REFERENCES places(id),
-    owner_user_id INTEGER REFERENCES users(user_id),
+    owner_user_id INTEGER REFERENCES users(id),
     status        TEXT NOT NULL DEFAULT 'active',  -- active|archived
-    created_by    INTEGER REFERENCES users(user_id),
+    created_by_user_id INTEGER REFERENCES users(id),
     created_at    DATETIME NOT NULL,
     updated_at    DATETIME,
     -- принадлежность согласована со scope: система — без владельцев,
@@ -274,6 +330,10 @@ CREATE UNIQUE INDEX ux_bricks_personal_code ON bricks(owner_user_id, code) WHERE
 - **Расширяемость.** Новый тип данных = новая запись в каталоге типов
   (таблица-константа в коде `bricks_types.py`), набор интерфейсных
   элементов (клавиатура). Схема `rules_json` описана в §3.5.
+- **Фотографии — не тип кирпичика.** В `bricks` нет и не будет типа
+  `photos`: изображения — независимая коллекция вложений анонса (§7.5),
+  они не вставляются в шапку/тело/подвал и не участвуют в текстовом
+  конструкторе.
 
 ### 3.5. `rules_json` (типизированные правила)
 
@@ -285,15 +345,19 @@ CREATE UNIQUE INDEX ux_bricks_personal_code ON bricks(owner_user_id, code) WHERE
 | `time` | — | текст (`1830`, «полседьмого», …) |
 | `url` | — | текст; нормализация `normalize_url` |
 | `number` | `min`, `max`, `integer`, `suffix` («₽») | текст |
-| `photos` | `max_photos` | медиагруппа + «✅ Фото готово» |
 | `choice` | `choices` (список допустимых: «Кино», «Лекция», …) + режим single/multi | inline-клавиатура |
 
+- **Фотографии в этой таблице отсутствуют принципиально:** это не тип
+  значения кирпичика. Приём изображений, альбомов и медиагрупп — отдельный
+  существующий поток вложений анонса (§7.5), не настраиваемый шаблоном.
 - Правила — данные, не код: добавление кирпичика не требует миграций.
 - **Искусственных лимитов длины нет и не появится** (правило Stage 14:
   без молчаливых обрезаний; реальные ограничения — только платформенные,
   §10.1). Ключи длины в `rules_json` — опциональный зарезервированный
   механизм на случай, если владелец позже захочет ограничения для
   отдельных пользовательских кирпичиков; по умолчанию не задаются.
+  Если текст не помещается в платформенный лимит, публикация разбивает
+  сообщения или явно сообщает об ошибке — без потери введённых данных.
 - Источник `place` означает: значение берётся из выбранного места
   (`место`, `ссылка_места`, `адрес`), и бот не спрашивает его повторно,
   если оно известно. В сидированном наборе «derived»-кирпичиков нет, но
@@ -307,7 +371,7 @@ CREATE TABLE templates (
     id              INTEGER PRIMARY KEY,
     kind            TEXT NOT NULL CHECK (kind IN ('place','personal')),
     place_id        INTEGER REFERENCES places(id),
-    owner_user_id   INTEGER REFERENCES users(user_id),
+    owner_user_id   INTEGER REFERENCES users(id),
     title           TEXT,                -- отображаемое имя личного шаблона
     title_search    TEXT,                -- нормализовано для выбора в списке
     current_version INTEGER NOT NULL DEFAULT 1,
@@ -324,16 +388,24 @@ CREATE TABLE template_versions (
     template_id   INTEGER NOT NULL REFERENCES templates(id) ON DELETE CASCADE,
     version       INTEGER NOT NULL,
     sections_json TEXT NOT NULL,        -- {"header": ..., "body": ..., "footer": ...}
-    created_by    INTEGER REFERENCES users(user_id),
+    created_by_user_id INTEGER REFERENCES users(id),
     created_at    DATETIME NOT NULL,
     UNIQUE (template_id, version)
 );
 ```
 
-- Стандартный шаблон: ровно одна строка `kind='place'` на место (частичный
-  уникальный индекс), создаётся автоматически при создании места, версия 1.
-- Личный шаблон: `kind='personal'`, не привязан к месту; применяется
-  к любому выбранному месту.
+- **Не реализовано в Stage 19A**; таблицы появятся на этапе шаблонов
+  (Stage 23) вместе с фоновым созданием v1 для существующих мест.
+- Стандартный шаблон принадлежит **конкретному месту**: ровно одна строка
+  `kind='place'` на место (частичный уникальный индекс). Строка v1
+  создаётся/бэкфиллится на этапе шаблонов (Stage 23), а не при создании
+  места в 19A/19B.
+- Личный шаблон принадлежит **исключительно создателю** (`owner_user_id`);
+  применяется к любому выбранному месту, но другие пользователи его не
+  видят. Публикация и совместное использование личных шаблонов не
+  реализуются в roadmap 19–28.
+- Снимок секций (`sections_json`) содержит **только текст**; вложения
+  анонса в шаблон и его версии не входят.
 - Правка секции = новая версия (`current_version += 1`); `template_versions`
   обеспечивают аудит и «Сбросить к стандартному» (§6.4).
 
@@ -346,10 +418,10 @@ CREATE TABLE brick_proposals (
     place_id        INTEGER REFERENCES places(id),   -- обязательно для target='place'
     payload_json    TEXT NOT NULL,     -- определение кирпичика (композиция полей §3.4)
     title           TEXT NOT NULL,     -- читаемое имя кирпичика для списков
-    proposer_user_id INTEGER NOT NULL REFERENCES users(user_id),
+    proposer_user_id INTEGER NOT NULL REFERENCES users(id),
     status          TEXT NOT NULL DEFAULT 'pending',
-                    -- pending|approved|rejected|withdrawn|expired|superseded
-    resolved_by     INTEGER REFERENCES users(user_id),
+                    -- pending|approved|rejected|withdrawn|superseded
+    resolved_by     INTEGER REFERENCES users(id),
     resolution_note TEXT,
     revises_id      INTEGER REFERENCES brick_proposals(id),  -- повторное предложение
     created_at      DATETIME NOT NULL,
@@ -359,7 +431,11 @@ CREATE TABLE brick_proposals (
 );
 ```
 
+- **Не реализовано в Stage 19A** (Stage 26).
 - Заявки согласуют **кирпичики**, а не анонсы (прямое требование ТЗ).
+- **Заявки не истекают автоматически.** `pending` сохраняется до решения
+  администратора/суперадмина или отзыва автором; поля `expires_at` нет,
+  ленивого истечения по 30 дням нет.
 - Повторное предложение после отказа = новая строка с `revises_id`;
   старая остаётся в истории как `superseded`.
 - Решение — условная транзакция «только первая побеждает» (§10.3).
@@ -368,24 +444,33 @@ CREATE TABLE brick_proposals (
 
 ```sql
 CREATE TABLE admin_transfers (
-    id           INTEGER PRIMARY KEY,
-    place_id     INTEGER NOT NULL REFERENCES places(id),
-    from_user_id INTEGER NOT NULL REFERENCES users(user_id),  -- текущий админ
-    to_user_id   INTEGER REFERENCES users(user_id), -- NULL, пока получатель неизвестен
-    to_username  TEXT,            -- что ввёл инициатор (для отображения)
-    token_hash   TEXT,            -- sha256 одноразового токена приглашения
-    status       TEXT NOT NULL DEFAULT 'pending',
-                 -- pending|confirmed|expired|cancelled|superseded
-    created_at   DATETIME NOT NULL,
-    expires_at   DATETIME NOT NULL,   -- created_at + 24 часа
-    confirmed_at DATETIME
+    id                INTEGER PRIMARY KEY,
+    place_id          INTEGER NOT NULL REFERENCES places(id),
+    from_user_id      INTEGER NOT NULL REFERENCES users(id),  -- текущий админ
+    to_user_id        INTEGER REFERENCES users(id),  -- утверждённый получатель; NULL до привязки
+    opened_by_user_id INTEGER REFERENCES users(id),  -- кто открыл ссылку; кандидат, НЕ получатель прав
+    to_username       TEXT,            -- что ввёл инициатор (справочно)
+    token_hash        TEXT UNIQUE,     -- sha256 одноразового токена приглашения
+    status            TEXT NOT NULL DEFAULT 'pending',
+                     -- pending|confirmed|expired|cancelled|superseded
+    created_at        DATETIME NOT NULL,
+    expires_at        DATETIME NOT NULL,   -- created_at + 24 часа
+    opened_at         DATETIME,
+    confirmed_at      DATETIME
 );
 CREATE INDEX ix_transfers_to_user
     ON admin_transfers(to_user_id) WHERE status = 'pending';
 ```
 
-Механика — §5.5: роль атомарно переходит только после подтверждения
-получателя; до подтверждения прежний админ сохраняет полномочия.
+- **Не реализовано в Stage 19A** (Stage 21).
+- Механика — §5.5. Роль переходит только после **двусторонней** привязки:
+  инициатор утверждает конкретного получателя (`to_user_id`), получатель
+  подтверждает в своём чате; до этого прежний админ сохраняет полномочия.
+  Наличие токена/открытие ссылки само по себе прав не даёт.
+- `to_user_id` — внутренний `users.id`; Telegram user ID используется только
+  при поиске/назначении. `opened_by_user_id` фиксирует, кто открыл
+  приглашение, и служит лишь кандидатом для утверждения инициатором.
+- Сырой токен хранится только в ссылке; в БД — `sha256`.
 
 ### 3.9. Черновики: добавочные колонки и `draft_values`
 
@@ -412,22 +497,40 @@ CREATE TABLE draft_values (
 
 - **Никакой деструктивности:** старые колонки `drafts` остаются источником
   истины для девяти легаси-полей; новые кирпичики из них только читаются.
+- **Фотографии не входят в `draft_values`.** Существующие `Draft.image` и
+  `Draft.photos` (JSON file_id) остаются независимой коллекцией вложений
+  анонса; `template_snapshot` содержит только секции текста. Правка
+  шаблона или значений кирпичиков не затрагивает фотографии, и наоборот.
 - «Доп. информация» (`§8.5`) — вставки в снимок конкретного АНОНСА:
   хранятся в `extras_json`/`draft_values`, а не в шаблоне места.
 
 ### 3.10. `schema_migrations`
 
+**Реализовано в Stage 19A** (`migrations.py`; подробно —
+[`docs/migrations.md`](migrations.md)):
+
 ```sql
 CREATE TABLE schema_migrations (
-    version    INTEGER PRIMARY KEY,   -- 19, 20, 21, ...
-    applied_at DATETIME NOT NULL
+    version    INTEGER PRIMARY KEY,   -- 1, 2, 3, ... (непрерывно)
+    name       TEXT NOT NULL,
+    checksum   TEXT NOT NULL,         -- sha256 нормализованного DDL
+    applied_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 ```
 
-- Вводится в первой кодовой стадии будущих этапов (рекомендация §12: Stage 19);
-  `_migrate()` превращается в упорядоченный список функций по номерам стадий.
-- Каждый шаг: только добавление таблиц/колонок/индексов, идемпотентный,
-  тестируется на временных БД (как `test_stage13_migrations.py`).
+- Версия 1 — `users_places_place_names`: три таблицы и их индексы.
+- Повторный запуск видит прежние версии и ничего не применяет.
+- Неизвестная/более новая версия, разрыв журнала или изменённая
+  контрольная сумма = `IncompatibleSchemaError`; база не меняется.
+- Все ожидающие миграции применяются одной транзакцией `BEGIN IMMEDIATE`;
+  сбой откатывает весь запуск. Конкурентный старт ждёт блокировку и видит
+  уже применённые версии.
+- Механизм требует файловую SQLite (не `:memory:`). Применение к настоящей
+  `post_bot.db` — только осознанно, после резервной копии (runbook в
+  `docs/migrations.md`); тесты используют временные файлы.
+- Alembic сознательно не вводится: одна SQLite-база, только добавочный DDL,
+  нет autogenerate-потребности; свой механизм — ~300 строк с журналом,
+  суммами и транзакциями. Решение и ограничения описаны в docs/migrations.md.
 
 ---
 
@@ -437,8 +540,8 @@ CREATE TABLE schema_migrations (
 
 | Роль | Определение | Где хранится |
 |---|---|---|
-| Суперадмин | Постоянный Telegram **user id** из конфигурации `.env` (`SUPERADMIN_USER_IDS`), не username | env + проекция `users.is_superadmin` |
-| Администратор места | Ровно один на место, строка в `place_admins` | БД |
+| Суперадмин | Постоянный Telegram **user id** из конфигурации `.env` (`SUPERADMIN_USER_IDS`), не username | env + проекция `users.is_superadmin` (Stage 20) |
+| Администратор места | **Ноль или один** действующий админ на место, строка в `place_admins`; назначается суперадмином по Telegram user ID | БД |
 | Обычный пользователь | Любой, кто взаимодействует с ботом; права определяются отсутствием двух ролей выше | — |
 
 ### 4.2. Матрица прав (бизнес-операции)
@@ -470,12 +573,22 @@ CREATE TABLE schema_migrations (
 2. Все обращения к чужим сущностям (`place_id` в callback и т. п.)
    перепроверяются: `admin_transfers.place_id` + `from_user_id == текущий админ`.
 3. Кнопка «Я админ места» показывает контакт суперадмина (username/ссылка
-   из `.env: SUPERADMIN_CONTACT`). Нажатие не выдаёт полномочий и не меняет
-   ролей — обращение к суперадмину пользователь делает сам.
+   из `.env: SUPERADMIN_CONTACT`). Нажатие не выдаёт полномочий, не создаёт
+   заявку и не меняет ролей — обращение к суперадмину пользователь делает сам.
+4. Суперадмин назначает администратора места **по постоянному Telegram user
+   ID** (не по username); создатель места администратором автоматически не
+   становится. У места может не быть администратора вовсе.
+5. Права проверяются на уровне бизнес-логики и ограничений БД, а не только
+   видимостью кнопок: callback с чужим `place_id` должен получить отказ
+   независимо от того, как выглядел экран.
 
 ---
 
 ## 5. Жизненные циклы
+
+Ниже — целевые жизненные циклы будущих этапов. В Stage 19A реализована
+только схема `users`/`places`/`place_names` и слой создания; Telegram-флоу
+поиска/создания, альтернативные названия, админы и шаблоны ещё не работают.
 
 ### 5.1. Место
 
@@ -493,7 +606,7 @@ CREATE TABLE schema_migrations (
                                             ▼
         ACTIVE ─────────────────────────────────────────────────────┐
           • alt-имена: добавляют все, правят/удаляют админ/суперадмин│
-          • стандартный шаблон создан автоматически (версия 1)       │
+          • стандартный шаблон создаётся на этапе шаблонов (Stage 23)│
           • админ назначается суперадмином (Stage 20)                │
           • переименование/правка адреса — админ или суперадмин      │
         ARCHIVED (только суперадмин, «скрыть»): старые черновики      │
@@ -501,22 +614,31 @@ CREATE TABLE schema_migrations (
 ```
 
 - Пользователь, добавивший место, **не** становится его админом (прямое
-  требование ТЗ); `places.created_by` — только служебная информация.
+  требование ТЗ); `places.created_by_user_id` — только служебная информация.
 - Неявного слияния мест нет; слияние — отдельная осознанная операция
   администратора (рекомендация §13.2).
+- Фотографии не участвуют в жизненном цикле места: это вложения анонса,
+  а не свойство места или шаблона.
 
 ### 5.2. Шаблон
 
 ```
-PLACE (стандартный):  создан автоматически при создании места (v1)
+PLACE (стандартный):  создаётся автоматически на этапе шаблонов
+                       (Stage 23, v1); в 19A/19B его ещё нет
    ACTIVE ──правка секции админом/суперадмином──► новая версия vN
         │ «Сбросить к стандартному» (секция) → подтверждение → seeded-текст vN+1
 PERSONAL (личный):     создаётся пользователем (копия/пустой)
    ACTIVE ──правка владельцем──► новая версия
         │ применяется к любому месту при создании анонса
+        │ виден и доступен ТОЛЬКО владельцу; шаринг/публикация не входят
+        │ в roadmap 19–28
         │ «Сбросить» = возврат секции к исходному содержимому этого шаблона
 ARCHIVED: старые версии доступны черновикам через снимок (§9)
 ```
+
+- Стандартный шаблон принадлежит конкретному месту; личный — конкретному
+  пользователю. Никаких «общих» или публикуемых личных шаблонов нет.
+- Фотографии не являются частью шаблона и не версионируются вместе с ним.
 
 ### 5.3. Кирпичик
 
@@ -530,7 +652,7 @@ PERSONAL: пользователь создал → ACTIVE (owner_user_id)
 PLACE:  заявка одобрена админом места → кирпичик scope='place' создан атомарно
 GLOBAL: заявка одобрена суперадмином  → кирпичик публикуется как
         scope='system' с тем же code (owner_user_id остаётся NULL по
-        CHECK §3.4; автор фиксируется в created_by),
+        CHECK §3.4; автор фиксируется в created_by_user_id),
         код остаётся за кирпичиком навсегда
 ARCHIVED: не предлагается в новых шаблонах; старые анонсы рендерятся
         по снимку
@@ -542,10 +664,13 @@ ARCHIVED: не предлагается в новых шаблонах; стар
 PENDING ──одобрено──► APPROVED (кирпичик создан той же транзакцией)
    │  ──отклонено───► REJECTED (+причина, видна автору)
    │  ──отозвано─────► WITHDRAWN (автором, пока PENDING)
-   │  ──истёк срок (30 дней)──► EXPIRED (лениво, при чтении)
    └  повторное предложение → новая заявка (revises_id), старая — superseded
 ```
 
+- **Срока давности у заявок нет.** `PENDING` существует до решения
+  администратора/суперадмина или отзыва автором; автоматического истечения
+  через 30 дней и статуса `EXPIRED` нет.
+- Открытая заявка не блокирует автору другие действия; он может её отозвать.
 - Конкуренция решений: обе кнопки (админ места и суперадмин) делают
   условный `UPDATE ... WHERE status='pending'`; второй решивший получает
   честный ответ «заявка уже рассмотрена» (§10.3).
@@ -556,41 +681,83 @@ PENDING ──одобрено──► APPROVED (кирпичик создан 
 
 ### 5.5. Передача администрирования места (24 часа)
 
+Общие правила:
+
+- передаёт только действующий администратор места; **до подтверждения права
+  остаются у прежнего администратора**;
+- получатель должен быть надёжно установлен. Одноразовый токен/ссылка
+  доказывают лишь доступ к ссылке, но **не** личность и **не** совпадение с
+  введённым `@username`;
+- окончательное подтверждение делается в личном чате получателя; только
+  после него одна транзакция атомарно меняет администратора;
+- если надёжно установить адресата нельзя, автоматическая передача прав
+  не выполняется. Бот не делает предположений о Telegram API, которых у него
+  нет: username он знает только по ранее увиденным пользователям.
+
+#### A. Получатель уже известен боту
+
 ```
-[админ места] «Передать админку»
-   → ввод @username получателя
-   → resolve_username(username):
-        • известен ровно один user в users.username=username
-            → заявка PENDING c to_user_id; получателю в ЛИЧНЫЙ ЧАТ (он
-              уже писал боту — Telegram это позволяет) кнопки
-              «Подтверждаю» / «Отклоняю»
-        • несколько совпадений (username менялся) → админ выбирает
-          кандидата из списка; заявка создаётся к выбранному user_id
-        • не найден → одноразовая ССЫЛКА-приглашение
-            https://t.me/<bot>?start=tf_<transfer_id>_<token>
-            (токен 32 байта, в БД только sha256; админ пересылает её
-            получателю сам — бот не может написать первым)
-              получатель открывает ссылку → бот по токену определяет
-              получателя → экран «Подтверждаю/Отклоняю» → to_user_id
-              фиксируется за этим user_id
-   → PENDING срок 24 ч (expires_at)
+[админ] «Передать админку» → вводит @username
+   → поиск по users.username (последнее увиденное значение; это подсказка,
+     а не идентификатор)
+       • найден один/несколько кандидатов → админ явно выбирает карточку
+         конкретного user_id (не просто подтверждает текст username)
+       • никого → сценарий B
+   → заявка PENDING с to_user_id = выбранный users.id
+   → получателю в ЛИЧНЫЙ ЧАТ (он уже писал боту — Telegram это позволяет):
+     «Администратор места … передаёт вам управление»
+     [Подтверждаю] [Отклоняю]
+```
+
+Даже при известном username решает именно выбранный `user_id`: username
+мог смениться или достаться другому человеку.
+
+#### B. Получатель неизвестен боту
+
+```
+[админ] создаёт одноразовую ссылку-приглашение
+   https://t.me/<bot>?start=tf_<transfer_id>_<token>
+   (токен 32 байта; в БД только sha256; админ передаёт ссылку сам —
+    бот не может писать незнакомому пользователю первым)
+[получатель] открывает ссылку
+   → бот фиксирует opened_by_user_id + opened_at
+   → экран: «Приглашение открыто. Это ещё не передача: инициатор должен
+     подтвердить получателя»
+   → НИКАКИХ прав и НИКАКОГО to_user_id на этом шаге
+[админ] видит: «Ссылку открыл пользователь X (id N).
+                 [Утвердить получателем] [Отменить]»
+   → только после явного утверждения to_user_id = opened_by_user_id
+[получатель] в личном чате: [Подтверждаю] [Отклоняю]
+```
+
+Если ссылку открыл не тот человек, админ отменяет передачу и создаёт новую;
+открытие ссылки само по себе никогда не назначает администратора.
+
+#### Подтверждение получателя
+
+```
 [получатель] «Подтверждаю»:
    атомарная транзакция (BEGIN IMMEDIATE):
      1) transfer: status='pending' AND expires_at > now
+                   AND to_user_id = нажавший пользователь
      2) place_admins: строка места всё ещё admin_user_id = from_user_id
-     3) UPDATE place_admins SET admin_user_id = to_user_id, granted_by=from
+     3) UPDATE place_admins SET admin_user_id = to_user_id,
+        granted_by_user_id = from_user_id
+        (rowcount == 1 — обязательный критерий успеха)
      4) UPDATE admin_transfers SET status='confirmed', confirmed_at=now
-        WHERE id=? AND status='pending'
+        WHERE id=? AND status='pending' AND to_user_id=?
    → прежний админ полностью теряет права места (строка одна)
-[иначе] EXPIRED (лениво при чтении/нажатии), CANCELLED (инициатором),
-        SUPERSEDED (создана новая передача этого же места)
+[иначе] EXPIRED (лениво при чтении/нажатии, 24 часа),
+        CANCELLED (инициатором), SUPERSEDED (создана новая передача)
 ```
 
 Защиты (каждая — отдельный тест §11):
 
 | Угроза | Механизм |
 |---|---|
-| Подтверждение посторонним | Кнопка только в чате получателя; токен-ссылка одноразовая, хранится хэшем |
+| Подтверждение посторонним | Кнопка только в чате `to_user_id`; проверка `to_user_id = нажавший` в транзакции |
+| Токен-ссылка перехвачена | Открытие даёт только кандидата `opened_by_user_id`; права появляются лишь после утверждения инициатором и подтверждения получателем |
+| Введён неверный/чужой username | Username — подсказка; инициатор выбирает конкретный `users.id`, получатель подтверждает |
 | Смена username получателя | После фиксации `to_user_id` проверяется именно user_id, не username |
 | Повторное подтверждение | `WHERE status='pending'` — второе нажатие видит `confirmed` и отвечает «уже подтверждено» |
 | Конкурирующие передачи | Новая передача помечает прежнюю `superseded` |
@@ -598,14 +765,19 @@ PENDING ──одобрено──► APPROVED (кирпичик создан 
 | Устаревшие кнопки | Статус/срок перечитываются из БД, кнопки без актуального статуса дают честный ответ |
 | Отзыв полномочий инициатора в ожидании | Шаг (2): передатчик обязан оставаться текущим админом |
 | Подмена ID места | `place_id` берётся из строки заявки, а не из callback подтверждения |
-| Неожиданный перезапуск | Всё состояние — в БД (`expires_at`, статус); никакого состояния в памяти процесса |
+| Неожиданный перезапуск | Всё состояние — в БД (`expires_at`, `opened_by_user_id`, статус); никакого состояния в памяти процесса |
 | Роль переходит дважды | Строка `place_admins` одна; UPDATE условный, `rowcount==1` — обязательный критерий успеха |
 
 ### 5.6. Нормализация и сравнение названий мест
 
-- Нормализация (`name_search`): NFKC, нижний регистр, `ё→е`,
-  удаление пунктуации/дефисов/кавычек, сжатие пробелов. Хранится рядом
-  с оригиналом, меняется вместе с ним.
+- Нормализация (`name_search`): NFKC, casefold/нижний регистр, `ё→е`,
+  пунктуация и пробельные символы заменяются пробелом, пробелы сжимаются,
+  результат обязан быть непустым. Хранится рядом с оригиналом, меняется
+  вместе с ним. Примеры: `Кофейня «Дом»` → `кофейня дом`,
+  `Ёлка-Кафе` → `елка кафе`.
+- Эта нормализация **уже реализована** в Stage 19A
+  (`place_store.normalize_place_name`) и используется ограничением
+  `UNIQUE(place_id, name_search)`; поиск/подсказки появятся в Stage 19B.
 - Поиск: точное совпадение `name_search` → кандидаты; затем префикс и
   подстрока; затем похожесть (коэффициент Жаккара по 3-граммам ≥ 0.8 —
   порог фиксируется тестами).
@@ -635,7 +807,7 @@ PENDING ──одобрено──► APPROVED (кирпичик создан 
   "schema": 1,
   "sections": {
     "header": "🎬 [название]\n[дата], [время_начала]",
-    "body":   "[описание]\n[фото]",
+    "body":   "[описание]",
     "footer": "📍 [место]([ссылка_места])\n[контакт]"
   }
 }
@@ -644,6 +816,8 @@ PENDING ──одобрено──► APPROVED (кирпичик создан 
 - Порядок секций при рендере фиксирован: шапка → тело → подвал; внутри
   секции — как написано.
 - Пустая секция — допустима (в анонсе не даёт строки).
+- В секциях нет и не может быть узла/токена фотографий: изображения —
+  отдельная коллекция вложений анонса (§7.5).
 
 ### 6.2. Что шаблон определяет
 
@@ -652,8 +826,11 @@ PENDING ──одобрено──► APPROVED (кирпичик создан 
    `ссылка_места`, `адрес`) берутся из выбранного места; известные значения
    не спрашиваются повторно (§8.3).
 3. **Что спросить у пользователя:** остальные кирпичики без значения.
-4. **Куда встают фотографии:** кирпичик `фото` обязан быть отдельным
-   абзацем; рендер строит план сообщений «текст → альбом → текст» (§7.5).
+4. **Фотографии шаблон не определяет.** Это независимая коллекция вложений
+   конкретного анонса: она может быть пустой или содержать любое число
+   фотографий/альбомов независимо от выбранного шаблона. Отсутствие
+   изображений никогда не блокирует создание анонса. Текстовый рендер и
+   сборка публикации с вложениями разделены (§7.5).
 
 ### 6.3. Значения кирпичиков (`payload_json`)
 
@@ -665,18 +842,21 @@ PENDING ──одобрено──► APPROVED (кирпичик создан 
 | `url` | `{"url": "https://…"}` |
 | `number` | `{"number": 350}` |
 | `choice` | `{"choice": "Кино"}` / `{"choices": […]}` |
-| `photos` | `{"file_ids": ["…"]}` |
 
 `formats_json` в `draft_values` — HTML-представление значения с
 форматированием Telegram (аналог `Draft.formats`, §1.2).
+
+Фотографии **не имеют** записи в `draft_values`: их file_id остаются в
+существующей коллекции вложений анонса (`Draft.image`/`Draft.photos` и
+WIP-снимок) и не смешиваются со значениями текстовых кирпичиков.
 
 ### 6.4. «Стандартное содержимое» для кнопки «Сбросить к стандартному»
 
 - **Стандартный шаблон места** — авто-сгенерированный текст из seeded-функции
   `default_place_sections(place)`: шапка `[название]` + `[дата], [время_начала]`;
-  тело `[описание]`, `[фото]`; подвал `[место]([ссылка_места])`,
-  `[контакт]`. Сброс секции возвращает именно этот текст (и создаёт
-  новую версию), независимо от того, сколько правок было до этого.
+  тело `[описание]`; подвал `[место]([ссылка_места])`, `[контакт]`. Сброс
+  секции возвращает именно этот текст (и создаёт новую версию), независимо
+  от того, сколько правок было до этого. Фотографии в seeded-текст не входят.
 - **Личный шаблон** — исходное содержимое этого личного шаблона, зафиксированное
   в его первой версии `template_versions(version=1)`. Личный шаблон не
   привязан к месту, поэтому «стандарт места» ему не подставляется.
@@ -724,10 +904,10 @@ escape       = "\" , any_char ;
    либо литеральный URL, прошедший `normalize_url`.
 2. Вложенная гиперссылка запрещена: `link.target` не может сам быть
    `LinkNode`; `[a]([b](c))` — ошибка «ссылка не может быть вложена в ссылку».
-3. Кирпичик `фото` допустим только отдельным абзацем (не внутри ссылки
-   и не в строке с другими узлами) — иначе ошибка с пояснением.
-4. Ссылка на несуществующий/архивный кирпичик — ошибка предпросмотра
+3. Ссылка на несуществующий/архивный кирпичик — ошибка предпросмотра
    с подсказкой ближайших кодов (§7.6).
+4. Фотографии не являются узлами грамматики: токена `[фото]` нет.
+   Единственные узлы — текст, кирпичик, ссылка, стиль и перевод строки.
 
 ### 7.3. Конвейер обработки (промежуточное представление)
 
@@ -742,16 +922,18 @@ escape       = "\" , any_char ;
         BrickNode(brick_id, attrs)    — ссылка на кирпичик
         LinkNode(label: IR, target: BrickNode | UrlLiteral)
         StyleNode(style, child)       — b/i/u/s/code/spoiler (из entities/Markdown)
-        PhotoNode                     — [фото]
         NewlineNode
    → 3. Резолвер: BrickNode → значение из draft_values / места / вопроса
         (неизвестное значение → узел-заглушка «—» и запись в отчёт предпросмотра)
    → 4. Рендер IR → Telegram-HTML: каждый узел строит разметку сам
         (escape_html один раз на текстовый узел; вложенные Style/Link —
         корректная вложенность тегов по построению)
-   → 5. План сообщений: текстовые части (split_html из utils.tg_html)
-        + позиции альбомов по PhotoNode
+   → 5. План ТЕКСТОВЫХ сообщений: текстовые части (split_html из utils.tg_html)
 ```
+
+Конвейер заканчивается текстом. Вложения не входят в IR и не участвуют в
+шагах 1–5: сборка публикации (§7.5) получает уже отрендеренный HTML и
+отдельный список фотографий анонса.
 
 ```python
 # псевдокод рендера узлов
@@ -763,7 +945,6 @@ def render(node) -> str:
             href = resolve_url(tgt)  # normalize_url; None → без <a>, +диагностика
             return f'<a href="{escape_html(href)}">{render(label)}</a>' if href else render(label)
         case StyleNode(st, child):  return wrap(st, render(child))
-        case PhotoNode():           return ""             # уходит в план сообщений
         case NewlineNode():         return "\n"
 ```
 
@@ -778,15 +959,34 @@ def render(node) -> str:
 | `Наше-уютное-место([ссылка_места])` | `<a href="URL">Наше уютное место</a>` (дефисы → пробелы) |
 | `\[не кирпичик\]` | текст `[не кирпичик]` |
 
-### 7.5. Фотографии и альбомы
+### 7.5. Текстовый рендер и сборка публикации с вложениями
 
-- `PhotoNode` не рендерится в текст: план сообщений режет IR на
-  «до альбома» и «после альбома»; каждая часть — отдельная текстовая часть,
-  альбом идёт между ними (подпись — первая часть, лимит 1024, §1.2).
-- Если `[фото]` нет в шаблоне, но фотографии есть — текущее поведение
-  сохраняется (альбом после первого текстового сообщения, `send_post`).
-- Несколько `[фото]` в шаблоне — ошибка предпросмотра (один медиа-блок
-  на анонс; вопрос вынесен в §13.9).
+**Фотографии — вложения анонса, а не кирпичики и не узлы шаблона.**
+
+- В тексте шаблона нет `[фото]`; попытка использовать такой код — обычная
+  ошибка «неизвестный кирпичик», а не особый случай.
+- Коллекция изображений принадлежит конкретному анонсу и не зависит от
+  выбранного шаблона: 0, 1, несколько фото или несколько альбомов.
+- Существующий приём (одиночные фото, медиагруппы, накопление нескольких
+  альбомов, хранение `file_id`, отправка чанками по лимиту Telegram)
+  сохраняется без изменений. В Stage 19A этот код не меняется.
+- Отсутствие фотографий **никогда не блокирует** создание/сохранение анонса.
+
+**Два независимых слоя:**
+
+1. **Текстовый рендер** (IR §7.3) собирает HTML только из секций шаблона и
+   значений кирпичиков. Он не знает о фотографиях.
+2. **Сборка публикации** получает готовый HTML + отдельный список вложений
+   анонса и формирует сообщения Telegram: текстовые части через `split_html`
+   (4000/4096 UTF-16), подпись к медиа (1000/1024), альбомы по 10,
+   прогресс частичной доставки Stage 12. Порядок и правила — существующего
+   `send_post`; шаблон не задаёт позицию альбома.
+
+- Снимок шаблона (`template_snapshot`) содержит только секции; правка
+  шаблона не затрагивает фотографии, а добавление/удаление фото не меняет
+  шаблон.
+- Для фотографий не создаётся специальный rich-редактор: редактирование
+  вложений остаётся существующим фото-потоком.
 
 ### 7.6. Диагностика ошибок (обычному пользователю)
 
@@ -836,8 +1036,9 @@ def render(node) -> str:
                             название» / «Вернуться к списку»)
  → ВЫБОР ШАБЛОНА (стандартный места — всегда; личные шаблоны пользователя)
  → ВОПРОСЫ       (только кирпичики без значения; date → календарь Stage 17,
-                  url → normalize_url, photos → существующий фото-поток)
- → ПРЕДПРОСМОТР  (рендер шаблона с ответами)
+                  url → normalize_url)
+ → ФОТОГРАФИИ    (необязательно; существующий фото-поток, НЕ кирпичик)
+ → ПРЕДПРОСМОТР  (рендер шаблона с ответами + отдельные вложения)
  → ДОП. ИНФОРМАЦИЯ (§8.5) / правки
  → СОХРАНЕНИЕ/ЗАВЕРШЕНИЕ (черновики, «Готово» — без изменений)
 ```
@@ -864,8 +1065,6 @@ def needed_questions(snapshot, place, answers) -> list[Question]:
         if brick.source == "place" and place_value_known(place, brick):
             answers[brick.id] = place_value(place, brick)   # не спрашиваем
             continue
-        if brick.type == "photos":
-            continue             # фото собирает существующий фото-поток
         seen.append(Question(brick))
     return seen
 ```
@@ -898,8 +1097,9 @@ def needed_questions(snapshot, place, answers) -> list[Question]:
    и другие анонсы не меняются.
 5. В списке «Доп. информация» вставленные кирпичики можно отредактировать
    (значение/позиция) или удалить.
-6. Кирпичик `фото` в «доп. информации» не предлагается (медиа-план один,
-   §7.5); при необходимости позицию альбома меняет редактор секций.
+6. Фотографии в «доп. информации» не участвуют: это не кирпичик и не
+   элемент текста. Они добавляются/убираются отдельным фото-потоком,
+   независимо от шаблона и доп. вставок.
 
 ### 8.6. Редактирование поста в новой модели
 
@@ -907,6 +1107,8 @@ def needed_questions(snapshot, place, answers) -> list[Question]:
 `edit_<brick_id>` → промпт по типу кирпичика → обновление значения →
 новое превью. Режим EDIT_FIELD расширяется полем `edit_brick`; календарь
 даты привязывается к кирпичику `дата` тем же кодом, что и сейчас.
+Фотографии редактируются отдельным существующим фото-потоком и в меню
+кирпичиков не появляются.
 
 ---
 
@@ -914,16 +1116,19 @@ def needed_questions(snapshot, place, answers) -> list[Question]:
 
 ### 9.1. Принципы
 
-1. **Только добавочные миграции** — тот же стиль, что `_migrate()` в
-   `database.py`, но с версионированием: таблица `schema_migrations` (§3.10)
-   и упорядоченный список `MIGRATIONS[stage]`, каждая запись идемпотентна.
+1. **Только добавочные миграции.** С Stage 19A это реализовано:
+   `migrations.py` + журнал `schema_migrations` с контрольными суммами,
+   транзакционным применением и проверкой версий (docs/migrations.md).
+   Каждая новая миграция добавляется в конец списка; уже применённые
+   миграции не редактируются.
 2. Никаких разрушительных операций (DROP/переименование колонок,
    перезапись данных). Если однажды понадобится — отдельно оформленный план
-   восстановления: копия `post_bot.db` + WAL-контрольточка перед ручным
-   запуском, откат = возврат копии. Реальная база никогда не мигрирует
-   из тестов; миграции на проде — осознанный ручной запуск владельца.
-3. Тесты миграций — только на временных БД (по образцу
-   `tests/test_stage13_migrations.py`).
+   восстановления: остановка бота, резервная копия `post_bot.db` (+ WAL),
+   ручной запуск, откат = возврат копии. Реальная база никогда не мигрирует
+   из тестов; миграции на проде — осознанный запуск владельца.
+3. Тесты миграций — только на временных БД (Stage 19A:
+   `tests/test_stage19a_migrations.py`, включая старую схему с фиктивными
+   черновиками и WIP).
 
 ### 9.2. WIP (user_states.payload)
 
@@ -947,6 +1152,8 @@ def needed_questions(snapshot, place, answers) -> list[Question]:
 - Снимок v2 может содержать **смешанные** данные: легаси-поля заполнены
   (совместимость с прежними экранами), `answers` — значения новых
   кирпичиков.
+- Фотографии в `template_snapshot`/`answers` не попадают: они остаются в
+  существующих `photos` WIP-снимка и переживают рестарт отдельно.
 
 ### 9.3. Чтение старых черновиков (`payload_level=1`)
 
@@ -964,7 +1171,10 @@ def needed_questions(snapshot, place, answers) -> list[Question]:
 | `place_url` | `ссылка_места` | url |
 | `text` | `описание` | long_text |
 | `contact` | `контакт` | short_text |
-| `image`/`photos` | `фото` | photos |
+
+`image`/`photos` **не** отображаются на кирпичик: это независимая коллекция
+вложений анонса. При явной конвертации она переносится в новую модель как
+отдельные данные и не превращается в `draft_values`.
 
 Если владелец откроет старый черновик и принудительно применит шаблон,
 происходит явная конвертация: значения 9 полей переносятся в `draft_values`,
@@ -983,8 +1193,8 @@ def needed_questions(snapshot, place, answers) -> list[Question]:
 
 ### 9.5. Контрольная точка совместимости
 
-- После Stage 27 прогон: все существующие тесты (591) зелёные;
-  новые тесты на «старый черновик → открытие → правка → сохранение»
+- После Stage 27 прогон: все существующие тесты (на момент Stage 19A — 622)
+  зелёные; новые тесты на «старый черновик → открытие → правка → сохранение»
   не меняют строку `payload_level`.
 
 ---
@@ -1003,8 +1213,13 @@ def needed_questions(snapshot, place, answers) -> list[Question]:
   пользователя (правило Stage 17 сохраняется для всех новых сценариев).
 - Дисциплина Telegram-лимитов сохраняется: 4096 знаков на текстовое
   сообщение, 1024 на подпись к альбому (лимиты Stage 10/12 проверяются в
-  UTF-16), callback ≤ 64 байт. Новые кирпичики ограничиваются Telegram-лимитами
-  и `rules_json` без отдельных лимитов на поля.
+  UTF-16), callback ≤ 64 байт. Новые кирпичики ограничиваются только
+  платформенными лимитами; произвольных молчаливых обрезаний нет.
+- Если текст не помещается, публикация разбивает сообщения (`split_html`)
+  или явно сообщает об ошибке; введённые данные при этом не теряются.
+- Фотографии подчиняются своим платформенным правилам (10 в альбоме,
+  1024 в подписи) и обрабатываются существующей отправкой чанками; они не
+  становятся кирпичиками и не влияют на лимиты текстовых полей.
 
 ### 10.2. Кнопки и устаревшие состояния
 
@@ -1024,13 +1239,15 @@ def needed_questions(snapshot, place, answers) -> list[Question]:
 ```python
 with session.begin():                       # BEGIN IMMEDIATE (SQLAlchemy)
     row = session.get(BrickProposal, pid, with_for_update=True)
-    if row.status != "pending" or expired(row):
-        return HonestAnswer("Заявка уже рассмотрена/истекла")
+    if row.status != "pending":             # у заявок нет срока
+        return HonestAnswer("Заявка уже рассмотрена")
     row.status = "approved"
     create_brick(session, row.payload_json)  # та же транзакция
 # commit: атомарно; сбой → rollback, кирпичик не создан наполовину
 ```
 
+- Для передач админки дополнительно проверяется `expires_at` внутри той же
+  транзакции; у заявок на кирпичики срока нет — только решение или отзыв.
 - SQLite — один писатель (WAL + busy_timeout 30 с): длинных блокировок нет,
   откаты честны; `rowcount`-проверки UPDATE обязательны.
 - Мультишаговые сценарии хранят прогресс в БД (заявка/передача/чертёж) —
@@ -1058,7 +1275,7 @@ with session.begin():                       # BEGIN IMMEDIATE (SQLAlchemy)
 | Модели/миграции | Схемы на временных БД, идемпотентность, легаси-строки | по образцу `test_stage13_migrations.py` |
 | Интеграция | Все сценарии чата через `process_update`: места, шаблоны, заявки, передачи | по образцу `test_stage17_calendar_flow.py` |
 | UI-покрытие | Перебор всех уровней меню, один экран, один answer, без пустых экранов | по образцу `test_stage17_calendar_coverage.py` |
-| Регрессии Stage 11–17 | 591 существующий тест остаётся зелёным на каждом этапе | существующие файлы |
+| Регрессии Stage 11–17 | 622 существующих теста остаются зелёными на каждом этапе | существующие файлы |
 
 ### 11.2. Критические сценарии (минимально обязательные)
 
@@ -1072,28 +1289,33 @@ with session.begin():                       # BEGIN IMMEDIATE (SQLAlchemy)
    истечение 24 ч (замороженное время); повторное подтверждение; вторая
    передача → `superseded`; увольнение инициатора в ожидании; подмена
    ID места; рестарт процесса посреди ожидания; передача незнакомому
-   пользователю по ссылке-приглашению (токен одноразовый, повторное
-   открытие ссылки — честный отказ).
+   пользователю по ссылке-приглашению: открытие ссылки даёт только
+   кандидата, без утверждения инициатора и подтверждения получателя права
+   не переходят; повторное открытие/использование токена — честный отказ.
 4. **Кирпичики:** создание личного; конфликт кода с системным запрещён;
    заявка на место (одобрение админом, второе решение, отзыв, повторная
-   подача); публикация глобально суперадмином.
+   подача); **отсутствие автоматического истечения заявки**; публикация
+   глобально суперадмином.
 5. **Шаблоны/редактор:** правка каждой секции; ошибки синтаксиса (неизвестный
-   кирпичик, вложенные ссылки, `[фото]` в строке); «Сбросить к стандартному»
-   только для выбранной секции; правка секции создаёт новую версию;
-   личный шаблон применяется к другому месту; черновик со снимком
+   кирпичик, вложенные ссылки, отсутствие `[фото]` как узла); «Сбросить к
+   стандартному» только для выбранной секции; правка секции создаёт новую
+   версию; личный шаблон применяется к другому месту; черновик со снимком
    переживает правку стандартного шаблона (§9.4).
 6. **Грамматика/рендер:** все примеры §7.4; вложенные стили Telegram
    (bold внутри ссылки и наоборот); экранированные скобки; `split_html`
    длинного рендера не рвёт теги; URL-цели без схемы нормализуются.
 7. **Адаптивное создание:** вопросы только для отсутствующих кирпичиков;
    кирпичик `source=place` не спрашивается при известном значении;
-   «доп. информация» — вставка/правка/удаление, позиция сохраняется,
-   стандартный шаблон не меняется; календарь даты и фото-поток работают
-   внутри нового потока.
+   фотографии — отдельный необязательный поток, не входящий в вопросы;
+   отсутствие фото не блокирует создание; «доп. информация» —
+   вставка/правка/удаление, позиция сохраняется, стандартный шаблон не
+   меняется; календарь даты и фото-поток работают внутри нового потока.
 8. **Миграции и WIP:** payload v1/v2; старый черновик открывается и не
-   меняется; конвертация черновика в шаблонную модель — один раз и явно.
+   меняется; конвертация черновика в шаблонную модель — один раз и явно;
+   Stage 19A дополнительно проверяет журнал версий, откат сбойной миграции,
+   конкурентный запуск и сохранность старых `drafts`/WIP.
 9. **Полнота/безопасность:** пустые экраны отсутствуют после каждого
-   действия; очищка временных сообщений только после подтверждённого
+   действия; очистка временных сообщений только после подтверждённого
    сохранения; callback ≤ 64 байт.
 
 ### 11.3. Принципы приёмки
@@ -1114,8 +1336,9 @@ with session.begin():                       # BEGIN IMMEDIATE (SQLAlchemy)
 
 | Факт | Влияние |
 |---|---|
-| Фреймворка миграций нет (`create_all` + ручные ALTER) | Stage 19 добавляет `schema_migrations` **первым** коммитом — иначе 22/23 начнут «вручную» расширять `_migrate()` без версии |
-| Стандартный шаблон места должен существовать с первого дня места (Stage 19) | Данные шаблона (таблицы §3.6) нужны уже в 19 — иначе миграция «задним числом» в 23 |
+| Нумерованные миграции и журнал **реализованы в Stage 19A** | Stage 22/23 добавляют новые версии; `_migrate()` больше не расширяется |
+| Stage 19A не содержит Telegram-UI, поиска и создания места | Stage 19B начинается с потока справочника; схема и репозиторий уже готовы |
+| Стандартный шаблон нужен к Stage 23, а не к первому дню места | До 23 работающий код не зависит от шаблонов; v1 создаётся/бэкфиллится миграцией Stage 23 |
 | Заявки на кирпичики (26) зависят от ролей (20) и кирпичиков (22) | Порядок корректен |
 | Редактор (25) требует парсер (24) | Порядок корректен |
 | Адаптивное создание (27) требует всего вышеуказанного + рендера превью (24) | Порядок корректен |
@@ -1125,26 +1348,38 @@ with session.begin():                       # BEGIN IMMEDIATE (SQLAlchemy)
 ### 12.2. Предлагаемые изменения (без механической перенумерации)
 
 1. **Stage 19 = Stage 19A + 19B.**
-   - 19A: `schema_migrations` + таблицы `users`, `places`, `place_names`
-     + поток создания места с проверкой дублей и кнопками из ТЗ + поиск.
-   - 19B: альтернативные названия (добавление пользователями) + реестр
-     «модель шаблона места»: автосоздание стандартного шаблона (v1)
-     с seeded-текстом; редактирование шаблона — не входит (это Stage 23).
+   - **19A (выполнено):** `schema_migrations`, таблицы `users`, `places`,
+     `place_names`, нормализация названий, атомарное создание места,
+     тесты ограничений и миграций. Telegram-интерфейса, поиска и
+     альтернативных названий нет.
+   - **19B:** Telegram-поток создания/поиска/выбора места, подсказки о
+     дублях, каноническое название. Альтернативные названия и автосоздание
+     стандартного шаблона v1 не входят в 19A; рекомендация — альтернативы
+     в Stage 20 (кабинеты), шаблон v1 в Stage 23 (там появляются таблицы
+     шаблонов). Точный состав 19B фиксируется отдельным заданием.
 2. **Stage 20 = пользователи/роли + кабинеты.** Добавить в него:
-   назначение/снятие админа суперадмином, кнопку «Я админ места»,
-   «входящие» кабинета (уведомления в экране), объединение дублей места
-   (осознанная операция админа; требование «не допускать неявных слияний»).
-3. **Stage 21** остаётся передачей админки (§5.5 целиком).
+   назначение/снятие админа суперадмином (по Telegram user ID),
+   кнопку «Я админ места» (только контакт суперадмина), «входящие»
+   кабинета (уведомления в экране), альтернативные названия мест и
+   объединение дублей места (осознанная операция админа; требование
+   «не допускать неявных слияний»).
+3. **Stage 21** остаётся передачей админки (§5.5 целиком, включая
+   двустороннюю привязку незнакомого получателя).
 4. **Stage 22 = реестр кирпичиков.** Плюс: сериализация значений
-   (`draft_values`), каталог типов и интерфейсов, сидирование девяти
-   системных кирпичиков постоянными кодами (Приложение А).
-5. **Stage 23 = шаблоны.** Плюс: `template_versions`, снимки в черновиках
-   (добавочные колонки), спецификация секций §6. Стандартный шаблон места
-   получает правку теперь; до этого он существует как v1 (см. 12.2.2).
-6. **Stage 24 = парсер/рендер.** Плюс: план сообщений с альбомом (§7.5)
-   и перенос `build_post_summary` на рендер IR (легаси-ветка остаётся).
+   (`draft_values`), каталог типов и интерфейсов, сидирование восьми
+   системных кирпичиков постоянными кодами (Приложение А). Фотографии
+   в реестр не входят.
+5. **Stage 23 = шаблоны.** Плюс: `templates`, `template_versions`, снимки
+   в черновиках (добавочные колонки), спецификация секций §6; здесь же
+   создаётся/бэкфиллится стандартный шаблон v1 для существующих мест.
+6. **Stage 24 = парсер/рендер.** Плюс: текстовый IR → HTML, `split_html`,
+   и отдельная сборка публикации «текст + независимые вложения» (§7.5)
+   с сохранением существующего `send_post`/альбомов; `build_post_summary`
+   переводится на рендер IR (легаси-ветка остаётся).
 7. **Stage 25 = редактор секций.** Плюс: предпросмотр с диагностикой.
-8. **Stage 26 = согласование кирпичиков.** Заявки/входящие/статусы.
+   Редактор не управляет фотографиями — для них остаётся фото-поток.
+8. **Stage 26 = согласование кирпичиков.** Заявки/входящие/статусы;
+   заявки бессрочны до решения или отзыва.
 9. **Stage 27 = адаптивное создание + «доп. информация».**
 10. **Stage 28 = сквозная интеграция:** регресс всех этапов, тесты
     совместимости черновиков, полное UI-покрытие и чек-лист
@@ -1152,7 +1387,7 @@ with session.begin():                       # BEGIN IMMEDIATE (SQLAlchemy)
 
 ### 12.3. Почему не объединять
 
-Каждый этап заканчивается зелёным регрессом (базис 591 теста + тесты
+Каждый этап заканчивается зелёным регрессом (базис 622 теста + тесты
 этапа) и не пересекается с соседями по файлам: конфликтов параллельной
 правки одной поверхности минимум. Объединение «кирпичики+шаблоны» или
 «парсер+редактор» сделало бы один этап вдвое больше самого крупного из
@@ -1164,18 +1399,19 @@ with session.begin():                       # BEGIN IMMEDIATE (SQLAlchemy)
 
 | # | Неоднозначность ТЗ | Рекомендация |
 |---|---|---|
-| 1 | «Публикация кирпичика глобально суперадмином» — каков итоговый статус? | Кирпичик становится `scope='system'` с тем же `code`; автор сохраняется в `created_by`. Одобренный код закрепляется за кирпичиком и не переиспользуется новой заявкой |
+| 1 | «Публикация кирпичика глобально суперадмином» — каков итоговый статус? | Кирпичик становится `scope='system'` с тем же `code`; автор сохраняется в `created_by_user_id`. Одобренный код закрепляется за кирпичиком и не переиспользуется новой заявкой |
 | 2 | Кто может сливать дубли мест | Явное слияние — операция администратора места/суперадмина (рекомендуется в Stage 20); пользователю — только подсказка «похожее место уже есть» |
 | 3 | «Выбрать альтернативное название» — что именно сохраняется? | Название фиксируется в анонсе (значение кирпичика `место`). Чтобы вариант стал постоянным альтернативным названием места (§5.1) — отдельное явное действие «Добавить альтернативное название» |
 | 4 | Формат ссылок `[место]([ссылка_места])` с подставлением URL | Гиперссылка рендерится только с допустимой целью; неизвестная/невалидная цель → текст без ссылки + диагностика предпросмотра |
 | 5 | Несколько экземпляров одного кирпичика | Разрешены: `occurrence` в draft_values и снимок; в списках «доп. информации» экземпляры различимы |
-| 6 | Время жизни заявки | 30 дней, ленивое истечение (без JobQueue — как Stage 14) |
-| 7 | Что ви́дит админ места о суперадмине | Кнопка «Я админ места» → контакт суперадмина из конфига; никаких прав при нажатии |
-| 8 | Никнейм меняется у получателя передачи | После фиксации `to_user_id` username не участвует; известный получатель выбирается по кандидату (§5.5) |
-| 9 | Несколько `[фото]` в шаблоне | Запрещено предпросмотром: один медиа-блок на анонс; расширение — отдельное решение владельца |
-| 10 | Видимость личных шаблонов | Только владелец; шаринг — будущий этап (не входит в карту 19–28) |
+| 6 | Время жизни заявки на кирпичик | **Бессрочно:** `pending` до решения администратора/суперадмина или отзыва автором. Автоматического истечения через 30 дней и статуса `expired` нет |
+| 7 | Что видит пользователь по кнопке «Я админ места» | Только контакт суперадмина из конфига; заявка не создаётся, права не выдаются |
+| 8 | Как передать админку незнакомому получателю | Одноразовая ссылка: открытие фиксирует только кандидата; инициатор явно утверждает конкретный user_id, получатель подтверждает в чате. Токен сам по себе прав не даёт и не доказывает личность |
+| 9 | Фотографии в шаблоне | Фотографии — **вложения анонса, а не кирпичик**: токена `[фото]`, узла Photo и типа `photos` нет. Коллекция 0..N фото/альбомов не зависит от шаблона; отсутствие фото не блокирует создание |
+| 10 | Видимость личных шаблонов | Только владелец; публикация/шаринг не входят в roadmap 19–28 |
 | 11 | Идут ли старые черновики через новую модель при открытии | Нет: читаются легаси-адаптером; конвертация — только явная (§9.3) |
-| 12 | Где живут правила ввода кирпичиков (лимиты, валидация, интерфейс) | В `rules_json` как данные; тип и его интерфейс — в каталоге типов; миграции схемы не требуются |
+| 12 | Где живут правила ввода кирпичиков (лимиты, валидация, интерфейс) | В `rules_json` как данные; тип и его интерфейс — в каталоге типов; миграции схемы не требуются. Произвольных молчаливых обрезаний нет: платформенные лимиты — разбиение или явная ошибка без потери данных |
+| 13 | Что входит в Stage 19B после сокращения 19A | 19A — только инфраструктура (выполнено). 19B — создание/поиск/выбор места в чате; альтернативы и шаблон v1 — отдельные шаги (рекомендация: Stage 20 и Stage 23) |
 
 ---
 
@@ -1185,11 +1421,12 @@ with session.begin():                       # BEGIN IMMEDIATE (SQLAlchemy)
 |---|---|---|
 | Разрастание `post_creation.py` (2705 строк) до нечитаемости | Регрессии, конфликты правок | Новые флоу — отдельные модули `handlers/places.py`, `handlers/templates.py`, `handlers/brick_editor.py`; `post_creation.py` получает только точки входа |
 | Грамматика шаблонов недооценена (вложенные стили/ссылки) | Битые анонсы, инъекции | IR-конвейер §7.3, переносимые тесты §11.2.6, отклонение полного Markdown |
-| Ленивые статусы (передача/заявки) забываются | «Вечные» приглашения | Проверка `expires_at` в самой транзакции + тесты на замороженном времени |
+| Ленивые статусы передачи забываются | «Вечные» приглашения | Проверка `expires_at` в самой транзакции + тесты на замороженном времени; заявки кирпичиков при этом бессрочны осознанно |
 | Двойная запись значений (легаси-колонки и draft_values) | Расхождение данных | Легаси — только для 9 полей старых черновиков; новые значения — только `draft_values`; адаптер чтения — единственный путь к колонкам |
-| Telegram-ограничения (64 Б callback, 100 кнопок, 4096/1024 текста) | Падения экранов | Та же дисциплина Stage 11/17: пагинация, короткие callback, `split_html` |
-| Бот не может писать незнакомым пользователям | Передача админки «в никуда» | Ссылка-приглашение с одноразовым токеном (§5.5) |
-| Миграции повреждают реальную базу | Потеря данных | Только добавочные шаги; тесты на временных БД; реальная база не мигрируется из кода без ручного бэкапа |
+| Telegram-ограничения (64 Б callback, 100 кнопок, 4096/1024 текста) | Падения экранов | Та же дисциплина Stage 11/17: пагинация, короткие callback, `split_html`; без молчаливых обрезаний |
+| Бот не может писать незнакомым пользователям | Передача админки «в никуда» | Ссылка-приглашение с одноразовым токеном; открытие даёт лишь кандидата, нужны утверждение инициатора и подтверждение получателя (§5.5) |
+| Перехваченная ссылка-приглашение | Посторонний получает место | Токен не доказывает личность и не даёт прав: `opened_by_user_id` — только кандидат, `to_user_id` утверждает действующий админ, финальное подтверждение — у получателя |
+| Миграции повреждают реальную базу | Потеря данных | Нумерованный журнал, контрольные суммы, одна транзакция на запуск, тесты на временных БД; реальная база — только после резервной копии и осознанного запуска |
 | Уход от «одного экрана» | Чат переполняется сообщениями | Все новые флоу обязаны рендерить через `screen.render_screen`; приёмочные тесты проверяют отсутствие лишних сообщений (второго экрана) |
 | Суперадмин конфиг с ошибкой | Роль потеряна | Валидация `SUPERADMIN_USER_IDS` при старте (фоллбек-список тоже), тест на парсинг конфига |
 
@@ -1213,7 +1450,7 @@ with session.begin():                       # BEGIN IMMEDIATE (SQLAlchemy)
               ↳ это совпадение или ваше — другое место?
               [Вернуться к списку] [Создать новое место «Кофейня „Дом“»]
 Пользователь: (кнопка) Создать новое место
-Бот (экран):  Место создано и доступно всем. Стандартный шаблон создан (v1).
+Бот (экран):  Место создано и доступно всем.
               Продолжим: [Выбрать шаблон] [◀️ Назад]
 ```
 
@@ -1259,7 +1496,8 @@ with session.begin():                       # BEGIN IMMEDIATE (SQLAlchemy)
 Бот (экран):  Личный кирпичик [age_limit] создан (только у вас).
               [Предложить месту…] [Предложить глобально…] [Готово]
 Пользователь: (кнопка) Предложить месту «Кофейня «Дом»»
-Бот (экран):  Заявка отправлена администратору места (срок 30 дней).
+Бот (экран):  Заявка отправлена администратору места. Срока давности нет:
+              она ждёт решения или отзыва автором.
 Админ места (кабинет → входящие):
               Пользователь предлагает кирпичик «Возрастное ограничение»
               (код age_limit, тип «текст») для места.
@@ -1304,9 +1542,10 @@ with session.begin():                       # BEGIN IMMEDIATE (SQLAlchemy)
               Вопросы (по кирпичикам без значений):
               − [дата]          → календарь Stage 17
               − [время_начала]  → текст
-              − [фото]          → привычный фото-поток
               кирпичики [место] и [ссылка_места] НЕ спрашиваются:
               значения берутся из справочника мест.
+              Фотографии (необязательно) добавляются отдельным привычным
+              фото-потоком; шаблон их не задаёт и не ограничивает.
 ```
 
 ### 15.7. Добавление отсутствующего кирпичика в конкретный анонс
@@ -1324,11 +1563,34 @@ with session.begin():                       # BEGIN IMMEDIATE (SQLAlchemy)
               [Отредактировать значение] [Изменить позицию] [Убрать]
 ```
 
+### 15.8. Передача админки незнакомому получателю (двусторонняя привязка)
+
+```
+Админ (кабинет): Передать админку → @new_person
+Бот:  Пользователь @new_person боту ещё не писал. Передайте ему ссылку:
+      https://t.me/<bot>?start=tf_42_<token>
+      Ссылка действует 24 часа. Открытие ссылки само по себе прав не даёт.
+Получатель (открыл ссылку): Приглашение открыто. Это ещё не передача:
+      инициатор должен утвердить вас, после чего вы подтвердите согласие.
+      [Понятно] [Отказаться]
+Админ (экран): Ссылку открыл пользователь New Person (id 777).
+      [Утвердить получателем] [Отменить]
+Админ: (кнопка) Утвердить получателем
+Получатель (личный чат): Вам передают управление местом «Кофейня «Дом»».
+      [Подтверждаю] [Отклоняю]
+Получатель: Подтверждаю
+Бот:  Роль передана атомарно. Если ссылку открыл не тот человек, админ
+      отменяет передачу до подтверждения — права остаются у прежнего админа.
+```
+
 ---
 
 ## Приложение А. Соответствие девяти полей и кирпичиков
 
-Сидируются миграцией Stage 22 с фиксированными (неизменяемыми) кодами:
+Сидируются миграцией Stage 22 с фиксированными (неизменяемыми) кодами.
+Девять полей анкеты дают **восемь текстовых кирпичиков**; фотографии
+кирпичиком не являются — это отдельная коллекция вложений анонса
+(`Draft.image`/`Draft.photos`).
 
 | `code` | Тип | `source` | Легаси-колонка `drafts` |
 |---|---|---|---|
@@ -1340,7 +1602,9 @@ with session.begin():                       # BEGIN IMMEDIATE (SQLAlchemy)
 | `ссылка_места` | url | place | `place_url` |
 | `описание` | long_text | ask | `text` |
 | `контакт` | short_text | ask | `contact` |
-| `фото` | photos | ask | `image`/`photos` |
+
+`image`/`photos` в этот список не входят и не получают `code`: шаблон не
+управляет изображениями, а публикация добавляет их как вложения.
 
 Дальнейшие стандартные кирпичики (типичные кандидаты Stage 22+):
 `адрес` (place), `цена` (number, суффикс ₽), `ведущий` (short_text),
@@ -1354,12 +1618,13 @@ with session.begin():                       # BEGIN IMMEDIATE (SQLAlchemy)
 
 | Термин | Значение |
 |---|---|
-| Кирпичик | Типизированное поле; реестр в `bricks`; в шаблоне пишется `[код]` |
+| Кирпичик | Типизированное **текстовое** поле; реестр в `bricks`; в шаблоне пишется `[код]`. Фотографии кирпичиком не являются |
 | Область кирпичика (scope) | `system` — общий для всех; `place` — утверждён админом места; `personal` — личный |
 | Шаблон | Три секции текста с `[кирпичиками]`; версии в `template_versions` |
-| Снимок шаблона | Закреплённая в анонсе копия секций — защита от правок шаблона |
+| Снимок шаблона | Закреплённая в анонсе копия секций — защита от правок шаблона; вложений не содержит |
+| Вложение анонса | Фотографии/медиагруппы конкретного анонса (`Draft.image`/`photos`); не кирпичик, не узел шаблона, необязательны |
 | IR | Промежуточное представление секции (узлы §7.3) |
-| Заявка | Предложение кирпичика админу места / суперадмину (`brick_proposals`) |
-| Передача | Назначение нового админа места через подтверждение получателя (`admin_transfers`) |
+| Заявка | Предложение кирпичика админу места / суперадмину (`brick_proposals`); без срока давности |
+| Передача | Назначение нового админа места через двустороннее подтверждение (`admin_transfers`) |
 | Доп. информация | Вставка лишнего кирпичика в конкретный анонс (`extras_json`) |
 | name_search | Нормализованное имя места для поиска/сравнения |
