@@ -289,6 +289,17 @@ def _validate_ymd(year: int, month: int, day: int) -> date | None:
         return None
 
 
+def app_today() -> date:
+    """
+    Текущая дата в согласованной временной зоне приложения (APP_TZ).
+
+    Единая точка «сегодня» для парсера дат и кнопочного календаря (Stage 17):
+    тесты замораживают время, подменяя datetime в этом модуле, — оба
+    потребителя видят одну и ту же дату, а не зону сервера.
+    """
+    return datetime.now(APP_TZ).date()
+
+
 def parse_date_flexible(text: str, today: date | None = None) -> str | None:
     """
     Гибкий разбор даты. Возвращает «ДД.ММ.ГГГГ» или None.
@@ -296,7 +307,7 @@ def parse_date_flexible(text: str, today: date | None = None) -> str | None:
     today подаётся в тестах; по умолчанию — текущая дата в APP_TZ.
     """
     if today is None:
-        today = datetime.now(APP_TZ).date()
+        today = app_today()
     raw = substitute_lotto(text or "").strip()
     if not raw:
         return None
