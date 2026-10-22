@@ -16,6 +16,7 @@ from errors import error_handler
 from handlers.callbacks import callbacks_handlers
 from handlers.drafts import drafts_handlers
 from handlers.main_menu import main_menu_handlers
+from handlers.places import places_handlers
 from handlers.post_creation import post_creation_handlers
 from log_config import setup_logging
 from utils import tg_context as ctx
@@ -54,6 +55,12 @@ def build_application() -> Application:
 
     # Обработчики создания поста (ConversationHandler) — первыми
     for handler in post_creation_handlers():
+        application.add_handler(handler)
+
+    # Справочник мест: после мастера (не перехватывает его тексты) и до
+    # глобальных обработчиков главного меню (иначе outside_dialog_hint съел
+    # бы ввод в фазах поиска/создания места).
+    for handler in places_handlers():
         application.add_handler(handler)
 
     # Обработчики главного меню

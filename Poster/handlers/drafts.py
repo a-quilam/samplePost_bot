@@ -21,6 +21,7 @@ from telegram.ext import (
 
 from database import SessionLocal
 from models import Draft
+from place_state import clear_place_session
 from utils import screen
 from utils import tg_context as ctx
 
@@ -194,6 +195,7 @@ async def view_drafts(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     # навигация сообщением ниже экрана → список рядом с вводом
     # (Stage 16, дефект №7; callback — guard-пропуск)
     await screen.reanchor_screen(update, context)
+    clear_place_session(ctx.user(update).id)
     await _render_drafts_screen(update, context)
     await screen.drop_user_input(update, context)
 

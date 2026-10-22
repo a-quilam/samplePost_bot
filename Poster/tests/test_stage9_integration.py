@@ -92,6 +92,7 @@ class FullCreationFlowTests(unittest.TestCase):
             [(text, data) for text, data in h.screen_buttons()],
             [
                 ("✏️ Создать пост", "create_post"),
+                ("📍 Места", "places"),
                 ("📂 Черновики", "drafts"),
                 ("❔ Помощь", "help"),
             ],

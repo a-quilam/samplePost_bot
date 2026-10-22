@@ -506,11 +506,14 @@ class MainMenuKeyboardTests(unittest.TestCase):
         keyboard = main_menu_keyboard()
         self.assertIsInstance(keyboard, InlineKeyboardMarkup)
         texts = [button.text for row in keyboard.inline_keyboard for button in row]
-        self.assertEqual(texts, ["✏️ Создать пост", "📂 Черновики", "❔ Помощь"])
+        self.assertEqual(
+            texts,
+            ["✏️ Создать пост", "📍 Места", "📂 Черновики", "❔ Помощь"],
+        )
         callbacks = [
             button.callback_data for row in keyboard.inline_keyboard for button in row
         ]
-        self.assertEqual(callbacks, ["create_post", "drafts", "help"])
+        self.assertEqual(callbacks, ["create_post", "places", "drafts", "help"])
 
     def test_help_lists_commands(self):
         bot = _ScreenBot()

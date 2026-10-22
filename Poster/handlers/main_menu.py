@@ -4,8 +4,9 @@
 
 Главное меню — это ЭКРАН (постоянное сообщение управления, см. utils.screen):
 /start и кнопки навигации перерисовывают его, а не создают новые сообщения.
-Кнопки меню — inline-кнопки на экране (✏️ Создать пост / 📂 Черновики /
-❔ Помощь); команды /start, /help, /drafts, /cancel работают как прежде.
+Кнопки меню — inline-кнопки на экране (✏️ Создать пост / 📍 Места /
+📂 Черновики / ❔ Помощь); команды /start, /help, /drafts, /places,
+/cancel работают как прежде.
 
 Текстовые entry-кнопки «✏️ Создать пост» и «📝 Черновики» (regex) сохранены
 как совместимость: ConversationHandler создания поста реагирует на текст —
@@ -23,6 +24,7 @@ from telegram.ext import (
 )
 
 from handlers.drafts import view_drafts
+from place_state import clear_place_session, has_place_session
 from utils import screen
 from utils import tg_context as ctx
 
@@ -32,11 +34,13 @@ def main_menu_keyboard() -> InlineKeyboardMarkup:
     Inline-клавиатура главного меню (кнопки экрана).
 
     Callback-данные: create_post (entry-точка ConversationHandler),
-    drafts — список черновиков, help — справка, main_menu — возврат в меню.
+    places — справочник мест, drafts — список черновиков, help — справка,
+    main_menu — возврат в меню.
     """
     return InlineKeyboardMarkup(
         [
             [InlineKeyboardButton("✏️ Создать пост", callback_data="create_post")],
+            [InlineKeyboardButton("📍 Места", callback_data="places")],
             [
                 InlineKeyboardButton("📂 Черновики", callback_data="drafts"),
                 InlineKeyboardButton("❔ Помощь", callback_data="help"),
@@ -65,6 +69,9 @@ async def render_main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     await screen.reanchor_screen(update, context)
     user_data = ctx.data(context)
     user_id = ctx.user(update).id
+    # Главное меню — другая ветка сценария: незавершённый выбор места не
+    # должен перехватывать следующий текст. WIP-пост при этом не трогается.
+    clear_place_session(user_id)
     if screen.screen_ref(user_data) is None:
         screen.hydrate_screen_ref(user_data, user_id)
     chat_id = ctx.chat(update).id
@@ -104,12 +111,16 @@ def help_text() -> str:
         "— «✅ Готово — получить пост» — бот пришлёт готовый пост в этот чат;\n"
         "— «📄 Сохранить в черновики» — сохранить работу и вернуться к ней "
         "позже;\n"
-        "— при выходе из создания (/cancel, /start, /drafts) незавершённый "
+        "— «📍 Места» — найти место по названию, посмотреть карточку, выбрать "
+        "его или добавить новое место/альтернативное название;\n"
+        "— при выходе из создания (/cancel, /start, /drafts, /places) "
+        "незавершённый "
         "пост автоматически сохраняется в черновиках — вернуться к нему можно "
         "через «📂 Черновики» → «✏️ Редактировать черновик».\n\n"
         "Команды:\n"
         "/start — главное меню\n"
         "/create_post — создать новый пост\n"
+        "/places — справочник мест\n"
         "/drafts — список ваших черновиков\n"
         "/cancel — отменить текущий диалог\n"
         "/help — эта справка"
@@ -120,6 +131,7 @@ async def render_help(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     """Справка на экране управления (с возвратом в главное меню)."""
     # навигация сообщением ниже экрана → новый экран рядом с вводом
     await screen.reanchor_screen(update, context)
+    clear_place_session(ctx.user(update).id)
     keyboard = InlineKeyboardMarkup(
         [[InlineKeyboardButton("◀️ Главное меню", callback_data="main_menu")]]
     )
@@ -156,15 +168,30 @@ async def drafts_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 async def cancel_without_dialog(
     update: Update, context: ContextTypes.DEFAULT_TYPE
 ) -> None:
-    """/cancel без активного диалога: раньше попадал в «Неизвестная команда»."""
+    """/cancel без активного диалога: отмена выбора места или подсказка."""
     # навигация сообщением ниже экрана → новый экран рядом с вводом
     await screen.reanchor_screen(update, context)
+    user_id = ctx.user(update).id
+    place_active = has_place_session(user_id)
+    if place_active:
+        clear_place_session(user_id)
     user_data = ctx.data(context)
     if screen.screen_ref(user_data) is None:
-        screen.hydrate_screen_ref(user_data, ctx.user(update).id)
-    await screen.render_screen(
-        context, user_data, ctx.chat(update).id, "Сейчас нет активного создания поста."
+        screen.hydrate_screen_ref(user_data, user_id)
+    text = (
+        "Сценарий выбора места отменён."
+        if place_active
+        else "Сейчас нет активного создания поста."
     )
+    await screen.render_screen(
+        context,
+        user_data,
+        ctx.chat(update).id,
+        text,
+        main_menu_keyboard() if place_active else None,
+    )
+    if place_active:
+        await screen.drop_user_input(update, context)
 
 
 async def outside_dialog_hint(

@@ -27,6 +27,7 @@ from database import SessionLocal
 from handlers.callbacks import handle_main_menu_selection
 from handlers.drafts import view_drafts
 from handlers.main_menu import help_command, main_menu_keyboard, start
+from handlers.places import open_places
 from models import (
     Draft,
     formats_to_json,
@@ -34,6 +35,7 @@ from models import (
     get_draft_photos,
     photos_to_json,
 )
+from place_state import clear_place_session
 from utils import calendar_view, screen
 from utils import tg_context as ctx
 from utils.formatter import format_text
@@ -453,6 +455,9 @@ async def start_post_creation(
     # навигация сообщением ниже экрана → первый шаг рядом с вводом
     # (Stage 16, дефект №7; callback — guard-пропуск)
     await screen.reanchor_screen(update, context)
+    # Мастер и справочник — взаимоисключающие ветки: старый ввод места не
+    # должен перехватывать текст следующего шага поста.
+    clear_place_session(ctx.user(update).id)
     logger.info("Начало создания поста.")
     await _save_wip_before_exit(update, context)
     user_data = ctx.data(context)
@@ -479,6 +484,7 @@ async def restore_wip(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int
     if query is not None:
         await query.answer()
 
+    clear_place_session(ctx.user(update).id)
     user_data = ctx.data(context)
     user_id = ctx.user(update).id
     payload = screen.load_payload(user_id)
@@ -525,6 +531,7 @@ async def start_edit_draft(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     """
     query = ctx.query(update)
     await query.answer()
+    clear_place_session(ctx.user(update).id)
 
     try:
         draft_id = int((query.data or "")[len("editdraft_") :])
@@ -2540,6 +2547,21 @@ async def help_during_creation(
     return ConversationHandler.END
 
 
+async def places_during_creation(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> int:
+    """
+    Переход в «Места» ВНУТРИ диалога: незавершённый пост сохраняется,
+    диалог завершается, открывается самостоятельный справочник. Иначе
+    мастер остался бы активным поверх другого раздела, и следующий текст
+    мог уйти в поле поста.
+    """
+    await _save_wip_before_exit(update, context)
+    clear_place_session(ctx.user(update).id)
+    await open_places(update, context)
+    return ConversationHandler.END
+
+
 async def view_drafts_and_exit(
     update: Update, context: ContextTypes.DEFAULT_TYPE
 ) -> int:
@@ -2682,6 +2704,7 @@ def post_creation_handlers() -> list[BaseHandler]:
                 CommandHandler("start", start_during_creation),
                 CommandHandler("help", help_during_creation),
                 CommandHandler("drafts", view_drafts_and_exit),
+                CommandHandler("places", places_during_creation),
                 # Кнопки главного меню, нажатые во время диалога: WIP
                 # сохраняется, диалог завершается — иначе состояние оставалось
                 # бы активным «поверх» меню, а список/справка молча теряли бы
@@ -2689,6 +2712,7 @@ def post_creation_handlers() -> list[BaseHandler]:
                 CallbackQueryHandler(main_menu_during_creation, pattern=r"^main_menu$"),
                 CallbackQueryHandler(view_drafts_and_exit, pattern=r"^drafts$"),
                 CallbackQueryHandler(help_during_creation, pattern=r"^help$"),
+                CallbackQueryHandler(places_during_creation, pattern=r"^places$"),
                 # Повторное «Продолжить пост» при уже активном диалоге: без
                 # этого fallback'а кнопка проваливалась бы в stale-хендлер
                 # (ответ «Кнопка устарела») либо висела бы со спиннером
