@@ -1872,7 +1872,10 @@ async def process_edit(update: Update, context: ContextTypes.DEFAULT_TYPE) -> in
             _store_text_field(user_data, field, text, message.entities)
         logger.info(f"Пользователь обновил поле '{field}'.")
 
-    # Остаёмся в диалоге: превью с актуальными значениями + кнопки действий
+    # Остаёмся в диалоге: превью с актуальными значениями + кнопки действий.
+    # Признак правки снимается ДО снимка WIP (Stage 17): иначе после рестарта
+    # восстановился бы промпт уже завершённой правки вместо превью.
+    user_data.pop("edit_field", None)
     synced = await review_post(update, context)
     if synced:
         if field == "image":
@@ -1888,8 +1891,6 @@ async def process_edit(update: Update, context: ContextTypes.DEFAULT_TYPE) -> in
         # сохранение не подтверждено → сообщение ввода НЕ удаляется, но его
         # id запоминается до следующего успешного принятия поля
         screen.track_failed_input(user_data, field, message)
-    # правка завершена: поле больше не «в редактировании»
-    user_data.pop("edit_field", None)
     return POST_CREATION
 
 
@@ -1904,13 +1905,13 @@ async def handle_skip_edit(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     if field:
         _apply_skip(ctx.data(context), str(field))
         logger.info(f"Пользователь пропустил обновление поля '{field}'.")
+    # правка завершена: снимаем признак до снимка WIP (Stage 17)
+    ctx.data(context).pop("edit_field", None)
     synced = await review_post(update, context)
     if synced and field:
         # пропуск — решение по полю: неудачные попытки поля убираются
         # best-effort (Stage 16, дефект №1)
         await _accept_input(update, context, str(field))
-    # правка завершена: поле больше не «в редактировании»
-    ctx.data(context).pop("edit_field", None)
     return POST_CREATION
 
 
@@ -1923,14 +1924,14 @@ async def finish_photo_edit(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     if not await _finish_media_done(update, context):
         return EDIT_FIELD
     logger.info("Пользователь обновил изображения (медиа-группа).")
+    # правка завершена: снимаем признак до снимка WIP (Stage 17)
+    ctx.data(context).pop("edit_field", None)
     synced = await review_post(update, context)
     if synced:
         # все file_id сохранены и сбор завершён → исходники альбома удаляются
         await screen.cleanup_temps(context, ctx.chat(update).id, ctx.data(context))
         # и неудачные текстовые попытки этапа изображения уходят в очистку
         await _accept_input(update, context, "image")
-    # правка завершена: поле больше не «в редактировании»
-    ctx.data(context).pop("edit_field", None)
     return POST_CREATION
 
 

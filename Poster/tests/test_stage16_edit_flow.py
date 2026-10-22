@@ -217,6 +217,46 @@ class EditFlowTests(unittest.TestCase):
         self.assertEqual(h.user_data().get("title"), "Восстановленный")
         self.assertEqual(h.dialog_state(), POST_CREATION)
 
+    @scenario_test
+    async def test_restart_after_completed_edit_shows_preview(self, h):
+        """Завершённая правка не «возвращается» после рестарта (Stage 17)."""
+        await goto_preview(h, title="Заголовок")
+        await h.callback("edit_post")
+        await h.callback("edit_title")
+        await h.text("Новое название")
+        self.assertNotIn("edit_field", h.user_data())
+
+        await h.restart()
+        await h.callback("restore_wip")
+
+        self.assertEqual(h.dialog_state(), POST_CREATION)
+        self.assertNotIn("edit_field", h.user_data())
+        self.assertIn("Пост готов к действию", h.screen_text())
+        self.assertIn("Новое название", h.posts()[-1])
+
+    @scenario_test
+    async def test_restart_after_skipped_edit_shows_preview(self, h):
+        """«Пропустить» завершает правку — рестарт тоже показывает превью."""
+        await goto_preview(h, title="Заголовок")
+        await h.callback("edit_post")
+        await h.callback("edit_date")
+        await h.text("23.10.2026")
+        self.assertIn("Дата</b>: 23.10.2026", h.posts()[-1])
+
+        await h.callback("edit_post")
+        await h.callback("edit_date")
+        await h.callback("skip")
+        self.assertIsNone(h.user_data().get("date"))
+        self.assertNotIn("edit_field", h.user_data())
+
+        await h.restart()
+        await h.callback("restore_wip")
+
+        self.assertEqual(h.dialog_state(), POST_CREATION)
+        self.assertNotIn("edit_field", h.user_data())
+        self.assertIn("Пост готов к действию", h.screen_text())
+        self.assertNotIn("Дата</b>:", h.posts()[-1])
+
 
 if __name__ == "__main__":
     unittest.main()
