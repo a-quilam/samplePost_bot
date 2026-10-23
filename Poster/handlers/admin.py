@@ -24,7 +24,9 @@ from __future__ import annotations
 import logging
 from datetime import datetime
 from html import escape as html_escape
+from urllib.parse import quote
 
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 from telegram import (
     CallbackQuery,
@@ -46,11 +48,35 @@ from admin_state import (
     load_admin_session,
     save_admin_session,
 )
+from admin_transfer_store import (
+    STATUS_CANCELLED,
+    STATUS_CONFIRMED,
+    STATUS_EXPIRED,
+    STATUS_PENDING,
+    STATUS_REJECTED,
+    STATUS_SUPERSEDED,
+    TransferUser,
+    TransferView,
+    approve_transfer_recipient,
+    cancel_admin_transfer,
+    confirm_admin_transfer,
+    create_admin_transfer,
+    find_known_recipients,
+    get_pending_transfer_for_place,
+    get_transfer_view,
+    mark_transfer_notified,
+    normalize_transfer_username,
+    open_transfer_invitation,
+    reject_admin_transfer,
+    transfer_status_label,
+)
 from database import SessionLocal
+from models import User
 from permissions import (
     can_access_admin_panel,
     can_manage_place,
     has_any_place_admin_role,
+    is_place_admin,
     is_superadmin,
 )
 from place_admin_store import (
@@ -126,6 +152,11 @@ PHASES = {
     "edit_url_input",
     "edit_url_confirm",
     "edit_url_delete_confirm",
+    "transfer_username_input",
+    "transfer_candidates",
+    "transfer_confirm_known",
+    "transfer_confirm_invite",
+    "transfer_outgoing",
 }
 
 SUPER_ONLY_PHASES = {
@@ -146,6 +177,22 @@ def _short(value: object, limit: int = 100) -> str:
     if len(text) <= limit:
         return text
     return text[: max(limit - 1, 1)] + "…"
+
+
+# Экран Telegram ограничен 4096 символами. Длинный адрес хранится полностью;
+# на экране показываем начало с ЯВНОЙ пометкой, а не молчаливое «…».
+DISPLAY_VALUE_LIMIT = 1500
+
+
+def _long_value(value: object, limit: int = DISPLAY_VALUE_LIMIT) -> str:
+    """HTML-безопасный фрагмент длинного значения без потери данных в БД."""
+    text = str(value)
+    if len(text) <= limit:
+        return _h(text)
+    return (
+        _h(text[:limit])
+        + f"\n… Показаны первые {limit} символов. Полное значение сохранено."
+    )
 
 
 def _safe_link(url: str) -> str:
@@ -182,6 +229,467 @@ def _date_label(value: datetime | None) -> str:
         return value.strftime("%d.%m.%Y %H:%M UTC")
     except (AttributeError, ValueError):  # pragma: no cover — неожиданный тип
         return "—"
+
+
+def _transfer_user_label(user: TransferUser, *, with_id: bool = False) -> str:
+    """Подпись получателя в экранах передачи (username — не идентификатор)."""
+    if user.full_name:
+        base = user.full_name
+        if user.username:
+            base += f" (@{user.username})"
+    elif user.username:
+        base = f"@{user.username}"
+    else:
+        base = f"ID {user.telegram_user_id}"
+    if with_id:
+        base += f"\nПостоянный Telegram user ID: {user.telegram_user_id}"
+    return base
+
+
+def _transfer_username_content(
+    details: PlaceDetails, active_admin: AdminUser | None
+) -> tuple[str, InlineKeyboardMarkup]:
+    initiator = (
+        _h(_user_label(active_admin, with_id=True))
+        if active_admin is not None
+        else "текущий администратор"
+    )
+    text = (
+        "🔁 Передача администрации места\n\n"
+        f"📍 {_h(details.canonical_name)}\n"
+        f"Инициатор: {initiator}\n\n"
+        "Передача лишит вас полномочий на это место только после того, как "
+        "получатель подтвердит предложение в своём аккаунте. До этого вы "
+        "остаётесь администратором и можете отменить передачу.\n\n"
+        "Введите @username получателя. Username — только подсказка: если "
+        "человек уже известен боту, вы выберете его по постоянному Telegram "
+        "user ID. Если нет — бот создаст одноразовую ссылку-приглашение."
+    )
+    keyboard = InlineKeyboardMarkup(
+        [[InlineKeyboardButton("◀️ Назад", callback_data="adm_cancel")]]
+    )
+    return text, keyboard
+
+
+def _transfer_candidates_content(
+    details: PlaceDetails, candidates: tuple[TransferUser, ...], state: dict
+) -> tuple[str, InlineKeyboardMarkup]:
+    username = _h(str(state.get("transfer_username") or ""))
+    text = (
+        "👤 Найдено несколько известных пользователей\n\n"
+        f"📍 {_h(details.canonical_name)}\n"
+        f"Username: @{username}\n\n"
+        "Одинаковый username не позволяет надёжно выбрать человека. "
+        "Укажите конкретного получателя по постоянному Telegram user ID:"
+    )
+    rows: list[list[InlineKeyboardButton]] = []
+    for index, user in enumerate(candidates, start=1):
+        text += (
+            f"\n{index}. {_h(_short(_transfer_user_label(user), 100))}\n"
+            f"   Telegram user ID: {user.telegram_user_id}"
+        )
+        rows.append(
+            [
+                InlineKeyboardButton(
+                    _button_name(f"{index}. ", _transfer_user_label(user)),
+                    callback_data=f"adm_transfer_pick:{user.telegram_user_id}",
+                )
+            ]
+        )
+    rows.append([InlineKeyboardButton("◀️ Назад", callback_data="adm_cancel")])
+    return text, InlineKeyboardMarkup(rows)
+
+
+def _transfer_known_confirm_content(
+    session: Session, details: PlaceDetails, state: dict
+) -> tuple[str, InlineKeyboardMarkup] | None:
+    target_tg = state.get("transfer_target_telegram_user_id")
+    if not isinstance(target_tg, int):
+        return None
+    target_row = session.scalar(select(User).where(User.telegram_user_id == target_tg))
+    if target_row is None:
+        return None
+    target = TransferUser(
+        user_id=target_row.id,
+        telegram_user_id=target_row.telegram_user_id,
+        username=target_row.username,
+        full_name=target_row.full_name,
+    )
+    active = get_active_place_admin(session, details.place_id)
+    text = (
+        "📨 Подтвердите создание предложения\n\n"
+        f"📍 {_h(details.canonical_name)}\n"
+        f"От: {_h(_user_label(active.user, with_id=True)) if active else '—'}\n"
+        f"Получатель: {_h(_transfer_user_label(target, with_id=True))}\n\n"
+        "Получатель уже известен боту, поэтому предложение будет привязано к "
+        "его постоянному Telegram user ID, а не к username. Права перейдут "
+        "только после его подтверждения; до этого вы остаётесь "
+        "администратором. Предложение действует 24 часа."
+    )
+    return text, InlineKeyboardMarkup(
+        [
+            [
+                InlineKeyboardButton(
+                    "✅ Создать предложение", callback_data="adm_transfer_confirm"
+                )
+            ],
+            [InlineKeyboardButton("❌ Отмена", callback_data="adm_cancel")],
+        ]
+    )
+
+
+def _transfer_invite_confirm_content(
+    details: PlaceDetails, state: dict
+) -> tuple[str, InlineKeyboardMarkup]:
+    username = _h(str(state.get("transfer_username") or ""))
+    text = (
+        "🔗 Получатель пока не известен боту\n\n"
+        f"📍 {_h(details.canonical_name)}\n"
+        f"Username: @{username}\n\n"
+        "По одному username нельзя достоверно определить Telegram user ID: "
+        "username можно сменить, а освободившийся — занять другому человеку. "
+        "Автоматической передачи по username не будет.\n\n"
+        "Бот создаст одноразовую ссылку-приглашение на 24 часа. Открывший её "
+        "пользователь станет лишь кандидатом: вы увидите его постоянный "
+        "Telegram user ID и должны будете явно утвердить его. Только после "
+        "этого получатель сможет подтвердить передачу.\n\n"
+        "Права до подтверждения получателя остаются у вас."
+    )
+    return text, InlineKeyboardMarkup(
+        [
+            [
+                InlineKeyboardButton(
+                    "🔗 Создать ссылку-приглашение",
+                    callback_data="adm_transfer_confirm",
+                )
+            ],
+            [InlineKeyboardButton("❌ Отмена", callback_data="adm_cancel")],
+        ]
+    )
+
+
+def _transfer_expiry_label(view: TransferView) -> str:
+    return _date_label(view.expires_at)
+
+
+def _transfer_outgoing_content(
+    session: Session,
+    details: PlaceDetails,
+    state: dict,
+    *,
+    invite_url: str | None = None,
+) -> tuple[str, InlineKeyboardMarkup] | None:
+    view = get_pending_transfer_for_place(session, details.place_id)
+    if view is None:
+        return None
+
+    text = (
+        "📨 Передача администрации\n\n"
+        f"📍 {_h(details.canonical_name)}\n"
+        f"Статус: {_h(transfer_status_label(view.status))}\n"
+        f"Действует до: {_h(_transfer_expiry_label(view))}\n"
+        f"Инициатор: {_h(_transfer_user_label(view.from_user))}\n"
+    )
+    if view.to_user is not None:
+        text += (
+            "Получатель: " f"{_h(_transfer_user_label(view.to_user, with_id=True))}\n"
+        )
+    else:
+        text += f"Username в приглашении: @{_h(view.to_username or '—')}\n"
+        if view.opened_by is not None:
+            text += (
+                "Ссылку открыл: "
+                f"{_h(_transfer_user_label(view.opened_by, with_id=True))}\n\n"
+                "Это ещё не передача прав. Проверьте, что открывший — нужный "
+                "вам человек, и утвердите его как получателя."
+            )
+        else:
+            text += (
+                "\nСсылку пока никто не открыл. Отправьте её получателю сами: "
+                "бот не может первым написать незнакомому человеку."
+            )
+
+    if invite_url:
+        text += (
+            "\n\n🔗 Одноразовая ссылка-приглашение:\n"
+            f"{_safe_link(invite_url)}\n\n"
+            "Ссылка показывается только сейчас и хранится в базе лишь в виде "
+            "хеша. Если вы её потеряли, отмените предложение и создайте новое."
+        )
+    elif view.has_invite_token and view.to_user is None:
+        text += (
+            "\n\nСсылка-приглашение была показана один раз при создании. "
+            "Восстановить её из базы нельзя; если она потеряна, отмените "
+            "предложение и создайте новое."
+        )
+
+    if view.awaiting_recipient:
+        text += (
+            "\n\nПолучатель известен, но ещё не подтвердил передачу. "
+            "Права остаются у вас."
+        )
+        if view.notified_at is None:
+            text += " Доставка уведомления получателю не подтверждена."
+    elif view.awaiting_initiator_approval:
+        text += "\n\nОжидается ваше утверждение кандидата."
+    else:
+        text += "\n\nПрава остаются у вас до подтверждения получателем."
+
+    rows: list[list[InlineKeyboardButton]] = []
+    if view.awaiting_initiator_approval:
+        rows.append(
+            [
+                InlineKeyboardButton(
+                    "✅ Утвердить получателя",
+                    callback_data=f"adm_transfer_approve:{view.transfer_id}",
+                )
+            ]
+        )
+    if view.awaiting_recipient:
+        rows.append(
+            [
+                InlineKeyboardButton(
+                    "🔔 Уведомить получателя ещё раз",
+                    callback_data=f"adm_transfer_notify:{view.transfer_id}",
+                )
+            ]
+        )
+    rows.append(
+        [
+            InlineKeyboardButton(
+                "🔄 Обновить статус",
+                callback_data=f"adm_transfer_refresh:{details.place_id}",
+            )
+        ]
+    )
+    rows.append(
+        [
+            InlineKeyboardButton(
+                "❌ Отменить передачу",
+                callback_data=f"adm_transfer_cancel:{view.transfer_id}",
+            )
+        ]
+    )
+    rows.append([InlineKeyboardButton("◀️ Назад", callback_data="adm_cancel")])
+    return text, InlineKeyboardMarkup(rows)
+
+
+def _transfer_offer_text(view: TransferView) -> str:
+    return (
+        "📨 Вам предлагают администрирование места\n\n"
+        f"📍 {_h(view.place_name)}\n"
+        f"От: {_h(_transfer_user_label(view.from_user, with_id=True))}\n"
+        f"Действует до: {_h(_transfer_expiry_label(view))}\n\n"
+        "Если вы подтвердите, вы станете администратором этого места, а "
+        "отправитель потеряет полномочия. До подтверждения права остаются "
+        "у отправителя. Подтверждение действует только в вашем аккаунте "
+        "Telegram."
+    )
+
+
+def _transfer_offer_keyboard(view: TransferView) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        [
+            [
+                InlineKeyboardButton(
+                    "✅ Подтверждаю",
+                    callback_data=f"adm_transfer_accept:{view.transfer_id}",
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    "❌ Отклонить",
+                    callback_data=f"adm_transfer_decline:{view.transfer_id}",
+                )
+            ],
+            [InlineKeyboardButton("🏠 Главное меню", callback_data="main_menu")],
+        ]
+    )
+
+
+def _incoming_transfer_content(
+    status: str, view: TransferView | None, viewer_telegram_user_id: int
+) -> tuple[str, InlineKeyboardMarkup]:
+    """Экран получателя после открытия ссылки или нажатия кнопки."""
+    menu = InlineKeyboardMarkup(
+        [[InlineKeyboardButton("🏠 Главное меню", callback_data="main_menu")]]
+    )
+    if view is None or status == "invalid_invite":
+        return (
+            "🔗 Ссылка-приглашение недействительна\n\n"
+            "Проверьте, что ссылка скопирована полностью и не изменена. "
+            "Попросите инициатора создать новое приглашение.",
+            menu,
+        )
+    if status == "self":
+        return (
+            "🔁 Это ваша собственная ссылка-приглашение\n\n"
+            "Передать админку самому себе нельзя. Отправьте ссылку другому "
+            "человеку.",
+            menu,
+        )
+    if status == "opened_by_other":
+        return (
+            "🔗 Ссылка уже открыта другим аккаунтом\n\n"
+            "Приглашение нельзя перепривязать к другому человеку. Попросите "
+            "инициатора отменить его и создать новую ссылку.",
+            menu,
+        )
+    if status == "not_recipient":
+        return (
+            "🔒 Предложение адресовано другому пользователю\n\n"
+            "Подтвердить передачу может только получатель, выбранный "
+            "инициатором.",
+            menu,
+        )
+    if status == "approved" or (
+        view.status == STATUS_PENDING
+        and view.to_user is not None
+        and view.to_user.telegram_user_id == viewer_telegram_user_id
+    ):
+        return _transfer_offer_text(view), _transfer_offer_keyboard(view)
+    if view.status == STATUS_PENDING and view.opened_by is not None:
+        if view.opened_by.telegram_user_id == viewer_telegram_user_id:
+            return (
+                "✅ Приглашение открыто\n\n"
+                f"📍 {_h(view.place_name)}\n"
+                f"От: {_h(_transfer_user_label(view.from_user, with_id=True))}\n\n"
+                "Это ещё не передача прав. Инициатор должен увидеть ваш "
+                "постоянный Telegram user ID и явно утвердить вас как "
+                "получателя. После этого вы сможете подтвердить передачу.\n\n"
+                "До подтверждения администратором остаётся отправитель.",
+                menu,
+            )
+        return (
+            "🔗 Ссылка уже открыта другим аккаунтом\n\n"
+            "Приглашение нельзя перепривязать к другому человеку. Попросите "
+            "инициатора создать новую ссылку.",
+            menu,
+        )
+    if view.status == STATUS_CONFIRMED:
+        return (
+            "✅ Передача уже завершена\n\n"
+            f"📍 {_h(view.place_name)}\n\n"
+            "Это предложение больше нельзя подтвердить повторно.",
+            menu,
+        )
+    if view.status == STATUS_EXPIRED:
+        return (
+            "⌛ Срок приглашения истёк\n\n"
+            f"📍 {_h(view.place_name)}\n\n"
+            "Передача не состоялась; администратором остаётся отправитель. "
+            "Можно попросить его создать новое предложение.",
+            menu,
+        )
+    if view.status == STATUS_CANCELLED:
+        return (
+            "❌ Передача отменена инициатором\n\n"
+            f"📍 {_h(view.place_name)}\n\n"
+            "Полномочия не изменились.",
+            menu,
+        )
+    if view.status == STATUS_REJECTED:
+        return (
+            "❌ Предложение отклонено\n\n"
+            f"📍 {_h(view.place_name)}\n\n"
+            "Полномочия не изменились. Можно создать новое предложение.",
+            menu,
+        )
+    if view.status == STATUS_SUPERSEDED:
+        return (
+            "⚠️ Предложение недействительно\n\n"
+            f"📍 {_h(view.place_name)}\n\n"
+            "Администратор места изменился или назначение было отозвано. "
+            "Передача не состоится.",
+            menu,
+        )
+    return (
+        "📨 Предложение передачи\n\n"
+        f"📍 {_h(view.place_name)}\n\n"
+        "Сейчас это предложение нельзя подтвердить.",
+        menu,
+    )
+
+
+async def _deep_link(context: ContextTypes.DEFAULT_TYPE, payload: str) -> str | None:
+    """Ссылка t.me/<bot>?start=...; username бота не секрет."""
+    username = getattr(context.bot, "username", None)
+    if not username:
+        try:
+            me = await context.bot.get_me()
+            username = getattr(me, "username", None)
+        except Exception as e:  # noqa: BLE001 — без username ссылку не показать
+            logger.error("Не удалось получить username бота для ссылки: %s", e)
+            return None
+    if not username:
+        return None
+    return f"https://t.me/{username}?start={quote(payload, safe='')}"
+
+
+async def _send_user_notification(
+    context: ContextTypes.DEFAULT_TYPE,
+    telegram_user_id: int,
+    text: str,
+    keyboard: InlineKeyboardMarkup | None = None,
+) -> bool:
+    """
+    Best-effort личное уведомление. True — Telegram подтвердил доставку.
+
+    Токен приглашения в уведомлениях не передаётся. Ошибка доставки не
+    отменяет предложение и не выдаёт/не отнимает прав.
+    """
+    try:
+        await context.bot.send_message(
+            chat_id=telegram_user_id,
+            text=text,
+            parse_mode="HTML",
+            reply_markup=keyboard,
+            disable_web_page_preview=True,
+        )
+        return True
+    except Exception as e:  # noqa: BLE001 — сбой Telegram не ломает операцию
+        logger.warning(
+            "Не удалось отправить уведомление о передаче пользователю %s: %s",
+            telegram_user_id,
+            e,
+        )
+        return False
+
+
+async def _notify_recipient(
+    context: ContextTypes.DEFAULT_TYPE, view: TransferView
+) -> bool:
+    if view.to_user is None:
+        return False
+    return await _send_user_notification(
+        context,
+        view.to_user.telegram_user_id,
+        _transfer_offer_text(view),
+        _transfer_offer_keyboard(view),
+    )
+
+
+async def _notify_initiator(
+    context: ContextTypes.DEFAULT_TYPE,
+    view: TransferView,
+    text: str,
+) -> None:
+    await _send_user_notification(context, view.from_user.telegram_user_id, text)
+
+
+async def _edit_notification_message(
+    query: CallbackQuery, text: str, keyboard: InlineKeyboardMarkup | None = None
+) -> None:
+    """Обновляет сообщение, на кнопке которого нажали; при сбое — без падения."""
+    try:
+        await query.edit_message_text(
+            text=text,
+            parse_mode="HTML",
+            reply_markup=keyboard,
+            disable_web_page_preview=True,
+        )
+    except Exception as e:  # noqa: BLE001 — устаревшее сообщение не должно падать
+        logger.info("Не удалось обновить сообщение передачи: %s", e)
 
 
 def _new_state() -> dict:
@@ -385,7 +893,13 @@ def _places_content(
     return text, InlineKeyboardMarkup(rows)
 
 
-def _place_text(details: PlaceDetails, state: dict, session: Session) -> str:
+def _place_text(
+    details: PlaceDetails,
+    state: dict,
+    session: Session,
+    *,
+    viewer_telegram_user_id: int | None = None,
+) -> str:
     active = get_active_place_admin(session, details.place_id)
     text = f"🛡 Место\n\n📍 {_h(details.canonical_name)}"
     alternatives = [item for item in details.names if not item.is_canonical]
@@ -396,9 +910,9 @@ def _place_text(details: PlaceDetails, state: dict, session: Session) -> str:
         if len(alternatives) > 8:
             text += f"\nЕщё {len(alternatives) - 8}."
     if details.address:
-        text += f"\n\nАдрес: {_h(_short(details.address, 500))}"
+        text += f"\n\nАдрес: {_long_value(details.address)}"
     if details.url:
-        text += f"\n\nСсылка: {_safe_link(_short(details.url, 500))}"
+        text += f"\n\nСсылка: {_safe_link(details.url)}"
     if active is None:
         text += "\n\nАдминистратор: не назначен."
     else:
@@ -407,6 +921,14 @@ def _place_text(details: PlaceDetails, state: dict, session: Session) -> str:
             f"{_h(_user_label(active.user, with_id=True))}\n"
             f"Назначен: {_h(_date_label(active.assigned_at))}"
         )
+    if active is not None and viewer_telegram_user_id == active.user.telegram_user_id:
+        pending = get_pending_transfer_for_place(session, details.place_id)
+        if pending is not None:
+            text += (
+                "\n\n📨 Передача администрации: "
+                f"{_h(transfer_status_label(pending.status))} до "
+                f"{_h(_transfer_expiry_label(pending))}."
+            )
     text += (
         "\n\nРедактирование названия, альтернативных названий, адреса и "
         "ссылки доступно из этого кабинета."
@@ -419,6 +941,7 @@ def _place_keyboard(
     session: Session,
     *,
     access_kind: str,
+    viewer_telegram_user_id: int | None = None,
 ) -> InlineKeyboardMarkup:
     rows: list[list[InlineKeyboardButton]] = []
     rows.append(
@@ -429,8 +952,17 @@ def _place_keyboard(
             )
         ]
     )
+    active = get_active_place_admin(session, details.place_id)
+    if active is not None and viewer_telegram_user_id == active.user.telegram_user_id:
+        rows.append(
+            [
+                InlineKeyboardButton(
+                    "🔁 Передать админку",
+                    callback_data=f"adm_transfer:{details.place_id}",
+                )
+            ]
+        )
     if access_kind == "superadmin":
-        active = get_active_place_admin(session, details.place_id)
         if active is None:
             rows.append(
                 [
@@ -535,7 +1067,7 @@ def _edit_menu_content(
         "✏️ Редактирование места\n\n"
         f"📍 Название: {_h(details.canonical_name)}\n"
         f"Альтернативные названия: {len(aliases)}\n"
-        f"Адрес: {_h(details.address) if details.address else 'Не указан'}\n"
+        f"Адрес: {_long_value(details.address) if details.address else 'Не указан'}\n"
         f"Ссылка: {_safe_link(details.url) if details.url else 'Не указана'}\n\n"
         "Выберите, что изменить:"
     )
@@ -617,12 +1149,13 @@ def _edit_input_content(
             "Введите новое название для этого варианта."
         )
     elif phase == "edit_address_input":
-        current = details.address if details.address else "Не указан"
+        current = _long_value(details.address) if details.address else "Не указан"
         text = (
             "🏠 Изменение адреса\n\n"
             f"📍 {_h(details.canonical_name)}\n"
-            f"Текущий адрес: {_h(current)}\n\n"
-            "Введите адрес места (обычный текст, до 500 символов)."
+            f"Текущий адрес: {current}\n\n"
+            "Введите адрес места обычным текстом. Длина не ограничена "
+            "искусственно: адрес сохраняется полностью."
         )
     elif phase == "edit_url_input":
         current = details.url if details.url else "Не указана"
@@ -653,7 +1186,7 @@ def _edit_confirm_content(
         text = (
             "🗑 Подтвердите удаление адреса\n\n"
             f"📍 {_h(details.canonical_name)}\n\n"
-            f"Текущий адрес: {_h(details.address)}\n\n"
+            f"Текущий адрес: {_long_value(details.address)}\n\n"
             "Адрес будет удалён из карточки места. Само место сохранится."
         )
     elif phase == "edit_url_delete_confirm":
@@ -710,14 +1243,15 @@ def _edit_confirm_content(
                 "Название будет доступно для поиска вместе с каноническим."
             )
         elif phase == "edit_address_confirm":
-            current = details.address if details.address else "Не указан"
+            current = _long_value(details.address) if details.address else "Не указан"
             text = (
                 f"{warning_block}"
                 "🏠 Подтвердите изменение адреса\n\n"
                 f"📍 {_h(details.canonical_name)}\n\n"
-                f"Текущий адрес: {_h(current)}\n"
-                f"Новый адрес: {_h(value)}\n\n"
-                "Адрес будет виден в карточке места."
+                f"Текущий адрес: {current}\n"
+                f"Новый адрес: {_long_value(value)}\n\n"
+                "Адрес будет виден в карточке места полностью; длинное "
+                "значение на экране помечается как фрагмент."
             )
         elif phase == "edit_url_confirm":
             current = details.url if details.url else "Не указана"
@@ -875,6 +1409,7 @@ async def _render_phase(
     notice: str | None = None,
     cleanup_ids: list[int] | None = None,
     drop_input: bool = False,
+    invite_url: str | None = None,
 ) -> bool:
     """Единая отрисовка фазы; каждый раз проверяет актуальные права."""
     user_id = ctx.user(update).id
@@ -918,8 +1453,18 @@ async def _render_phase(
                 notice = notice or "Доступ к этому месту не подтверждён."
                 text, keyboard = _places_content(session, state, access_kind, user_id)
             else:
-                text = _place_text(details, state, session)
-                keyboard = _place_keyboard(details, session, access_kind=access_kind)
+                text = _place_text(
+                    details,
+                    state,
+                    session,
+                    viewer_telegram_user_id=user_id,
+                )
+                keyboard = _place_keyboard(
+                    details,
+                    session,
+                    access_kind=access_kind,
+                    viewer_telegram_user_id=user_id,
+                )
         elif phase == "assign_search":
             if details is None:
                 state.clear()
@@ -1024,6 +1569,108 @@ async def _render_phase(
                 text, keyboard = _places_content(session, state, access_kind, user_id)
             else:
                 text, keyboard = _edit_aliases_content(session, details, state)
+        elif phase in {
+            "transfer_username_input",
+            "transfer_candidates",
+            "transfer_confirm_known",
+            "transfer_confirm_invite",
+            "transfer_outgoing",
+        }:
+            if details is None:
+                state.clear()
+                state.update(_new_state())
+                notice = notice or "Место не существует или было удалено."
+                text, keyboard = _places_content(session, state, access_kind, user_id)
+            elif not is_place_admin(session, user_id, details.place_id):
+                state.clear()
+                state.update(_new_state())
+                notice = notice or (
+                    "Передать админку может только действующий администратор "
+                    "этого места."
+                )
+                text, keyboard = _places_content(session, state, access_kind, user_id)
+            else:
+                active = get_active_place_admin(session, details.place_id)
+                active_user = active.user if active is not None else None
+                if phase == "transfer_username_input":
+                    text, keyboard = _transfer_username_content(details, active_user)
+                elif phase == "transfer_candidates":
+                    raw_ids = state.get("transfer_candidate_ids")
+                    ids = (
+                        [
+                            int(value)
+                            for value in raw_ids
+                            if isinstance(value, int) and not isinstance(value, bool)
+                        ]
+                        if isinstance(raw_ids, list)
+                        else []
+                    )
+                    users = (
+                        {
+                            user.telegram_user_id: user
+                            for user in session.scalars(
+                                select(User).where(User.telegram_user_id.in_(ids))
+                            ).all()
+                        }
+                        if ids
+                        else {}
+                    )
+                    candidates = tuple(
+                        TransferUser(
+                            user_id=users[tg].id,
+                            telegram_user_id=users[tg].telegram_user_id,
+                            username=users[tg].username,
+                            full_name=users[tg].full_name,
+                        )
+                        for tg in ids
+                        if tg in users
+                    )
+                    if not candidates:
+                        state["phase"] = "transfer_username_input"
+                        notice = notice or "Выберите получателя заново."
+                        text, keyboard = _transfer_username_content(
+                            details, active_user
+                        )
+                    else:
+                        text, keyboard = _transfer_candidates_content(
+                            details, candidates, state
+                        )
+                elif phase == "transfer_confirm_known":
+                    content = _transfer_known_confirm_content(session, details, state)
+                    if content is None:
+                        state["phase"] = "transfer_username_input"
+                        notice = notice or "Получатель больше не известен боту."
+                        text, keyboard = _transfer_username_content(
+                            details, active_user
+                        )
+                    else:
+                        text, keyboard = content
+                elif phase == "transfer_confirm_invite":
+                    if not state.get("transfer_username"):
+                        state["phase"] = "transfer_username_input"
+                        notice = notice or "Введите username получателя заново."
+                        text, keyboard = _transfer_username_content(
+                            details, active_user
+                        )
+                    else:
+                        text, keyboard = _transfer_invite_confirm_content(
+                            details, state
+                        )
+                else:
+                    content = _transfer_outgoing_content(
+                        session, details, state, invite_url=invite_url
+                    )
+                    if content is None:
+                        state["phase"] = "transfer_username_input"
+                        notice = notice or (
+                            "Активной передачи нет. Введите username, чтобы "
+                            "создать новое предложение."
+                        )
+                        text, keyboard = _transfer_username_content(
+                            details, active_user
+                        )
+                    else:
+                        text, keyboard = content
         else:  # confirm_*
             if details is None:
                 state.clear()
@@ -1037,9 +1684,17 @@ async def _render_phase(
                     notice = notice or (
                         "Ситуация изменилась: обновите выбор администратора."
                     )
-                    text = _place_text(details, state, session)
+                    text = _place_text(
+                        details,
+                        state,
+                        session,
+                        viewer_telegram_user_id=user_id,
+                    )
                     keyboard = _place_keyboard(
-                        details, session, access_kind=access_kind
+                        details,
+                        session,
+                        access_kind=access_kind,
+                        viewer_telegram_user_id=user_id,
                     )
                 else:
                     text, keyboard = confirmation
@@ -1487,6 +2142,33 @@ EDIT_CANCEL_TO_ALIASES_PHASES = frozenset(
         "edit_alias_delete_confirm",
     }
 )
+
+
+# --- Передача администратора места (Stage 21) --------------------------------
+
+TRANSFER_STATE_KEYS = (
+    "transfer_username",
+    "transfer_candidate_ids",
+    "transfer_target_telegram_user_id",
+)
+
+TRANSFER_INPUT_PHASES = frozenset({"transfer_username_input"})
+
+TRANSFER_CANCEL_PHASES = frozenset(
+    {
+        "transfer_username_input",
+        "transfer_candidates",
+        "transfer_confirm_known",
+        "transfer_confirm_invite",
+        "transfer_outgoing",
+    }
+)
+
+
+def _clear_transfer_keys(state: dict) -> None:
+    """Убирает подсказки формы передачи; на права и предложение не влияет."""
+    for key in TRANSFER_STATE_KEYS:
+        state.pop(key, None)
 
 
 def _clear_edit_keys(state: dict) -> None:
@@ -2172,6 +2854,7 @@ async def handle_cancel_flow(
         }
         | EDIT_CANCEL_TO_MENU_PHASES
         | EDIT_CANCEL_TO_ALIASES_PHASES
+        | TRANSFER_CANCEL_PHASES
     ):
         await _stale(update)
         return
@@ -2183,7 +2866,16 @@ async def handle_cancel_flow(
         "query",
     ):
         state.pop(key, None)
-    if phase == "edit_menu":
+    if phase in TRANSFER_CANCEL_PHASES:
+        # Это именно выход с экрана, а не отмена активного предложения:
+        # для отмены есть отдельная кнопка, которая меняет статус в БД.
+        _clear_transfer_keys(state)
+        if isinstance(state.get("place_id"), int):
+            state["phase"] = "place"
+        else:
+            state.clear()
+            state.update(_new_state())
+    elif phase == "edit_menu":
         # Назад из меню редактирования к карточке места.
         _clear_edit_keys(state)
         if isinstance(state.get("place_id"), int):
@@ -2273,6 +2965,774 @@ async def handle_search_text(
     )
 
 
+async def _transfer_state_place(
+    update: Update, *, allowed_phases: frozenset[str]
+) -> tuple[dict, int, str] | None:
+    """
+    Общий guard кнопок передачи для инициатора.
+
+    Callback подтверждает только id; фазу и место берём из сохранённого
+    состояния, а действующую роль перепроверяем по БД в обработчике.
+    """
+    state = load_admin_session(ctx.user(update).id)
+    if state is None or state.get("phase") not in allowed_phases:
+        await _stale(update)
+        return None
+    place_id = state.get("place_id")
+    if not isinstance(place_id, int):
+        await _stale(update)
+        return None
+    return state, place_id, str(state.get("phase"))
+
+
+async def handle_transfer_open(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> None:
+    """Кнопка «Передать админку»: активное предложение или ввод username."""
+    query = ctx.query(update)
+    state = load_admin_session(ctx.user(update).id)
+    if state is None or state.get("phase") != "place":
+        await _stale(update)
+        return
+    state_place_id = state.get("place_id")
+    data = str(query.data or "")
+    try:
+        callback_place_id = int(data.rsplit(":", 1)[1])
+    except (IndexError, ValueError):
+        await _stale(update)
+        return
+    if not isinstance(state_place_id, int) or callback_place_id != state_place_id:
+        await _stale(update)
+        return
+
+    session = SessionLocal()
+    try:
+        _ensure_user(session, update)
+        details = get_place_details(session, callback_place_id)
+        if details is None or not is_place_admin(
+            session, ctx.user(update).id, callback_place_id
+        ):
+            await query.answer(DENIED_ALERT, show_alert=True)
+            return
+        pending = get_pending_transfer_for_place(session, callback_place_id)
+        _clear_transfer_keys(state)
+        state["phase"] = (
+            "transfer_outgoing" if pending is not None else "transfer_username_input"
+        )
+    finally:
+        session.close()
+    await query.answer()
+    await _render_phase(update, context, state)
+
+
+async def handle_transfer_text(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> None:
+    """Username получателя: точный поиск известного или приглашение."""
+    user = ctx.user(update)
+    state = load_admin_session(user.id)
+    if state is None or state.get("phase") not in TRANSFER_INPUT_PHASES:
+        return
+    place_id = state.get("place_id")
+    session = SessionLocal()
+    try:
+        if not isinstance(place_id, int) or not is_place_admin(
+            session, user.id, place_id
+        ):
+            clear_admin_session(user.id)
+            await _render_denied(update, context)
+            return
+        details = get_place_details(session, place_id)
+        if details is None:
+            state.clear()
+            state.update(_new_state())
+            await _render_phase(
+                update,
+                context,
+                state,
+                notice="Место не существует или было удалено.",
+                drop_input=True,
+            )
+            return
+        raw = ctx.message(update).text or ""
+        try:
+            username = normalize_transfer_username(raw)
+        except ValueError as e:
+            cleanup = []
+            message = getattr(update, "message", None)
+            if message is not None and message.message_id is not None:
+                cleanup.append(int(message.message_id))
+            await _render_phase(
+                update,
+                context,
+                state,
+                notice=str(e),
+                cleanup_ids=cleanup,
+                drop_input=True,
+            )
+            return
+
+        state["transfer_username"] = username
+        _clear_transfer_keys_for_username(state)
+        found = find_known_recipients(session, username)
+        # Себя нельзя предлагать даже в списке кандидатов: кнопка вела бы
+        # только к отказу store. Если других совпадений нет — явная ошибка,
+        # а не приглашение на собственный username.
+        candidates = tuple(
+            candidate for candidate in found if candidate.telegram_user_id != user.id
+        )
+        if not candidates:
+            if found:
+                cleanup = []
+                message = getattr(update, "message", None)
+                if message is not None and message.message_id is not None:
+                    cleanup.append(int(message.message_id))
+                await _render_phase(
+                    update,
+                    context,
+                    state,
+                    notice=(
+                        "Нельзя передать админку самому себе. Введите username "
+                        "другого человека."
+                    ),
+                    cleanup_ids=cleanup,
+                    drop_input=True,
+                )
+                return
+            state["phase"] = "transfer_confirm_invite"
+        elif len(candidates) == 1:
+            state["transfer_target_telegram_user_id"] = candidates[0].telegram_user_id
+            state["phase"] = "transfer_confirm_known"
+        else:
+            state["transfer_candidate_ids"] = [
+                candidate.telegram_user_id for candidate in candidates
+            ]
+            state["phase"] = "transfer_candidates"
+    finally:
+        session.close()
+
+    cleanup = []
+    message = getattr(update, "message", None)
+    if message is not None and message.message_id is not None:
+        cleanup.append(int(message.message_id))
+    await _render_phase(update, context, state, cleanup_ids=cleanup, drop_input=True)
+
+
+def _clear_transfer_keys_for_username(state: dict) -> None:
+    """Сбрасывает выбранного получателя, сохраняя введённый username."""
+    state.pop("transfer_candidate_ids", None)
+    state.pop("transfer_target_telegram_user_id", None)
+
+
+async def handle_transfer_pick(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> None:
+    """Выбор конкретного известного пользователя при совпадении username."""
+    query = ctx.query(update)
+    state = load_admin_session(ctx.user(update).id)
+    if state is None or state.get("phase") != "transfer_candidates":
+        await _stale(update)
+        return
+    raw_ids = state.get("transfer_candidate_ids")
+    allowed = set(raw_ids) if isinstance(raw_ids, list) else set()
+    try:
+        target_tg = int(str(query.data or "").rsplit(":", 1)[1])
+    except (IndexError, ValueError):
+        await _stale(update)
+        return
+    if target_tg not in allowed:
+        await _stale(update)
+        return
+    state["transfer_target_telegram_user_id"] = target_tg
+    state["phase"] = "transfer_confirm_known"
+    await query.answer()
+    await _render_phase(update, context, state)
+
+
+async def handle_transfer_confirm(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> None:
+    """Подтверждение создания предложения (известный или неизвестный получатель)."""
+    query = ctx.query(update)
+    user = ctx.user(update)
+    state = load_admin_session(user.id)
+    if state is None or state.get("phase") not in {
+        "transfer_confirm_known",
+        "transfer_confirm_invite",
+    }:
+        await _stale(update)
+        return
+    place_id = state.get("place_id")
+    if not isinstance(place_id, int):
+        await _stale(update)
+        return
+    phase = str(state.get("phase"))
+    username = str(state.get("transfer_username") or "")
+    target_tg = state.get("transfer_target_telegram_user_id")
+    if phase == "transfer_confirm_known" and not isinstance(target_tg, int):
+        state["phase"] = "transfer_username_input"
+        await query.answer()
+        await _render_phase(
+            update,
+            context,
+            state,
+            notice="Выберите получателя заново.",
+        )
+        return
+    if not username:
+        state["phase"] = "transfer_username_input"
+        await query.answer()
+        await _render_phase(
+            update, context, state, notice="Введите username получателя заново."
+        )
+        return
+
+    result = None
+    try:
+        session = SessionLocal()
+        try:
+            _ensure_user(session, update)
+            if not is_place_admin(session, user.id, place_id):
+                await query.answer(DENIED_ALERT, show_alert=True)
+                return
+            result = create_admin_transfer(
+                session,
+                actor_telegram_user_id=user.id,
+                place_id=place_id,
+                username=username,
+                recipient_telegram_user_id=(
+                    target_tg if phase == "transfer_confirm_known" else None
+                ),
+            )
+        finally:
+            session.close()
+    except Exception as e:  # noqa: BLE001 — безопасный экран вместо падения
+        logger.error("Не удалось создать предложение передачи: %s", e)
+        result = None
+        notice = "Не удалось создать предложение. Повторите позже."
+    else:
+        notice = ""
+
+    if result is None:
+        await query.answer()
+        await _render_phase(update, context, state, notice=notice)
+        return
+
+    invite_url: str | None = None
+    if result.status == "created_known":
+        delivered = False
+        if result.transfer is not None:
+            delivered = await _notify_recipient(context, result.transfer)
+            if delivered:
+                session = SessionLocal()
+                try:
+                    mark_transfer_notified(session, result.transfer.transfer_id)
+                except Exception as e:  # noqa: BLE001 — статус доставки не критичен
+                    logger.error("Не удалось отметить доставку уведомления: %s", e)
+                finally:
+                    session.close()
+        notice = (
+            "✅ Предложение создано. Получатель получил уведомление."
+            if delivered
+            else (
+                "✅ Предложение создано, но личное уведомление не доставлено. "
+                "Откройте передачу и нажмите «Уведомить получателя ещё раз» "
+                "после восстановления связи."
+            )
+        )
+        _clear_transfer_keys(state)
+        state["phase"] = "transfer_outgoing"
+    elif result.status == "created_invite":
+        token = result.invite_token or ""
+        transfer_id = result.transfer.transfer_id if result.transfer is not None else 0
+        invite_url = (
+            await _deep_link(context, f"tf_{transfer_id}_{token}")
+            if token and transfer_id
+            else None
+        )
+        if invite_url is None:
+            session = SessionLocal()
+            try:
+                if result.transfer is not None:
+                    cancel_admin_transfer(
+                        session,
+                        actor_telegram_user_id=user.id,
+                        transfer_id=result.transfer.transfer_id,
+                    )
+            except Exception as e:  # noqa: BLE001
+                logger.error("Не удалось отменить неполное приглашение: %s", e)
+            finally:
+                session.close()
+            _clear_transfer_keys(state)
+            state["phase"] = "transfer_username_input"
+            notice = (
+                "Не удалось сформировать ссылку-приглашение. Предложение "
+                "отменено; повторите попытку."
+            )
+        else:
+            _clear_transfer_keys(state)
+            state["phase"] = "transfer_outgoing"
+            notice = (
+                "✅ Ссылка-приглашение создана на 24 часа. Она показана ниже "
+                "один раз."
+            )
+    elif result.status == "active_exists":
+        _clear_transfer_keys(state)
+        state["phase"] = "transfer_outgoing"
+        notice = "У этого места уже есть активное предложение передачи."
+    elif result.status == "self":
+        notice = "Нельзя передать админку самому себе."
+    elif result.status == "user_missing":
+        notice = "Получатель больше не известен боту. Введите username заново."
+        state["phase"] = "transfer_username_input"
+    elif result.status == "place_missing":
+        state.clear()
+        state.update(_new_state())
+        notice = "Место не существует или было удалено."
+    else:
+        notice = "Предложение не создано: состояние изменилось. Повторите."
+
+    await query.answer()
+    await _render_phase(update, context, state, notice=notice, invite_url=invite_url)
+
+
+async def handle_transfer_refresh(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> None:
+    """Перечитывает статус предложения и лениво применяет срок."""
+    query = ctx.query(update)
+    guard = await _transfer_state_place(
+        update, allowed_phases=frozenset({"transfer_outgoing"})
+    )
+    if guard is None:
+        return
+    state, place_id, _phase = guard
+    session = SessionLocal()
+    try:
+        if not is_place_admin(session, ctx.user(update).id, place_id):
+            await query.answer(DENIED_ALERT, show_alert=True)
+            return
+        get_pending_transfer_for_place(session, place_id)
+    finally:
+        session.close()
+    await query.answer()
+    await _render_phase(update, context, state)
+
+
+async def handle_transfer_approve(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> None:
+    """Инициатор утверждает кандидата, открывшего одноразовую ссылку."""
+    query = ctx.query(update)
+    guard = await _transfer_state_place(
+        update, allowed_phases=frozenset({"transfer_outgoing"})
+    )
+    if guard is None:
+        return
+    state, place_id, _phase = guard
+    try:
+        transfer_id = int(str(query.data or "").rsplit(":", 1)[1])
+    except (IndexError, ValueError):
+        await _stale(update)
+        return
+
+    session = SessionLocal()
+    try:
+        _ensure_user(session, update)
+        view = get_transfer_view(session, transfer_id)
+        if (
+            view is None
+            or view.place_id != place_id
+            or view.from_user.telegram_user_id != ctx.user(update).id
+        ):
+            await query.answer(STALE_TEXT, show_alert=True)
+            return
+        result = approve_transfer_recipient(
+            session,
+            actor_telegram_user_id=ctx.user(update).id,
+            transfer_id=transfer_id,
+        )
+    finally:
+        session.close()
+
+    if result.status != "approved":
+        await query.answer()
+        notice = {
+            "not_opened": "Ссылку ещё никто не открыл.",
+            "already_approved": "Получатель уже утверждён.",
+            "not_initiator": "Утвердить получателя может только инициатор.",
+            "superseded": "Предложение недействительно: администратор изменился.",
+            "expired": "Срок предложения истёк.",
+            "self": "Нельзя утвердить самого себя.",
+        }.get(result.status, "Состояние изменилось. Обновите экран.")
+        await _render_phase(update, context, state, notice=notice)
+        return
+
+    delivered = False
+    if result.transfer is not None:
+        delivered = await _notify_recipient(context, result.transfer)
+        if delivered:
+            session = SessionLocal()
+            try:
+                mark_transfer_notified(session, transfer_id)
+            except Exception as e:  # noqa: BLE001
+                logger.error("Не удалось отметить доставку уведомления: %s", e)
+            finally:
+                session.close()
+    await query.answer()
+    notice = "✅ Получатель утверждён."
+    if not delivered:
+        notice += (
+            " Личное уведомление не доставлено; получатель может открыть "
+            "ссылку повторно или вы нажмёте «Уведомить получателя ещё раз»."
+        )
+    await _render_phase(update, context, state, notice=notice)
+
+
+async def handle_transfer_notify(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> None:
+    """Повторная best-effort доставка уведомления уже утверждённому получателю."""
+    query = ctx.query(update)
+    guard = await _transfer_state_place(
+        update, allowed_phases=frozenset({"transfer_outgoing"})
+    )
+    if guard is None:
+        return
+    state, place_id, _phase = guard
+    try:
+        transfer_id = int(str(query.data or "").rsplit(":", 1)[1])
+    except (IndexError, ValueError):
+        await _stale(update)
+        return
+
+    session = SessionLocal()
+    try:
+        _ensure_user(session, update)
+        view = get_transfer_view(session, transfer_id)
+        if (
+            view is None
+            or view.place_id != place_id
+            or not is_place_admin(session, ctx.user(update).id, place_id)
+        ):
+            await query.answer(STALE_TEXT, show_alert=True)
+            return
+        if not view.awaiting_recipient:
+            await query.answer(
+                "Уведомление больше не требуется: состояние передачи изменилось.",
+                show_alert=True,
+            )
+            await _render_phase(update, context, state)
+            return
+    finally:
+        session.close()
+
+    delivered = await _notify_recipient(context, view)
+    if delivered:
+        session = SessionLocal()
+        try:
+            mark_transfer_notified(session, transfer_id)
+        except Exception as e:  # noqa: BLE001
+            logger.error("Не удалось отметить доставку уведомления: %s", e)
+        finally:
+            session.close()
+    await query.answer()
+    notice = (
+        "✅ Уведомление доставлено."
+        if delivered
+        else "Не удалось доставить уведомление. Получатель может открыть ссылку повторно."
+    )
+    await _render_phase(update, context, state, notice=notice)
+
+
+async def handle_transfer_cancel(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> None:
+    """Инициатор отменяет предложение до подтверждения; права не меняются."""
+    query = ctx.query(update)
+    guard = await _transfer_state_place(
+        update, allowed_phases=frozenset({"transfer_outgoing"})
+    )
+    if guard is None:
+        return
+    state, place_id, _phase = guard
+    try:
+        transfer_id = int(str(query.data or "").rsplit(":", 1)[1])
+    except (IndexError, ValueError):
+        await _stale(update)
+        return
+
+    result = None
+    session = SessionLocal()
+    try:
+        _ensure_user(session, update)
+        view = get_transfer_view(session, transfer_id)
+        if (
+            view is None
+            or view.place_id != place_id
+            or view.from_user.telegram_user_id != ctx.user(update).id
+        ):
+            await query.answer(STALE_TEXT, show_alert=True)
+            return
+        result = cancel_admin_transfer(
+            session,
+            actor_telegram_user_id=ctx.user(update).id,
+            transfer_id=transfer_id,
+        )
+    finally:
+        session.close()
+
+    if result.status == "cancelled":
+        recipient = None
+        if result.transfer is not None:
+            recipient = result.transfer.to_user or result.transfer.opened_by
+        if recipient is not None:
+            await _send_user_notification(
+                context,
+                recipient.telegram_user_id,
+                (
+                    "❌ Передача администрации отменена\n\n"
+                    f"📍 {_h(result.transfer.place_name if result.transfer else '')}"
+                    "\n\nПолномочия не изменились."
+                ),
+            )
+        _clear_transfer_keys(state)
+        state["phase"] = "place"
+        notice = "✅ Передача отменена. Права остались у вас."
+    else:
+        notice = {
+            "not_initiator": "Отменить передачу может только её инициатор.",
+            "expired": "Срок предложения уже истёк.",
+            "superseded": "Предложение уже недействительно: администратор изменился.",
+            "cancelled": "Передача уже отменена.",
+            "confirmed": "Передача уже подтверждена и не может быть отменена.",
+            "rejected": "Получатель уже отклонил предложение.",
+        }.get(result.status, "Состояние изменилось. Обновите экран.")
+        if result.transfer is None:
+            state["phase"] = "place"
+        else:
+            state["phase"] = "transfer_outgoing"
+    await query.answer()
+    await _render_phase(update, context, state, notice=notice)
+
+
+async def handle_transfer_accept(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> None:
+    """Получатель подтверждает передачу в своём Telegram-аккаунте."""
+    query = ctx.query(update)
+    user = ctx.user(update)
+    try:
+        transfer_id = int(str(query.data or "").rsplit(":", 1)[1])
+    except (IndexError, ValueError):
+        await _stale(update)
+        return
+
+    session = SessionLocal()
+    try:
+        _ensure_user(session, update)
+        result = confirm_admin_transfer(
+            session,
+            actor_telegram_user_id=user.id,
+            transfer_id=transfer_id,
+        )
+    except Exception as e:  # noqa: BLE001 — отказ безопаснее ложного подтверждения
+        logger.error("Не удалось подтвердить передачу: %s", e)
+        await query.answer(
+            "Не удалось подтвердить передачу. Повторите позже.", show_alert=True
+        )
+        return
+    finally:
+        session.close()
+
+    if result.status == "confirmed":
+        await query.answer("Передача подтверждена")
+        view = result.transfer
+        if view is not None:
+            text = (
+                "✅ Вы теперь администратор места\n\n"
+                f"📍 {_h(view.place_name)}\n\n"
+                "Права прежнего администратора сняты. Его открытые экраны "
+                "этого места больше не действуют: права проверяются заново."
+            )
+            await _edit_notification_message(
+                query,
+                text,
+                InlineKeyboardMarkup(
+                    [
+                        [
+                            InlineKeyboardButton(
+                                "🛡 Открыть кабинет",
+                                callback_data="admin_panel",
+                            )
+                        ],
+                        [
+                            InlineKeyboardButton(
+                                "🏠 Главное меню", callback_data="main_menu"
+                            )
+                        ],
+                    ]
+                ),
+            )
+            await _notify_initiator(
+                context,
+                view,
+                (
+                    "✅ Передача администрации завершена\n\n"
+                    f"📍 {_h(view.place_name)}\n"
+                    f"Новый администратор: "
+                    f"{_h(_transfer_user_label(view.to_user)) if view.to_user else '—'}\n\n"
+                    "Ваши полномочия на это место сняты."
+                ),
+            )
+        return
+
+    if result.status == "already_confirmed":
+        await query.answer("Передача уже подтверждена")
+        await _edit_notification_message(
+            query,
+            "✅ Это предложение уже подтверждено. Повторно права не меняются.",
+            InlineKeyboardMarkup(
+                [[InlineKeyboardButton("🏠 Главное меню", callback_data="main_menu")]]
+            ),
+        )
+        return
+
+    if result.status == "not_recipient":
+        await query.answer(
+            "Предложение адресовано другому пользователю.", show_alert=True
+        )
+        return
+
+    await query.answer("Передача не может быть подтверждена")
+    text, keyboard = _incoming_transfer_content(result.status, result.transfer, user.id)
+    await _edit_notification_message(query, text, keyboard)
+
+
+async def handle_transfer_decline(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> None:
+    """Получатель отклоняет предложение; права не меняются."""
+    query = ctx.query(update)
+    user = ctx.user(update)
+    try:
+        transfer_id = int(str(query.data or "").rsplit(":", 1)[1])
+    except (IndexError, ValueError):
+        await _stale(update)
+        return
+
+    session = SessionLocal()
+    try:
+        _ensure_user(session, update)
+        result = reject_admin_transfer(
+            session,
+            actor_telegram_user_id=user.id,
+            transfer_id=transfer_id,
+        )
+    except Exception as e:  # noqa: BLE001
+        logger.error("Не удалось отклонить передачу: %s", e)
+        await query.answer(
+            "Не удалось отклонить передачу. Повторите позже.", show_alert=True
+        )
+        return
+    finally:
+        session.close()
+
+    if result.status == "rejected":
+        await query.answer("Предложение отклонено")
+        view = result.transfer
+        await _edit_notification_message(
+            query,
+            (
+                "❌ Вы отклонили передачу администрации\n\n"
+                f"📍 {_h(view.place_name) if view else ''}\n\n"
+                "Полномочия не изменились."
+            ),
+            InlineKeyboardMarkup(
+                [[InlineKeyboardButton("🏠 Главное меню", callback_data="main_menu")]]
+            ),
+        )
+        if view is not None:
+            await _notify_initiator(
+                context,
+                view,
+                (
+                    "❌ Получатель отклонил передачу администрации\n\n"
+                    f"📍 {_h(view.place_name)}\n\n"
+                    "Вы остаётесь администратором. Можно создать новое "
+                    "предложение."
+                ),
+            )
+        return
+
+    if result.status == "not_recipient":
+        await query.answer(
+            "Предложение адресовано другому пользователю.", show_alert=True
+        )
+        return
+
+    await query.answer("Предложение уже нельзя отклонить")
+    text, keyboard = _incoming_transfer_content(result.status, result.transfer, user.id)
+    await _edit_notification_message(query, text, keyboard)
+
+
+async def handle_transfer_start(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> bool:
+    """
+    Deep-link `/start tf_<id>_<token>`: экран получателя без прав.
+
+    Возвращает True, если payload относится к передаче (включая некорректный):
+    обычный /start тогда не должен перерисовывать главное меню.
+    """
+    args = getattr(context, "args", None) or []
+    payload = args[0] if args else ""
+    if not payload.startswith("tf_"):
+        return False
+
+    await screen.reanchor_screen(update, context)
+    user = ctx.user(update)
+    clear_place_session(user.id)
+    clear_admin_session(user.id)
+
+    body = payload[3:]
+    transfer_id_raw, separator, token = body.partition("_")
+    valid_shape = (
+        bool(separator)
+        and transfer_id_raw.isdigit()
+        and len(transfer_id_raw) <= 18
+        and 20 <= len(token) <= 128
+        and all(char.isalnum() or char in {"_", "-"} for char in token)
+    )
+    status = "invalid_invite"
+    view: TransferView | None = None
+    if valid_shape:
+        session = SessionLocal()
+        try:
+            _ensure_user(session, update)
+            result = open_transfer_invitation(
+                session,
+                transfer_id=int(transfer_id_raw),
+                token=token,
+                actor_telegram_user_id=user.id,
+            )
+            status = result.status
+            view = result.transfer
+        except Exception as e:  # noqa: BLE001 — ссылка не должна ронять бота
+            logger.error("Не удалось открыть приглашение передачи: %s", e)
+        finally:
+            session.close()
+
+    text, keyboard = _incoming_transfer_content(status, view, user.id)
+    user_data = ctx.data(context)
+    if screen.screen_ref(user_data) is None:
+        screen.hydrate_screen_ref(user_data, user.id)
+    chat_id = ctx.chat(update).id
+    await screen.render_screen(context, user_data, chat_id, text, keyboard)
+    screen.save_screen_ref(user.id, user_data, chat_id)
+    return True
+
+
 class AdminTextHandler(MessageHandler):
     """Текст принимается только в явных фазах кабинета, заданных allowed_phases."""
 
@@ -2343,6 +3803,30 @@ def admin_handlers() -> list[BaseHandler]:
             handle_edit_url_delete, pattern=r"^adm_edit_url_delete:\d+$"
         ),
         CallbackQueryHandler(handle_edit_confirm, pattern=r"^adm_edit_confirm$"),
+        # Передача администратора места (Stage 21).
+        CallbackQueryHandler(handle_transfer_open, pattern=r"^adm_transfer:\d+$"),
+        CallbackQueryHandler(handle_transfer_pick, pattern=r"^adm_transfer_pick:\d+$"),
+        CallbackQueryHandler(
+            handle_transfer_confirm, pattern=r"^adm_transfer_confirm$"
+        ),
+        CallbackQueryHandler(
+            handle_transfer_approve, pattern=r"^adm_transfer_approve:\d+$"
+        ),
+        CallbackQueryHandler(
+            handle_transfer_notify, pattern=r"^adm_transfer_notify:\d+$"
+        ),
+        CallbackQueryHandler(
+            handle_transfer_refresh, pattern=r"^adm_transfer_refresh:\d+$"
+        ),
+        CallbackQueryHandler(
+            handle_transfer_cancel, pattern=r"^adm_transfer_cancel:\d+$"
+        ),
+        CallbackQueryHandler(
+            handle_transfer_accept, pattern=r"^adm_transfer_accept:\d+$"
+        ),
+        CallbackQueryHandler(
+            handle_transfer_decline, pattern=r"^adm_transfer_decline:\d+$"
+        ),
         AdminTextHandler(
             filters.TEXT & ~filters.COMMAND,
             handle_search_text,
@@ -2352,6 +3836,11 @@ def admin_handlers() -> list[BaseHandler]:
             filters.TEXT & ~filters.COMMAND,
             handle_edit_text,
             allowed_phases=EDIT_INPUT_PHASES,
+        ),
+        AdminTextHandler(
+            filters.TEXT & ~filters.COMMAND,
+            handle_transfer_text,
+            allowed_phases=TRANSFER_INPUT_PHASES,
         ),
         CallbackQueryHandler(handle_admin_stale, pattern=r"^adm_"),
     ]

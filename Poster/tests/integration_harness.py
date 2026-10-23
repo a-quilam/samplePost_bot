@@ -265,9 +265,12 @@ def make_text_update(
     if entities is None:
         entities = []
         if text.startswith("/"):
+            # Telegram выделяет bot_command только до первого пробела: payload
+            # (`/start tf_...`) — это уже argument, а не часть команды.
+            command = text.split(maxsplit=1)[0]
             entities = [
                 MessageEntity(
-                    type=MessageEntity.BOT_COMMAND, offset=0, length=len(text)
+                    type=MessageEntity.BOT_COMMAND, offset=0, length=len(command)
                 )
             ]
     message = Message(

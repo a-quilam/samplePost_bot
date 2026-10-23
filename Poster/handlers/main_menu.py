@@ -122,7 +122,14 @@ async def render_main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -
 
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Команда /start: главное меню на существующем экране."""
+    """Команда /start: главное меню или экран приглашения передачи (Stage 21)."""
+    from handlers.admin import handle_transfer_start
+
+    if await handle_transfer_start(update, context):
+        # /start с payload передачи — отдельный экран; команду убираем так же,
+        # как в обычном меню. WIP-пост не трогается.
+        await screen.drop_user_input(update, context)
+        return
     await render_main_menu(update, context)
     # Сообщение с командой — временный ввод: меню уже на экране, убираем
     # его best-effort (при сбое очистки диалог не ломается)
