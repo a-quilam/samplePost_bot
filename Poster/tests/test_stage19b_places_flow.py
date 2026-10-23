@@ -15,7 +15,7 @@ from sqlalchemy import func, select
 from telegram.error import BadRequest
 
 try:
-    from models import Draft, Place, PlaceName, User
+    from models import Draft, Place, PlaceName, Template, User
     from place_state import load_place_session, save_place_session
     from place_store import normalize_place_name
     from tests.integration_harness import (
@@ -393,7 +393,7 @@ class PlaceCreationFlowTests(unittest.TestCase):
         self.assertIn("pl_open:", str(h.screen_buttons()))
 
     @scenario_test
-    async def test_creating_place_does_not_grant_admin_or_templates(self, h):
+    async def test_creating_place_does_not_grant_admin_or_expose_template_ui(self, h):
         await open_hub(h)
         await h.callback("pl_add")
         await h.text("Место для всех")
@@ -404,20 +404,20 @@ class PlaceCreationFlowTests(unittest.TestCase):
             self.assertEqual(
                 session.scalar(select(func.count()).select_from(User)) or 0, 1
             )
+            # Stage 23: стандартный шаблон создан атомарно, но UI шаблонов
+            # появится только на Stage 25.
+            self.assertEqual(
+                session.scalar(select(func.count()).select_from(Template)) or 0,
+                1,
+            )
         finally:
             session.close()
-        # Создание места не выдаёт админку и не создаёт шаблон. Реестр
-        # кирпичиков Stage 22A существует отдельно и на этот поток не влияет.
         self.assertNotIn("администратор", h.screen_text().lower())
         self.assertNotIn("шаблон", h.screen_text().lower())
         from base import Base
 
-        forbidden = {
-            "templates",
-            "template_versions",
-            "draft_values",
-        }
-        self.assertFalse(forbidden & set(Base.metadata.tables))
+        self.assertFalse({"draft_values"} & set(Base.metadata.tables))
+        self.assertIn("templates", set(Base.metadata.tables))
 
     @scenario_test
     async def test_duplicate_check_offers_existing_and_alias_requires_confirmation(
