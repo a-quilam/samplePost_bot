@@ -13,7 +13,8 @@
 - состояние `admin_sessions` хранит только навигацию и является подсказкой,
   а не источником полномочий.
 
-Текстовый ввод принимается только в явной фазе поиска получателя. Обработчик
+Текстовый ввод принимается только в явных фазах кабинета: поиск получателя
+назначения (Stage 20A) и поля редактирования места (Stage 20B). Обработчик
 зарегистрирован после мастера поста и «Мест», поэтому не перехватывает их
 поля; при входе в кабинет сценарий «Места» очищается.
 """
@@ -25,7 +26,12 @@ from datetime import datetime
 from html import escape as html_escape
 
 from sqlalchemy.orm import Session
-from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
+from telegram import (
+    CallbackQuery,
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
+    Update,
+)
 from telegram.ext import (
     BaseHandler,
     CallbackQueryHandler,
@@ -60,8 +66,32 @@ from place_admin_store import (
     revoke_place_admin,
     search_known_users,
 )
+from place_edit_store import (
+    AliasRow,
+    EditMutationResult,
+    PlaceEditPermissionError,
+    PlaceEditValueError,
+    add_place_alias,
+    clean_address_text,
+    delete_place_address,
+    delete_place_alias,
+    delete_place_url,
+    list_place_aliases,
+    normalize_place_url,
+    rename_canonical_place_name,
+    rename_place_alias,
+    set_place_address,
+    set_place_url,
+)
 from place_state import clear_place_session
-from place_store import PlaceDetails, get_place_details
+from place_store import (
+    PlaceDetails,
+    PlaceNameError,
+    find_name_conflicts,
+    get_place_details,
+    normalize_place_name,
+    validate_place_name,
+)
 from user_store import get_or_create_user
 from utils import screen
 from utils import tg_context as ctx
@@ -73,8 +103,6 @@ STALE_TEXT = "Кнопка устарела: откройте администр
 DENIED_TEXT = "Раздел доступен только администраторам Poster."
 DENIED_ALERT = "Доступ к административному разделу закрыт."
 
-TEXT_INPUT_PHASES = {"assign_search"}
-
 PHASES = {
     "places",
     "place",
@@ -83,6 +111,21 @@ PHASES = {
     "confirm_assign",
     "confirm_replace",
     "confirm_revoke",
+    "edit_menu",
+    "edit_name_input",
+    "edit_name_confirm",
+    "edit_aliases",
+    "edit_alias_add_input",
+    "edit_alias_add_confirm",
+    "edit_alias_rename_input",
+    "edit_alias_rename_confirm",
+    "edit_alias_delete_confirm",
+    "edit_address_input",
+    "edit_address_confirm",
+    "edit_address_delete_confirm",
+    "edit_url_input",
+    "edit_url_confirm",
+    "edit_url_delete_confirm",
 }
 
 SUPER_ONLY_PHASES = {
@@ -145,9 +188,9 @@ def _new_state() -> dict:
     return {"phase": "places", "page": 0}
 
 
-def _page_value(state: dict) -> int:
+def _page_value(state: dict, key: str = "page") -> int:
     try:
-        value = int(state.get("page") or 0)
+        value = int(state.get(key) or 0)
     except (TypeError, ValueError):
         return 0
     return max(value, 0)
@@ -365,8 +408,8 @@ def _place_text(details: PlaceDetails, state: dict, session: Session) -> str:
             f"Назначен: {_h(_date_label(active.assigned_at))}"
         )
     text += (
-        "\n\nВ Stage 20A кабинет управляет только ролями. "
-        "Редактирование данных места — Stage 20B, передача админа — Stage 21."
+        "\n\nРедактирование названия, альтернативных названий, адреса и "
+        "ссылки доступно из этого кабинета."
     )
     return text
 
@@ -378,6 +421,14 @@ def _place_keyboard(
     access_kind: str,
 ) -> InlineKeyboardMarkup:
     rows: list[list[InlineKeyboardButton]] = []
+    rows.append(
+        [
+            InlineKeyboardButton(
+                "✏️ Редактировать место",
+                callback_data=f"adm_edit_place:{details.place_id}",
+            )
+        ]
+    )
     if access_kind == "superadmin":
         active = get_active_place_admin(session, details.place_id)
         if active is None:
@@ -467,6 +518,290 @@ def _assign_results_content(
             )
     keyboard.append(
         [InlineKeyboardButton("🔁 Искать снова", callback_data="adm_search_again")]
+    )
+    keyboard.append([InlineKeyboardButton("◀️ Назад", callback_data="adm_cancel")])
+    return text, InlineKeyboardMarkup(keyboard)
+
+
+ALIAS_PAGE_SIZE = 6
+
+
+def _edit_menu_content(
+    session: Session, details: PlaceDetails
+) -> tuple[str, InlineKeyboardMarkup]:
+    """Меню редактирования данных места (Stage 20B)."""
+    aliases = list_place_aliases(session, details.place_id)
+    text = (
+        "✏️ Редактирование места\n\n"
+        f"📍 Название: {_h(details.canonical_name)}\n"
+        f"Альтернативные названия: {len(aliases)}\n"
+        f"Адрес: {_h(details.address) if details.address else 'Не указан'}\n"
+        f"Ссылка: {_safe_link(details.url) if details.url else 'Не указана'}\n\n"
+        "Выберите, что изменить:"
+    )
+    rows: list[list[InlineKeyboardButton]] = [
+        [
+            InlineKeyboardButton(
+                "🏷 Изменить название",
+                callback_data=f"adm_edit_name:{details.place_id}",
+            )
+        ],
+        [
+            InlineKeyboardButton(
+                "📝 Альтернативные названия",
+                callback_data=f"adm_aliases:{details.place_id}",
+            )
+        ],
+        [
+            InlineKeyboardButton(
+                "🏠 Изменить адрес",
+                callback_data=f"adm_edit_address:{details.place_id}",
+            )
+        ],
+        [
+            InlineKeyboardButton(
+                "🔗 Изменить ссылку",
+                callback_data=f"adm_edit_url:{details.place_id}",
+            )
+        ],
+    ]
+    if details.address:
+        rows.append(
+            [
+                InlineKeyboardButton(
+                    "🗑 Удалить адрес",
+                    callback_data=f"adm_edit_address_delete:{details.place_id}",
+                )
+            ]
+        )
+    if details.url:
+        rows.append(
+            [
+                InlineKeyboardButton(
+                    "🗑 Удалить ссылку",
+                    callback_data=f"adm_edit_url_delete:{details.place_id}",
+                )
+            ]
+        )
+    rows.append([InlineKeyboardButton("◀️ Назад", callback_data="adm_cancel")])
+    return text, InlineKeyboardMarkup(rows)
+
+
+def _edit_input_content(
+    details: PlaceDetails, phase: str, state: dict
+) -> tuple[str, InlineKeyboardMarkup]:
+    """Экран ввода нового значения для редактируемого поля."""
+    if phase == "edit_name_input":
+        text = (
+            "🏷 Изменение названия\n\n"
+            f"📍 Текущее название: {_h(details.canonical_name)}\n\n"
+            "Введите новое каноническое название места. Старое название "
+            "сохранится как альтернативное для поиска.\n\n"
+            "Название не должно совпадать с другими названиями этого места и "
+            "не должно быть слишком похожим на другие места — проверим на "
+            "следующем шаге."
+        )
+    elif phase == "edit_alias_add_input":
+        text = (
+            "📝 Добавление альтернативного названия\n\n"
+            f"📍 {_h(details.canonical_name)}\n\n"
+            "Введите альтернативное название. Оно будет доступно для поиска "
+            "вместе с каноническим названием."
+        )
+    elif phase == "edit_alias_rename_input":
+        target_name = _h(str(state.get("edit_target_name") or ""))
+        text = (
+            "📝 Переименование альтернативного названия\n\n"
+            f"📍 {_h(details.canonical_name)}\n\n"
+            f"Текущее альтернативное название: {target_name}\n\n"
+            "Введите новое название для этого варианта."
+        )
+    elif phase == "edit_address_input":
+        current = details.address if details.address else "Не указан"
+        text = (
+            "🏠 Изменение адреса\n\n"
+            f"📍 {_h(details.canonical_name)}\n"
+            f"Текущий адрес: {_h(current)}\n\n"
+            "Введите адрес места (обычный текст, до 500 символов)."
+        )
+    elif phase == "edit_url_input":
+        current = details.url if details.url else "Не указана"
+        text = (
+            "🔗 Изменение ссылки\n\n"
+            f"📍 {_h(details.canonical_name)}\n"
+            f"Текущая ссылка: {_safe_link(current)}\n\n"
+            "Введите ссылку на страницу места (например, example.com или "
+            "https://t.me/poster)."
+        )
+    else:
+        text = "✏️ Редактирование места\n\nВведите новое значение."
+    return text, InlineKeyboardMarkup(
+        [[InlineKeyboardButton("◀️ Отмена", callback_data="adm_cancel")]]
+    )
+
+
+def _edit_confirm_content(
+    session: Session, details: PlaceDetails, phase: str, state: dict
+) -> tuple[str, InlineKeyboardMarkup] | None:
+    """Экран подтверждения изменения данных места."""
+    warning = str(state.get("edit_warning") or "")
+    warning_block = f"⚠️ {warning}\n\n" if warning else ""
+
+    if phase == "edit_address_delete_confirm":
+        if not details.address:
+            return None
+        text = (
+            "🗑 Подтвердите удаление адреса\n\n"
+            f"📍 {_h(details.canonical_name)}\n\n"
+            f"Текущий адрес: {_h(details.address)}\n\n"
+            "Адрес будет удалён из карточки места. Само место сохранится."
+        )
+    elif phase == "edit_url_delete_confirm":
+        if not details.url:
+            return None
+        text = (
+            "🗑 Подтвердите удаление ссылки\n\n"
+            f"📍 {_h(details.canonical_name)}\n\n"
+            f"Текущая ссылка: {_safe_link(details.url)}\n\n"
+            "Ссылка будет удалена из карточки места. Само место сохранится."
+        )
+    elif phase == "edit_alias_delete_confirm":
+        target_name = _h(str(state.get("edit_target_name") or ""))
+        text = (
+            f"{warning_block}"
+            "🗑 Подтвердите удаление альтернативного названия\n\n"
+            f"📍 {_h(details.canonical_name)}\n\n"
+            f"Будет удалено: {target_name}\n\n"
+            "Каноническое название и другие альтернативные названия останутся "
+            "нетронутыми."
+        )
+    else:
+        value = state.get("edit_value")
+        if not isinstance(value, str) or not value:
+            return None
+
+        if phase == "edit_name_confirm":
+            if value == details.canonical_name:
+                return None
+            text = (
+                f"{warning_block}"
+                "✏️ Подтвердите изменение названия\n\n"
+                f"📍 {_h(details.canonical_name)}\n\n"
+                f"Новое название: {_h(value)}\n\n"
+                "Старое название сохранится как альтернативное для поиска. "
+                "Изменение подтверждает администратор места или суперадминистратор."
+            )
+        elif phase == "edit_alias_add_confirm":
+            text = (
+                f"{warning_block}"
+                "✏️ Подтвердите добавление альтернативного названия\n\n"
+                f"📍 {_h(details.canonical_name)}\n\n"
+                f"Новое название: {_h(value)}\n\n"
+                "Название будет доступно для поиска вместе с каноническим."
+            )
+        elif phase == "edit_alias_rename_confirm":
+            target_name = _h(str(state.get("edit_target_name") or ""))
+            text = (
+                f"{warning_block}"
+                "✏️ Подтвердите переименование альтернативного названия\n\n"
+                f"📍 {_h(details.canonical_name)}\n\n"
+                f"Текущее: {target_name}\n"
+                f"Новое: {_h(value)}\n\n"
+                "Название будет доступно для поиска вместе с каноническим."
+            )
+        elif phase == "edit_address_confirm":
+            current = details.address if details.address else "Не указан"
+            text = (
+                f"{warning_block}"
+                "🏠 Подтвердите изменение адреса\n\n"
+                f"📍 {_h(details.canonical_name)}\n\n"
+                f"Текущий адрес: {_h(current)}\n"
+                f"Новый адрес: {_h(value)}\n\n"
+                "Адрес будет виден в карточке места."
+            )
+        elif phase == "edit_url_confirm":
+            current = details.url if details.url else "Не указана"
+            text = (
+                f"{warning_block}"
+                "🔗 Подтвердите изменение ссылки\n\n"
+                f"📍 {_h(details.canonical_name)}\n\n"
+                f"Текущая ссылка: {_safe_link(current)}\n"
+                f"Новая ссылка: {_safe_link(value)}\n\n"
+                "Ссылка будет видна в карточке места."
+            )
+        else:
+            return None
+    return text, InlineKeyboardMarkup(
+        [
+            [InlineKeyboardButton("✅ Подтвердить", callback_data="adm_edit_confirm")],
+            [InlineKeyboardButton("❌ Отмена", callback_data="adm_cancel")],
+        ]
+    )
+
+
+def _edit_aliases_content(
+    session: Session, details: PlaceDetails, state: dict
+) -> tuple[str, InlineKeyboardMarkup]:
+    """Список альтернативных названий с пагинацией и действиями."""
+    aliases = list_place_aliases(session, details.place_id)
+    offset = max(_page_value(state, "alias_page"), 0)
+    offset = min(offset, max(len(aliases) - 1, 0) // ALIAS_PAGE_SIZE * ALIAS_PAGE_SIZE)
+    page_items = aliases[offset : offset + ALIAS_PAGE_SIZE]
+
+    total = len(aliases)
+    if total == 0:
+        text = (
+            f"📝 Альтернативные названия\n\n📍 {_h(details.canonical_name)}\n\n"
+            "Пока нет альтернативных названий. Добавьте первый вариант, чтобы "
+            "место можно было найти по нему."
+        )
+    else:
+        text = (
+            f"📝 Альтернативные названия\n\n📍 {_h(details.canonical_name)}\n"
+            f"Найдено: {total}\n\n"
+        )
+        text += "\n".join(
+            f"{index}. {_h(_short(alias.name, 120))}"
+            for index, alias in enumerate(page_items, start=offset + 1)
+        )
+
+    keyboard: list[list[InlineKeyboardButton]] = []
+    for alias in page_items:
+        keyboard.append(
+            [
+                InlineKeyboardButton(
+                    _button_name("✏️", alias.name),
+                    callback_data=f"adm_alias_rename:{alias.name_id}",
+                ),
+                InlineKeyboardButton(
+                    "🗑 Удалить",
+                    callback_data=f"adm_alias_delete:{alias.name_id}",
+                ),
+            ]
+        )
+    nav: list[InlineKeyboardButton] = []
+    if offset > 0:
+        nav.append(
+            InlineKeyboardButton(
+                "⬅️ Назад", callback_data=f"adm_alias_page:{offset - ALIAS_PAGE_SIZE}"
+            )
+        )
+    if offset + ALIAS_PAGE_SIZE < total:
+        nav.append(
+            InlineKeyboardButton(
+                "Далее ➡️",
+                callback_data=f"adm_alias_page:{offset + ALIAS_PAGE_SIZE}",
+            )
+        )
+    if nav:
+        keyboard.append(nav)
+    keyboard.append(
+        [
+            InlineKeyboardButton(
+                "➕ Добавить название",
+                callback_data=f"adm_alias_add:{details.place_id}",
+            )
+        ]
     )
     keyboard.append([InlineKeyboardButton("◀️ Назад", callback_data="adm_cancel")])
     return text, InlineKeyboardMarkup(keyboard)
@@ -610,6 +945,85 @@ async def _render_phase(
                 )
             else:
                 text, keyboard = _assign_results_content(session, details, state)
+        elif phase == "edit_menu":
+            if details is None:
+                state.clear()
+                state.update(_new_state())
+                notice = notice or "Место не существует или было удалено."
+                text, keyboard = _places_content(session, state, access_kind, user_id)
+            elif not can_manage_place(session, user_id, details.place_id):
+                state.clear()
+                state.update(_new_state())
+                notice = notice or "Доступ к этому месту не подтверждён."
+                text, keyboard = _places_content(session, state, access_kind, user_id)
+            else:
+                text, keyboard = _edit_menu_content(session, details)
+        elif phase in {
+            "edit_name_input",
+            "edit_alias_add_input",
+            "edit_alias_rename_input",
+            "edit_address_input",
+            "edit_url_input",
+        }:
+            if details is None:
+                state.clear()
+                state.update(_new_state())
+                notice = notice or "Место не существует или было удалено."
+                text, keyboard = _places_content(session, state, access_kind, user_id)
+            elif not can_manage_place(session, user_id, details.place_id):
+                state.clear()
+                state.update(_new_state())
+                notice = notice or "Доступ к этому месту не подтверждён."
+                text, keyboard = _places_content(session, state, access_kind, user_id)
+            else:
+                text, keyboard = _edit_input_content(details, phase, state)
+        elif phase in {
+            "edit_name_confirm",
+            "edit_alias_add_confirm",
+            "edit_alias_rename_confirm",
+            "edit_alias_delete_confirm",
+            "edit_address_confirm",
+            "edit_address_delete_confirm",
+            "edit_url_confirm",
+            "edit_url_delete_confirm",
+        }:
+            if details is None:
+                state.clear()
+                state.update(_new_state())
+                notice = notice or "Место не существует или было удалено."
+                text, keyboard = _places_content(session, state, access_kind, user_id)
+            elif not can_manage_place(session, user_id, details.place_id):
+                state.clear()
+                state.update(_new_state())
+                notice = notice or "Доступ к этому месту не подтверждён."
+                text, keyboard = _places_content(session, state, access_kind, user_id)
+            else:
+                content = _edit_confirm_content(session, details, phase, state)
+                if content is None:
+                    if phase.startswith("edit_alias"):
+                        state["phase"] = "edit_aliases"
+                        text, keyboard = _edit_aliases_content(session, details, state)
+                    else:
+                        state["phase"] = "edit_menu"
+                        text, keyboard = _edit_menu_content(session, details)
+                    notice = notice or (
+                        "Ситуация изменилась: обновите данные и повторите действие."
+                    )
+                else:
+                    text, keyboard = content
+        elif phase == "edit_aliases":
+            if details is None:
+                state.clear()
+                state.update(_new_state())
+                notice = notice or "Место не существует или было удалено."
+                text, keyboard = _places_content(session, state, access_kind, user_id)
+            elif not can_manage_place(session, user_id, details.place_id):
+                state.clear()
+                state.update(_new_state())
+                notice = notice or "Доступ к этому месту не подтверждён."
+                text, keyboard = _places_content(session, state, access_kind, user_id)
+            else:
+                text, keyboard = _edit_aliases_content(session, details, state)
         else:  # confirm_*
             if details is None:
                 state.clear()
@@ -1030,6 +1444,701 @@ async def handle_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     await _render_phase(update, context, state, notice=_mutation_notice(result))
 
 
+# --- Редактирование данных места (Stage 20B) ----------------------------------
+
+
+EDIT_STATE_KEYS = (
+    "edit_value",
+    "edit_warning",
+    "edit_expected",
+    "edit_target_name_id",
+    "edit_target_name",
+)
+
+EDIT_INPUT_PHASES = frozenset(
+    {
+        "edit_name_input",
+        "edit_alias_add_input",
+        "edit_alias_rename_input",
+        "edit_address_input",
+        "edit_url_input",
+    }
+)
+
+EDIT_CANCEL_TO_MENU_PHASES = frozenset(
+    {
+        "edit_name_input",
+        "edit_name_confirm",
+        "edit_address_input",
+        "edit_address_confirm",
+        "edit_address_delete_confirm",
+        "edit_url_input",
+        "edit_url_confirm",
+        "edit_url_delete_confirm",
+    }
+)
+
+EDIT_CANCEL_TO_ALIASES_PHASES = frozenset(
+    {
+        "edit_alias_add_input",
+        "edit_alias_add_confirm",
+        "edit_alias_rename_input",
+        "edit_alias_rename_confirm",
+        "edit_alias_delete_confirm",
+    }
+)
+
+
+def _clear_edit_keys(state: dict) -> None:
+    """Сбрасывает промежуточные значения редактирования (не роль и не место)."""
+    for key in EDIT_STATE_KEYS:
+        state.pop(key, None)
+
+
+def _find_alias(session: Session, place_id: int, name_id: int) -> AliasRow | None:
+    """Актуальная строка альтернативного названия места по id."""
+    for alias in list_place_aliases(session, place_id):
+        if alias.name_id == name_id:
+            return alias
+    return None
+
+
+async def _edit_transition(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+    *,
+    allowed_phase: str,
+) -> tuple[CallbackQuery, dict] | None:
+    """
+    Общий префикс обработчиков редактирования: фаза + свежая проверка прав.
+
+    Роль проверяется по effective_user: суперадминистратор или действующий
+    администратор ИМЕННО этого места. Callback не передаёт роль.
+    """
+    query = ctx.query(update)
+    state = load_admin_session(ctx.user(update).id)
+    if state is None or state.get("phase") != allowed_phase:
+        await _stale(update)
+        return None
+    place_id = state.get("place_id")
+    session = SessionLocal()
+    try:
+        allowed = isinstance(place_id, int) and can_manage_place(
+            session, ctx.user(update).id, place_id
+        )
+    finally:
+        session.close()
+    if not allowed:
+        await query.answer(DENIED_ALERT, show_alert=True)
+        return None
+    return query, state
+
+
+async def handle_edit_open(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Кнопка «✏️ Редактировать место» в карточке места."""
+    result = await _edit_transition(update, context, allowed_phase="place")
+    if result is None:
+        return
+    query, state = result
+    await query.answer()
+    _clear_edit_keys(state)
+    state["phase"] = "edit_menu"
+    await _render_phase(update, context, state)
+
+
+async def handle_edit_name(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    result = await _edit_transition(update, context, allowed_phase="edit_menu")
+    if result is None:
+        return
+    query, state = result
+    await query.answer()
+    _clear_edit_keys(state)
+    state["phase"] = "edit_name_input"
+    await _render_phase(update, context, state)
+
+
+async def handle_edit_address(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> None:
+    result = await _edit_transition(update, context, allowed_phase="edit_menu")
+    if result is None:
+        return
+    query, state = result
+    await query.answer()
+    _clear_edit_keys(state)
+    state["phase"] = "edit_address_input"
+    await _render_phase(update, context, state)
+
+
+async def handle_edit_url(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    result = await _edit_transition(update, context, allowed_phase="edit_menu")
+    if result is None:
+        return
+    query, state = result
+    await query.answer()
+    _clear_edit_keys(state)
+    state["phase"] = "edit_url_input"
+    await _render_phase(update, context, state)
+
+
+async def handle_edit_address_delete(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> None:
+    result = await _edit_transition(update, context, allowed_phase="edit_menu")
+    if result is None:
+        return
+    query, state = result
+    await query.answer()
+    place_id = state.get("place_id")
+    session = SessionLocal()
+    try:
+        details = (
+            get_place_details(session, int(place_id))
+            if isinstance(place_id, int)
+            else None
+        )
+    finally:
+        session.close()
+    if details is None or details.address is None:
+        # Адрес уже удалён или отсутствует: предлагаем обновить меню.
+        await query.answer(
+            "Адрес уже отсутствует: обновите меню редактирования.",
+            show_alert=True,
+        )
+        return
+    # Фиксируем текущий адрес: подтверждение сработает только если
+    # другой администратор не изменил его в процессе.
+    state["edit_expected"] = details.address
+    state["phase"] = "edit_address_delete_confirm"
+    await _render_phase(update, context, state)
+
+
+async def handle_edit_url_delete(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> None:
+    result = await _edit_transition(update, context, allowed_phase="edit_menu")
+    if result is None:
+        return
+    query, state = result
+    await query.answer()
+    place_id = state.get("place_id")
+    session = SessionLocal()
+    try:
+        details = (
+            get_place_details(session, int(place_id))
+            if isinstance(place_id, int)
+            else None
+        )
+    finally:
+        session.close()
+    if details is None or details.url is None:
+        # Ссылка уже удалена или отсутствует: предлагаем обновить меню.
+        await query.answer(
+            "Ссылка уже отсутствует: обновите меню редактирования.",
+            show_alert=True,
+        )
+        return
+    # Фиксируем текущую ссылку: подтверждение сработает только если
+    # другой администратор не изменил её в процессе.
+    state["edit_expected"] = details.url
+    state["phase"] = "edit_url_delete_confirm"
+    await _render_phase(update, context, state)
+
+
+async def handle_aliases(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Кнопка «📝 Альтернативные названия» в меню редактирования."""
+    result = await _edit_transition(update, context, allowed_phase="edit_menu")
+    if result is None:
+        return
+    query, state = result
+    await query.answer()
+    _clear_edit_keys(state)
+    state["alias_page"] = 0
+    state["phase"] = "edit_aliases"
+    await _render_phase(update, context, state)
+
+
+async def handle_alias_add(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    result = await _edit_transition(update, context, allowed_phase="edit_aliases")
+    if result is None:
+        return
+    query, state = result
+    await query.answer()
+    _clear_edit_keys(state)
+    state["phase"] = "edit_alias_add_input"
+    await _render_phase(update, context, state)
+
+
+async def handle_alias_rename(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> None:
+    query = ctx.query(update)
+    result = await _edit_transition(update, context, allowed_phase="edit_aliases")
+    if result is None:
+        return
+    state = result[1]
+    data = query.data or ""
+    try:
+        name_id = int(data[len("adm_alias_rename:") :])
+    except (TypeError, ValueError):
+        await _stale(update)
+        return
+    place_id = state.get("place_id")
+    session = SessionLocal()
+    try:
+        alias = (
+            _find_alias(session, int(place_id), name_id)
+            if isinstance(place_id, int)
+            else None
+        )
+    finally:
+        session.close()
+    if alias is None:
+        await query.answer("Название уже изменено или удалено.", show_alert=True)
+        return
+    await query.answer()
+    _clear_edit_keys(state)
+    state["edit_target_name_id"] = alias.name_id
+    state["edit_target_name"] = alias.name
+    state["phase"] = "edit_alias_rename_input"
+    await _render_phase(update, context, state)
+
+
+async def handle_alias_delete(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> None:
+    query = ctx.query(update)
+    result = await _edit_transition(update, context, allowed_phase="edit_aliases")
+    if result is None:
+        return
+    state = result[1]
+    data = query.data or ""
+    try:
+        name_id = int(data[len("adm_alias_delete:") :])
+    except (TypeError, ValueError):
+        await _stale(update)
+        return
+    place_id = state.get("place_id")
+    session = SessionLocal()
+    try:
+        alias = (
+            _find_alias(session, int(place_id), name_id)
+            if isinstance(place_id, int)
+            else None
+        )
+    finally:
+        session.close()
+    if alias is None:
+        await query.answer("Название уже изменено или удалено.", show_alert=True)
+        return
+    await query.answer()
+    _clear_edit_keys(state)
+    state["edit_target_name_id"] = alias.name_id
+    state["edit_target_name"] = alias.name
+    state["phase"] = "edit_alias_delete_confirm"
+    await _render_phase(update, context, state)
+
+
+async def handle_alias_page(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    query = ctx.query(update)
+    state = load_admin_session(ctx.user(update).id)
+    if state is None or state.get("phase") != "edit_aliases":
+        await _stale(update)
+        return
+    data = query.data or ""
+    try:
+        offset = int(data[len("adm_alias_page:") :])
+    except (TypeError, ValueError):
+        await _stale(update)
+        return
+    await query.answer()
+    state["alias_page"] = max(offset, 0)
+    await _render_phase(update, context, state)
+
+
+def _validate_edit_input(
+    session: Session,
+    details: PlaceDetails,
+    phase: str,
+    raw: str,
+    *,
+    rename_name_id: int | None = None,
+) -> tuple[str, str, str]:
+    """
+    Валидирует текстовый ввод фаз редактирования места.
+
+    Возвращает (next_phase, value, warning). Ошибки PlaceNameError и
+    PlaceEditValueError несут понятное сообщение. Похожие названия других
+    мест возвращаются предупреждением — на экране подтверждения.
+    """
+    if phase == "edit_address_input":
+        cleaned = clean_address_text(raw)
+        if cleaned == details.address:
+            raise PlaceEditValueError(
+                "Адрес уже такой. Если адрес нужно удалить, используйте кнопку "
+                "«Удалить адрес» в меню редактирования."
+            )
+        return "edit_address_confirm", cleaned, ""
+    if phase == "edit_url_input":
+        normalized = normalize_place_url(raw)
+        if normalized == details.url:
+            raise PlaceEditValueError(
+                "Ссылка уже такая. Если ссылку нужно удалить, используйте "
+                "кнопку «Удалить ссылку» в меню редактирования."
+            )
+        return "edit_url_confirm", normalized, ""
+
+    what = {
+        "edit_name_input": "Название места",
+        "edit_alias_add_input": "Альтернативное название",
+        "edit_alias_rename_input": "Альтернативное название",
+    }[phase]
+    display = validate_place_name(raw, what=what)
+    needle = normalize_place_name(display)
+
+    aliases = list_place_aliases(session, details.place_id)
+    if phase == "edit_name_input":
+        if needle == normalize_place_name(details.canonical_name):
+            raise PlaceEditValueError(
+                "Такое название уже является каноническим у этого места. "
+                "Введите другое название."
+            )
+        existing_names = [alias.name for alias in aliases]
+    elif phase == "edit_alias_add_input":
+        existing_names = [details.canonical_name] + [alias.name for alias in aliases]
+    else:
+        target = None
+        for alias in aliases:
+            if alias.name_id == rename_name_id:
+                target = alias
+                break
+        if target is None:
+            raise PlaceEditValueError(
+                "Название уже изменено или удалено другим администратором. "
+                "Вернитесь к списку названий."
+            )
+        existing_names = [details.canonical_name] + [
+            alias.name for alias in aliases if alias.name_id != rename_name_id
+        ]
+    for name in existing_names:
+        if normalize_place_name(name) == needle:
+            raise PlaceEditValueError(
+                f"Такое название уже есть у этого места: «{name}». Введите другое."
+            )
+
+    conflicts = find_name_conflicts(session, display, exclude_place_id=details.place_id)
+    warning = ""
+    if conflicts:
+        other = conflicts[0]
+        warning = (
+            f"Похожее название у другого места: «{other.matched_name}» "
+            f"в месте «{other.canonical_name}»."
+        )
+        if len(conflicts) > 1:
+            warning += f" Похожих мест: {len(conflicts)}."
+
+    next_phase = {
+        "edit_name_input": "edit_name_confirm",
+        "edit_alias_add_input": "edit_alias_add_confirm",
+        "edit_alias_rename_input": "edit_alias_rename_confirm",
+    }[phase]
+    return next_phase, display, warning
+
+
+async def handle_edit_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Текст в фазах редактирования места: валидация и переход к подтверждению."""
+    user = ctx.user(update)
+    state = load_admin_session(user.id)
+    if state is None or state.get("phase") not in EDIT_INPUT_PHASES:
+        return
+    phase = str(state.get("phase"))
+    place_id = state.get("place_id")
+    session = SessionLocal()
+    try:
+        if not isinstance(place_id, int) or not can_manage_place(
+            session, user.id, place_id
+        ):
+            clear_admin_session(user.id)
+            await _render_denied(update, context)
+            return
+        details = get_place_details(session, place_id)
+        if details is None:
+            state.clear()
+            state.update(_new_state())
+            await _render_phase(
+                update,
+                context,
+                state,
+                notice="Место не существует или было удалено.",
+                drop_input=True,
+            )
+            return
+        raw = ctx.message(update).text or ""
+        try:
+            next_phase, value, warning = _validate_edit_input(
+                session,
+                details,
+                phase,
+                raw,
+                rename_name_id=(
+                    state.get("edit_target_name_id")
+                    if isinstance(state.get("edit_target_name_id"), int)
+                    else None
+                ),
+            )
+        except (PlaceNameError, PlaceEditValueError) as e:
+            cleanup = []
+            message = getattr(update, "message", None)
+            if message is not None and message.message_id is not None:
+                cleanup.append(int(message.message_id))
+            await _render_phase(
+                update,
+                context,
+                state,
+                notice=str(e),
+                cleanup_ids=cleanup,
+                drop_input=True,
+            )
+            return
+    finally:
+        session.close()
+
+    state["edit_value"] = value
+    if warning:
+        state["edit_warning"] = warning
+    else:
+        state.pop("edit_warning", None)
+
+    # Фиксируем старое значение поля на момент ввода: подтверждение пройдёт
+    # только если другой администратор не изменил поле в процессе (гонка
+    # обнаруживается хранилищем по ожидаемому значению).
+    expected_map = {
+        "edit_name_confirm": details.canonical_name,
+        "edit_address_confirm": details.address,
+        "edit_url_confirm": details.url,
+    }
+    if next_phase in expected_map:
+        state["edit_expected"] = expected_map[next_phase]
+    else:
+        state.pop("edit_expected", None)
+
+    state["phase"] = next_phase
+    cleanup = _failed_take(state)
+    message = getattr(update, "message", None)
+    if message is not None and message.message_id is not None:
+        cleanup.append(int(message.message_id))
+    await _render_phase(update, context, state, cleanup_ids=cleanup, drop_input=True)
+
+
+def _edit_result_notice(
+    result: EditMutationResult, phase: str
+) -> tuple[str, str | None]:
+    """Сообщение о результате мутации и фаза, куда вернуться."""
+    alias_phase = phase.startswith("edit_alias")
+    ok_phase = "edit_aliases" if alias_phase else "edit_menu"
+    if result.status == "ok":
+        if phase == "edit_name_confirm":
+            return "✅ Название места изменено.", "place"
+        if phase == "edit_alias_add_confirm":
+            return "✅ Альтернативное название добавлено.", "edit_aliases"
+        if phase == "edit_alias_rename_confirm":
+            return "✅ Альтернативное название переименовано.", "edit_aliases"
+        if phase == "edit_alias_delete_confirm":
+            return "✅ Альтернативное название удалено.", "edit_aliases"
+        if phase == "edit_address_confirm":
+            return "✅ Адрес места обновлён.", "edit_menu"
+        if phase == "edit_address_delete_confirm":
+            return "✅ Адрес места удалён.", "edit_menu"
+        if phase == "edit_url_confirm":
+            return "✅ Ссылка места обновлена.", "edit_menu"
+        return "✅ Ссылка места удалена.", "edit_menu"
+    if result.status == "unchanged":
+        return "Значение уже было таким. Изменений нет.", ok_phase
+    if result.status == "changed":
+        return (
+            "Значение изменилось во время подтверждения: другой администратор "
+            "обновил это поле. Откройте меню редактирования заново."
+        ), ok_phase
+    if result.status == "duplicate":
+        return "Такое название уже есть у этого места. Введите другое.", ok_phase
+    if result.status == "not_found":
+        return (
+            "Название уже изменено или удалено другим администратором."
+        ), "edit_aliases"
+    if result.status == "canonical":
+        return (
+            "Каноническое название изменяется отдельным действием «Изменить "
+            "название»."
+        ), ok_phase
+    if result.status == "conflict":
+        return (
+            "Название похоже на название другого места. Повторите действие."
+        ), ok_phase
+    return "Место не существует или было удалено.", None
+
+
+def _expected_field_from_state(state: dict, fresh_value: str | None) -> str | None:
+    """
+    Ожидаемое старое значение поля из состояния кабинета.
+
+    Значение захватывается при входе в фазу подтверждения, поэтому гонка
+    с другим администратором обнаруживается хранилищем (status "changed").
+    Отсутствие ключа — состояние старой сессии: резерв на свежее значение.
+    """
+    if "edit_expected" not in state:
+        return fresh_value
+    value = state.get("edit_expected")
+    if value is not None and not isinstance(value, str):
+        return fresh_value
+    return value
+
+
+async def handle_edit_confirm(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> None:
+    """Подтверждение изменения данных места: мутация атомарна с аудитом."""
+    query = ctx.query(update)
+    user = ctx.user(update)
+    state = load_admin_session(user.id)
+    if state is None or state.get("phase") not in {
+        "edit_name_confirm",
+        "edit_alias_add_confirm",
+        "edit_alias_rename_confirm",
+        "edit_alias_delete_confirm",
+        "edit_address_confirm",
+        "edit_address_delete_confirm",
+        "edit_url_confirm",
+        "edit_url_delete_confirm",
+    }:
+        await _stale(update)
+        return
+    place_id = state.get("place_id")
+    if not isinstance(place_id, int):
+        await _stale(update)
+        return
+    phase = str(state.get("phase"))
+    session = SessionLocal()
+    try:
+        _ensure_user(session, update)
+        details = get_place_details(session, place_id)
+        if details is None:
+            state.clear()
+            state.update(_new_state())
+            await query.answer()
+            await _render_phase(
+                update,
+                context,
+                state,
+                notice="Место не существует или было удалено.",
+            )
+            return
+        actor_telegram_user_id = user.id
+        try:
+            if phase == "edit_name_confirm":
+                expected_name = _expected_field_from_state(
+                    state, details.canonical_name
+                )
+                if expected_name is None:
+                    # каноническое название всегда существует; отсутствие
+                    # захвата означает старое состояние сессии — берём свежее.
+                    expected_name = details.canonical_name
+                result = rename_canonical_place_name(
+                    session,
+                    actor_telegram_user_id=actor_telegram_user_id,
+                    place_id=place_id,
+                    new_name=str(state.get("edit_value") or ""),
+                    expected_name=expected_name,
+                    force=True,
+                )
+            elif phase == "edit_alias_add_confirm":
+                result = add_place_alias(
+                    session,
+                    actor_telegram_user_id=actor_telegram_user_id,
+                    place_id=place_id,
+                    name=str(state.get("edit_value") or ""),
+                    force=True,
+                )
+            elif phase == "edit_alias_rename_confirm":
+                name_id = state.get("edit_target_name_id")
+                result = rename_place_alias(
+                    session,
+                    actor_telegram_user_id=actor_telegram_user_id,
+                    place_id=place_id,
+                    name_id=name_id if isinstance(name_id, int) else -1,
+                    new_name=str(state.get("edit_value") or ""),
+                    expected_name=str(state.get("edit_target_name") or ""),
+                    force=True,
+                )
+            elif phase == "edit_alias_delete_confirm":
+                name_id = state.get("edit_target_name_id")
+                result = delete_place_alias(
+                    session,
+                    actor_telegram_user_id=actor_telegram_user_id,
+                    place_id=place_id,
+                    name_id=name_id if isinstance(name_id, int) else -1,
+                    expected_name=str(state.get("edit_target_name") or ""),
+                )
+            elif phase == "edit_address_confirm":
+                result = set_place_address(
+                    session,
+                    actor_telegram_user_id=actor_telegram_user_id,
+                    place_id=place_id,
+                    address=str(state.get("edit_value") or ""),
+                    expected_address=_expected_field_from_state(state, details.address),
+                )
+            elif phase == "edit_address_delete_confirm":
+                result = delete_place_address(
+                    session,
+                    actor_telegram_user_id=actor_telegram_user_id,
+                    place_id=place_id,
+                    expected_address=_expected_field_from_state(state, details.address),
+                )
+            elif phase == "edit_url_confirm":
+                result = set_place_url(
+                    session,
+                    actor_telegram_user_id=actor_telegram_user_id,
+                    place_id=place_id,
+                    url=str(state.get("edit_value") or ""),
+                    expected_url=_expected_field_from_state(state, details.url),
+                )
+            else:  # edit_url_delete_confirm
+                result = delete_place_url(
+                    session,
+                    actor_telegram_user_id=actor_telegram_user_id,
+                    place_id=place_id,
+                    expected_url=_expected_field_from_state(state, details.url),
+                )
+        except PlaceEditPermissionError:
+            clear_admin_session(user.id)
+            await _render_denied(update, context)
+            return
+        except Exception as e:  # noqa: BLE001 — экран остаётся рабочим
+            logger.error("Не удалось изменить данные места: %s", e)
+            state["phase"] = "edit_menu"
+            await query.answer()
+            await _render_phase(
+                update,
+                context,
+                state,
+                notice="Не удалось изменить данные места из-за ошибки базы данных.",
+            )
+            return
+    finally:
+        session.close()
+
+    await query.answer()
+    notice, next_phase = _edit_result_notice(result, phase)
+    _clear_edit_keys(state)
+    if result.status == "place_missing":
+        state.clear()
+        state.update(_new_state())
+    elif next_phase is not None:
+        state["phase"] = next_phase
+    else:
+        state["phase"] = "edit_menu"
+    await _render_phase(update, context, state, notice=notice)
+
+
 async def handle_places_back(
     update: Update, context: ContextTypes.DEFAULT_TYPE
 ) -> None:
@@ -1048,16 +2157,22 @@ async def handle_places_back(
 async def handle_cancel_flow(
     update: Update, context: ContextTypes.DEFAULT_TYPE
 ) -> None:
-    """Отмена поиска/подтверждения: возврат к карточке места."""
+    """Отмена поиска/подтверждения/редактирования: возврат на шаг назад."""
     query = ctx.query(update)
     state = load_admin_session(ctx.user(update).id)
-    if state is None or state.get("phase") not in {
-        "assign_search",
-        "assign_results",
-        "confirm_assign",
-        "confirm_replace",
-        "confirm_revoke",
-    }:
+    phase = state.get("phase") if state else None
+    if state is None or phase not in (
+        {
+            "assign_search",
+            "assign_results",
+            "confirm_assign",
+            "confirm_replace",
+            "confirm_revoke",
+            "edit_menu",
+        }
+        | EDIT_CANCEL_TO_MENU_PHASES
+        | EDIT_CANCEL_TO_ALIASES_PHASES
+    ):
         await _stale(update)
         return
     await query.answer()
@@ -1068,7 +2183,23 @@ async def handle_cancel_flow(
         "query",
     ):
         state.pop(key, None)
-    if isinstance(state.get("place_id"), int):
+    if phase == "edit_menu":
+        # Назад из меню редактирования к карточке места.
+        _clear_edit_keys(state)
+        if isinstance(state.get("place_id"), int):
+            state["phase"] = "place"
+        else:
+            state.clear()
+            state.update(_new_state())
+    elif phase in EDIT_CANCEL_TO_MENU_PHASES:
+        # Возврат из ввода/подтверждения к меню редактирования.
+        _clear_edit_keys(state)
+        state["phase"] = "edit_menu"
+    elif phase in EDIT_CANCEL_TO_ALIASES_PHASES:
+        # Возврат из алиасных фаз к списку альтернативных названий.
+        _clear_edit_keys(state)
+        state["phase"] = "edit_aliases"
+    elif isinstance(state.get("place_id"), int):
         state["phase"] = "place"
     else:
         state.clear()
@@ -1143,7 +2274,11 @@ async def handle_search_text(
 
 
 class AdminTextHandler(MessageHandler):
-    """Текст принимается только в явной фазе поиска получателя кабинета."""
+    """Текст принимается только в явных фазах кабинета, заданных allowed_phases."""
+
+    def __init__(self, filters_arg, callback, *, allowed_phases: frozenset[str]):
+        super().__init__(filters_arg, callback)
+        self.allowed_phases = frozenset(allowed_phases)
 
     def check_update(self, update):
         matched = super().check_update(update)
@@ -1155,7 +2290,7 @@ class AdminTextHandler(MessageHandler):
         state = load_admin_session(user.id)
         if not isinstance(state, dict):
             return None
-        if state.get("phase") not in TEXT_INPUT_PHASES:
+        if state.get("phase") not in self.allowed_phases:
             return None
         return matched
 
@@ -1169,11 +2304,12 @@ async def handle_admin_stale(
 
 def admin_handlers() -> list[BaseHandler]:
     """
-    Обработчики кабинета Stage 20A.
+    Обработчики кабинета Stage 20A/20B.
 
     Регистрируются после мастера поста и «Мест», но до общего возврата в меню:
-    callback-и админки не пересекаются с их шаблонами. Текстовый обработчик
-    активен только в фазе поиска получателя.
+    callback-и админки не пересекаются с их шаблонами. Текстовые обработчики
+    активны только в явных фазах кабинета: поиск получателя и поля
+    редактирования места.
     """
     return [
         CommandHandler("admin", open_admin),
@@ -1189,6 +2325,33 @@ def admin_handlers() -> list[BaseHandler]:
         CallbackQueryHandler(handle_cancel_flow, pattern=r"^adm_cancel$"),
         CallbackQueryHandler(handle_places_back, pattern=r"^adm_places$"),
         CallbackQueryHandler(handle_confirm, pattern=r"^adm_confirm$"),
-        AdminTextHandler(filters.TEXT & ~filters.COMMAND, handle_search_text),
+        # Редактирование данных места (Stage 20B).
+        CallbackQueryHandler(handle_edit_open, pattern=r"^adm_edit_place:\d+$"),
+        CallbackQueryHandler(handle_edit_name, pattern=r"^adm_edit_name:\d+$"),
+        CallbackQueryHandler(handle_aliases, pattern=r"^adm_aliases:\d+$"),
+        CallbackQueryHandler(handle_alias_add, pattern=r"^adm_alias_add:\d+$"),
+        CallbackQueryHandler(handle_alias_rename, pattern=r"^adm_alias_rename:\d+$"),
+        CallbackQueryHandler(handle_alias_delete, pattern=r"^adm_alias_delete:\d+$"),
+        CallbackQueryHandler(handle_alias_page, pattern=r"^adm_alias_page:\d+$"),
+        CallbackQueryHandler(handle_edit_address, pattern=r"^adm_edit_address:\d+$"),
+        CallbackQueryHandler(
+            handle_edit_address_delete,
+            pattern=r"^adm_edit_address_delete:\d+$",
+        ),
+        CallbackQueryHandler(handle_edit_url, pattern=r"^adm_edit_url:\d+$"),
+        CallbackQueryHandler(
+            handle_edit_url_delete, pattern=r"^adm_edit_url_delete:\d+$"
+        ),
+        CallbackQueryHandler(handle_edit_confirm, pattern=r"^adm_edit_confirm$"),
+        AdminTextHandler(
+            filters.TEXT & ~filters.COMMAND,
+            handle_search_text,
+            allowed_phases=frozenset({"assign_search"}),
+        ),
+        AdminTextHandler(
+            filters.TEXT & ~filters.COMMAND,
+            handle_edit_text,
+            allowed_phases=EDIT_INPUT_PHASES,
+        ),
         CallbackQueryHandler(handle_admin_stale, pattern=r"^adm_"),
     ]
