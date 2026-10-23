@@ -7,6 +7,7 @@ from sqlalchemy import (
     CheckConstraint,
     DateTime,
     ForeignKey,
+    ForeignKeyConstraint,
     Index,
     Integer,
     String,
@@ -632,6 +633,280 @@ class Brick(Base):
         return (
             f"<Brick(id={self.id}, code={self.code!r}, scope={self.scope!r}, "
             f"type={self.value_type!r})>"
+        )
+
+
+# --- Шаблоны анонсов, версии, связи и снимки (Stage 23) ---------------------
+
+
+class Template(Base):
+    """
+    Шаблон анонса: ровно один стандартный у места или личный у пользователя.
+
+    `revision` — одновременно номер текущей версии и ожидаемая ревизия для
+    оптимистичной блокировки. Строка шаблона хранит только стабильную
+    идентичность; тексты лежат в неизменяемых `template_versions`.
+    Стандартный шаблон нельзя превратить в личный или перенести на другое
+    место: форма проверяется CHECK, а идентичность — триггером миграции 8.
+    """
+
+    __tablename__ = "templates"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    kind: Mapped[str] = mapped_column(Text, nullable=False)
+    place_id: Mapped[int | None] = mapped_column(
+        Integer,
+        ForeignKey("places.id", ondelete="CASCADE"),
+        nullable=True,
+    )
+    owner_user_id: Mapped[int | None] = mapped_column(
+        Integer,
+        ForeignKey("users.id", ondelete="CASCADE"),
+        nullable=True,
+    )
+    name: Mapped[str | None] = mapped_column(Text, nullable=True)
+    revision: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=1, server_default=text("1")
+    )
+    created_by_user_id: Mapped[int | None] = mapped_column(
+        Integer,
+        ForeignKey("users.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime, default=utcnow, nullable=False
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime, default=utcnow, onupdate=utcnow, nullable=False
+    )
+
+    __table_args__ = (
+        CheckConstraint(
+            "kind IN ('standard', 'personal')",
+            name="ck_templates_kind",
+        ),
+        CheckConstraint(
+            "(kind = 'standard' AND place_id IS NOT NULL "
+            "AND owner_user_id IS NULL AND name IS NULL) "
+            "OR (kind = 'personal' AND place_id IS NULL "
+            "AND owner_user_id IS NOT NULL AND length(trim(name)) > 0)",
+            name="ck_templates_shape",
+        ),
+        CheckConstraint("revision >= 1", name="ck_templates_revision"),
+        Index(
+            "ux_templates_one_standard_place",
+            "place_id",
+            unique=True,
+            sqlite_where=text("kind = 'standard'"),
+        ),
+        Index("ix_templates_owner_kind", "owner_user_id", "kind"),
+        Index("ix_templates_place_kind", "place_id", "kind"),
+    )
+
+    def __repr__(self) -> str:
+        return f"<Template(id={self.id}, kind={self.kind!r})>"
+
+
+class TemplateVersion(Base):
+    """
+    Неизменяемое содержимое шаблона на конкретной версии.
+
+    `builtin_version` заполнен только у версии, целиком созданной из
+    встроенного стандарта (первичная или подтверждённый сброс). Пользователь
+    может изменить текст, не меняя историю: каждая правка добавляет строку,
+    а не перезаписывает предыдущую.
+    """
+
+    __tablename__ = "template_versions"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    template_id: Mapped[int] = mapped_column(
+        Integer,
+        ForeignKey("templates.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    version: Mapped[int] = mapped_column(Integer, nullable=False)
+    header: Mapped[str] = mapped_column(Text, nullable=False)
+    body: Mapped[str] = mapped_column(Text, nullable=False)
+    footer: Mapped[str] = mapped_column(Text, nullable=False)
+    created_by_user_id: Mapped[int | None] = mapped_column(
+        Integer,
+        ForeignKey("users.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime, default=utcnow, nullable=False
+    )
+    builtin_version: Mapped[int | None] = mapped_column(Integer, nullable=True)
+
+    __table_args__ = (
+        UniqueConstraint(
+            "template_id", "version", name="uq_template_versions_template_version"
+        ),
+        CheckConstraint("version >= 1", name="ck_template_versions_version"),
+        CheckConstraint(
+            "builtin_version IS NULL OR builtin_version >= 1",
+            name="ck_template_versions_builtin_version",
+        ),
+        CheckConstraint(
+            "header <> '' OR body <> '' OR footer <> ''",
+            name="ck_template_versions_not_all_empty",
+        ),
+    )
+
+    def __repr__(self) -> str:
+        return (
+            f"<TemplateVersion(template_id={self.template_id}, "
+            f"version={self.version})>"
+        )
+
+
+class TemplateVersionBrick(Base):
+    """
+    Явная связь версии шаблона с постоянным `bricks.id`.
+
+    Код `[имя]` остаётся авторским текстом; исполнимая идентичность хранится
+    только здесь. Связи не пересчитываются по имени при применении шаблона.
+    """
+
+    __tablename__ = "template_version_bricks"
+
+    template_version_id: Mapped[int] = mapped_column(
+        Integer,
+        ForeignKey("template_versions.id", ondelete="CASCADE"),
+        primary_key=True,
+    )
+    brick_id: Mapped[int] = mapped_column(
+        Integer,
+        ForeignKey("bricks.id", ondelete="RESTRICT"),
+        primary_key=True,
+    )
+
+    __table_args__ = (Index("ix_template_version_bricks_brick_id", "brick_id"),)
+
+    def __repr__(self) -> str:
+        return (
+            f"<TemplateVersionBrick(version_id={self.template_version_id}, "
+            f"brick_id={self.brick_id})>"
+        )
+
+
+class TemplateSnapshot(Base):
+    """
+    Самостоятельный неизменяемый снимок версии шаблона для будущего черновика.
+
+    Снимок не является указателем на текущую версию: он копирует все секции,
+    метаданные и привязки. `owner_user_id` — пользователь, имеющий доступ к
+    снимку; пока снимки не подключены к WIP-мастеру Stage 27, это единственное
+    правило чтения. Связи со старой моделью `drafts` нет намеренно.
+    """
+
+    __tablename__ = "template_snapshots"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    owner_user_id: Mapped[int] = mapped_column(
+        Integer,
+        ForeignKey("users.id", ondelete="RESTRICT"),
+        nullable=False,
+    )
+    source_template_id: Mapped[int] = mapped_column(Integer, nullable=False)
+    source_template_version: Mapped[int] = mapped_column(Integer, nullable=False)
+    source_kind: Mapped[str] = mapped_column(Text, nullable=False)
+    source_name: Mapped[str | None] = mapped_column(Text, nullable=True)
+    source_place_id: Mapped[int | None] = mapped_column(
+        Integer,
+        ForeignKey("places.id", ondelete="RESTRICT"),
+        nullable=True,
+    )
+    source_owner_user_id: Mapped[int | None] = mapped_column(
+        Integer,
+        ForeignKey("users.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+    header: Mapped[str] = mapped_column(Text, nullable=False)
+    body: Mapped[str] = mapped_column(Text, nullable=False)
+    footer: Mapped[str] = mapped_column(Text, nullable=False)
+    builtin_version: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    idempotency_key: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime, default=utcnow, nullable=False
+    )
+
+    __table_args__ = (
+        ForeignKeyConstraint(
+            ["source_template_id", "source_template_version"],
+            ["template_versions.template_id", "template_versions.version"],
+            name="fk_template_snapshots_source_version",
+            ondelete="RESTRICT",
+        ),
+        CheckConstraint(
+            "source_kind IN ('standard', 'personal')",
+            name="ck_template_snapshots_source_kind",
+        ),
+        CheckConstraint(
+            "source_template_version >= 1",
+            name="ck_template_snapshots_source_version",
+        ),
+        CheckConstraint(
+            "builtin_version IS NULL OR builtin_version >= 1",
+            name="ck_template_snapshots_builtin_version",
+        ),
+        CheckConstraint(
+            "header <> '' OR body <> '' OR footer <> ''",
+            name="ck_template_snapshots_not_all_empty",
+        ),
+        CheckConstraint(
+            "idempotency_key IS NULL OR length(trim(idempotency_key)) > 0",
+            name="ck_template_snapshots_idempotency_key",
+        ),
+        Index(
+            "ux_template_snapshots_idempotency",
+            "owner_user_id",
+            "idempotency_key",
+            unique=True,
+            sqlite_where=text("idempotency_key IS NOT NULL"),
+        ),
+        Index(
+            "ix_template_snapshots_owner_created",
+            "owner_user_id",
+            "created_at",
+        ),
+        Index(
+            "ix_template_snapshots_source",
+            "source_template_id",
+            "source_template_version",
+        ),
+    )
+
+    def __repr__(self) -> str:
+        return (
+            f"<TemplateSnapshot(id={self.id}, "
+            f"source={self.source_template_id}:{self.source_template_version})>"
+        )
+
+
+class TemplateSnapshotBrick(Base):
+    """Копия явных brick_id версии внутри самостоятельного снимка."""
+
+    __tablename__ = "template_snapshot_bricks"
+
+    template_snapshot_id: Mapped[int] = mapped_column(
+        Integer,
+        ForeignKey("template_snapshots.id", ondelete="CASCADE"),
+        primary_key=True,
+    )
+    brick_id: Mapped[int] = mapped_column(
+        Integer,
+        ForeignKey("bricks.id", ondelete="RESTRICT"),
+        primary_key=True,
+    )
+
+    __table_args__ = (Index("ix_template_snapshot_bricks_brick_id", "brick_id"),)
+
+    def __repr__(self) -> str:
+        return (
+            f"<TemplateSnapshotBrick(snapshot_id={self.template_snapshot_id}, "
+            f"brick_id={self.brick_id})>"
         )
 
 

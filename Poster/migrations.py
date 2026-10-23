@@ -647,6 +647,344 @@ MIGRATION_7_BRICK_MANAGEMENT = Migration(
     ),
 )
 
+# --- Версия 8: шаблоны, версии, привязки и снимки (Stage 23) ----------------
+
+
+MIGRATION_8_TEMPLATES = Migration(
+    version=8,
+    name="templates_versions_snapshots",
+    statements=(
+        # Шаблон хранит только стабильную идентичность. Текст живёт в
+        # неизменяемых версиях, а revision одновременно является номером
+        # текущей версии и ожидаемой ревизией оптимистичной блокировки.
+        """
+        CREATE TABLE templates (
+            id INTEGER NOT NULL PRIMARY KEY,
+            kind TEXT NOT NULL,
+            place_id INTEGER,
+            owner_user_id INTEGER,
+            name TEXT,
+            revision INTEGER NOT NULL DEFAULT 1,
+            created_by_user_id INTEGER,
+            created_at DATETIME NOT NULL,
+            updated_at DATETIME NOT NULL,
+            CONSTRAINT ck_templates_kind
+                CHECK (kind IN ('standard', 'personal')),
+            CONSTRAINT ck_templates_shape
+                CHECK (
+                    (kind = 'standard'
+                        AND place_id IS NOT NULL
+                        AND owner_user_id IS NULL
+                        AND name IS NULL)
+                    OR (kind = 'personal'
+                        AND place_id IS NULL
+                        AND owner_user_id IS NOT NULL
+                        AND length(trim(name)) > 0)
+                ),
+            CONSTRAINT ck_templates_revision CHECK (revision >= 1),
+            CONSTRAINT fk_templates_place_id
+                FOREIGN KEY (place_id) REFERENCES places (id)
+                ON DELETE CASCADE,
+            CONSTRAINT fk_templates_owner_user_id
+                FOREIGN KEY (owner_user_id) REFERENCES users (id)
+                ON DELETE CASCADE,
+            CONSTRAINT fk_templates_created_by_user_id
+                FOREIGN KEY (created_by_user_id) REFERENCES users (id)
+                ON DELETE SET NULL
+        )
+        """,
+        # Ровно один стандартный шаблон на место. Личные шаблоны не входят
+        # в этот частичный индекс и могут иметь одинаковые названия.
+        """
+        CREATE UNIQUE INDEX ux_templates_one_standard_place
+            ON templates (place_id) WHERE kind = 'standard'
+        """,
+        "CREATE INDEX ix_templates_owner_kind ON templates (owner_user_id, kind)",
+        "CREATE INDEX ix_templates_place_kind ON templates (place_id, kind)",
+        # Вид и владелец шаблона неизменяемы: стандарт нельзя превратить в
+        # личный или перенести подменой place_id/owner_user_id.
+        """
+        CREATE TRIGGER trg_templates_identity_immutable
+        BEFORE UPDATE OF kind, place_id, owner_user_id ON templates
+        FOR EACH ROW
+        WHEN NEW.kind <> OLD.kind
+            OR NEW.place_id IS NOT OLD.place_id
+            OR NEW.owner_user_id IS NOT OLD.owner_user_id
+        BEGIN
+            SELECT RAISE(ABORT, 'template identity is immutable');
+        END
+        """,
+        # Ревизия может только расти; сервис дополнительно сравнивает её
+        # условным UPDATE, поэтому более новая версия не перезаписывается.
+        """
+        CREATE TRIGGER trg_templates_revision_increases
+        BEFORE UPDATE OF revision ON templates
+        FOR EACH ROW
+        WHEN NEW.revision <= OLD.revision
+        BEGIN
+            SELECT RAISE(ABORT, 'template revision must increase');
+        END
+        """,
+        # Стандарт нельзя физически удалить и оставить место без шаблона.
+        """
+        CREATE TRIGGER trg_templates_standard_no_delete
+        BEFORE DELETE ON templates
+        FOR EACH ROW
+        WHEN OLD.kind = 'standard'
+            AND EXISTS (SELECT 1 FROM places WHERE id = OLD.place_id)
+        BEGIN
+            SELECT RAISE(ABORT, 'standard template cannot be deleted');
+        END
+        """,
+        # Версии содержат все три секции одной строкой: header/body/footer
+        # одной версии не могут быть собраны из разных сохранений.
+        """
+        CREATE TABLE template_versions (
+            id INTEGER NOT NULL PRIMARY KEY,
+            template_id INTEGER NOT NULL,
+            version INTEGER NOT NULL,
+            header TEXT NOT NULL,
+            body TEXT NOT NULL,
+            footer TEXT NOT NULL,
+            created_by_user_id INTEGER,
+            created_at DATETIME NOT NULL,
+            builtin_version INTEGER,
+            CONSTRAINT uq_template_versions_template_version
+                UNIQUE (template_id, version),
+            CONSTRAINT ck_template_versions_version CHECK (version >= 1),
+            CONSTRAINT ck_template_versions_builtin_version
+                CHECK (builtin_version IS NULL OR builtin_version >= 1),
+            CONSTRAINT ck_template_versions_not_all_empty
+                CHECK (header <> '' OR body <> '' OR footer <> ''),
+            CONSTRAINT fk_template_versions_template_id
+                FOREIGN KEY (template_id) REFERENCES templates (id)
+                ON DELETE CASCADE,
+            CONSTRAINT fk_template_versions_created_by_user_id
+                FOREIGN KEY (created_by_user_id) REFERENCES users (id)
+                ON DELETE SET NULL
+        )
+        """,
+        # История неизменяема: правка только добавляет следующую версию.
+        """
+        CREATE TRIGGER trg_template_versions_no_update
+        BEFORE UPDATE ON template_versions
+        FOR EACH ROW
+        BEGIN
+            SELECT RAISE(ABORT, 'template versions are immutable');
+        END
+        """,
+        """
+        CREATE TRIGGER trg_template_versions_no_delete
+        BEFORE DELETE ON template_versions
+        FOR EACH ROW
+        WHEN EXISTS (
+            SELECT 1 FROM templates WHERE id = OLD.template_id
+        )
+        BEGIN
+            SELECT RAISE(ABORT, 'template versions cannot be deleted');
+        END
+        """,
+        # Исполнимая связь — постоянный brick_id, а не повторный поиск по
+        # коду. Один кирпичик может использоваться версией один раз.
+        """
+        CREATE TABLE template_version_bricks (
+            template_version_id INTEGER NOT NULL,
+            brick_id INTEGER NOT NULL,
+            PRIMARY KEY (template_version_id, brick_id),
+            CONSTRAINT fk_template_version_bricks_version
+                FOREIGN KEY (template_version_id)
+                REFERENCES template_versions (id) ON DELETE CASCADE,
+            CONSTRAINT fk_template_version_bricks_brick
+                FOREIGN KEY (brick_id) REFERENCES bricks (id)
+                ON DELETE RESTRICT
+        )
+        """,
+        """
+        CREATE INDEX ix_template_version_bricks_brick_id
+            ON template_version_bricks (brick_id)
+        """,
+        """
+        CREATE TRIGGER trg_template_version_bricks_no_update
+        BEFORE UPDATE ON template_version_bricks
+        FOR EACH ROW
+        BEGIN
+            SELECT RAISE(ABORT, 'template bindings are immutable');
+        END
+        """,
+        """
+        CREATE TRIGGER trg_template_version_bricks_no_delete
+        BEFORE DELETE ON template_version_bricks
+        FOR EACH ROW
+        WHEN EXISTS (
+            SELECT 1 FROM template_versions
+            WHERE id = OLD.template_version_id
+        )
+        BEGIN
+            SELECT RAISE(ABORT, 'template bindings cannot be deleted');
+        END
+        """,
+        # Снимок — самостоятельная копия. Составной FK фиксирует конкретную
+        # версию источника; тексты и связи копируются в собственные таблицы.
+        """
+        CREATE TABLE template_snapshots (
+            id INTEGER NOT NULL PRIMARY KEY,
+            owner_user_id INTEGER NOT NULL,
+            source_template_id INTEGER NOT NULL,
+            source_template_version INTEGER NOT NULL,
+            source_kind TEXT NOT NULL,
+            source_name TEXT,
+            source_place_id INTEGER,
+            source_owner_user_id INTEGER,
+            header TEXT NOT NULL,
+            body TEXT NOT NULL,
+            footer TEXT NOT NULL,
+            builtin_version INTEGER,
+            idempotency_key TEXT,
+            created_at DATETIME NOT NULL,
+            CONSTRAINT fk_template_snapshots_owner_user_id
+                FOREIGN KEY (owner_user_id) REFERENCES users (id)
+                ON DELETE RESTRICT,
+            CONSTRAINT fk_template_snapshots_source_version
+                FOREIGN KEY (source_template_id, source_template_version)
+                REFERENCES template_versions (template_id, version)
+                ON DELETE RESTRICT,
+            CONSTRAINT fk_template_snapshots_source_place_id
+                FOREIGN KEY (source_place_id) REFERENCES places (id)
+                ON DELETE RESTRICT,
+            CONSTRAINT fk_template_snapshots_source_owner_user_id
+                FOREIGN KEY (source_owner_user_id) REFERENCES users (id)
+                ON DELETE SET NULL,
+            CONSTRAINT ck_template_snapshots_source_kind
+                CHECK (source_kind IN ('standard', 'personal')),
+            CONSTRAINT ck_template_snapshots_source_version
+                CHECK (source_template_version >= 1),
+            CONSTRAINT ck_template_snapshots_builtin_version
+                CHECK (builtin_version IS NULL OR builtin_version >= 1),
+            CONSTRAINT ck_template_snapshots_not_all_empty
+                CHECK (header <> '' OR body <> '' OR footer <> ''),
+            CONSTRAINT ck_template_snapshots_idempotency_key
+                CHECK (
+                    idempotency_key IS NULL
+                    OR length(trim(idempotency_key)) > 0
+                )
+        )
+        """,
+        """
+        CREATE UNIQUE INDEX ux_template_snapshots_idempotency
+            ON template_snapshots (owner_user_id, idempotency_key)
+            WHERE idempotency_key IS NOT NULL
+        """,
+        """
+        CREATE INDEX ix_template_snapshots_owner_created
+            ON template_snapshots (owner_user_id, created_at)
+        """,
+        """
+        CREATE INDEX ix_template_snapshots_source
+            ON template_snapshots (source_template_id, source_template_version)
+        """,
+        # Снимок нельзя изменить или удалить: он остаётся ровно тем
+        # состоянием, которое было выбрано для черновика.
+        """
+        CREATE TRIGGER trg_template_snapshots_no_update
+        BEFORE UPDATE ON template_snapshots
+        FOR EACH ROW
+        BEGIN
+            SELECT RAISE(ABORT, 'template snapshots are immutable');
+        END
+        """,
+        """
+        CREATE TRIGGER trg_template_snapshots_no_delete
+        BEFORE DELETE ON template_snapshots
+        FOR EACH ROW
+        BEGIN
+            SELECT RAISE(ABORT, 'template snapshots cannot be deleted');
+        END
+        """,
+        """
+        CREATE TABLE template_snapshot_bricks (
+            template_snapshot_id INTEGER NOT NULL,
+            brick_id INTEGER NOT NULL,
+            PRIMARY KEY (template_snapshot_id, brick_id),
+            CONSTRAINT fk_template_snapshot_bricks_snapshot
+                FOREIGN KEY (template_snapshot_id)
+                REFERENCES template_snapshots (id) ON DELETE CASCADE,
+            CONSTRAINT fk_template_snapshot_bricks_brick
+                FOREIGN KEY (brick_id) REFERENCES bricks (id)
+                ON DELETE RESTRICT
+        )
+        """,
+        """
+        CREATE INDEX ix_template_snapshot_bricks_brick_id
+            ON template_snapshot_bricks (brick_id)
+        """,
+        """
+        CREATE TRIGGER trg_template_snapshot_bricks_no_update
+        BEFORE UPDATE ON template_snapshot_bricks
+        FOR EACH ROW
+        BEGIN
+            SELECT RAISE(ABORT, 'snapshot bindings are immutable');
+        END
+        """,
+        """
+        CREATE TRIGGER trg_template_snapshot_bricks_no_delete
+        BEFORE DELETE ON template_snapshot_bricks
+        FOR EACH ROW
+        BEGIN
+            SELECT RAISE(ABORT, 'snapshot bindings cannot be deleted');
+        END
+        """,
+        # Backfill существующих мест. Строки, уже имеющие стандарт, не
+        # перезаписываются; DML идемпотентен по условиям NOT EXISTS.
+        """
+        INSERT INTO templates
+            (kind, place_id, owner_user_id, name, revision,
+             created_by_user_id, created_at, updated_at)
+        SELECT
+            'standard', p.id, NULL, NULL, 1, NULL,
+            CURRENT_TIMESTAMP, CURRENT_TIMESTAMP
+        FROM places AS p
+        WHERE NOT EXISTS (
+            SELECT 1 FROM templates AS t
+            WHERE t.kind = 'standard' AND t.place_id = p.id
+        )
+        """,
+        """
+        INSERT INTO template_versions
+            (template_id, version, header, body, footer,
+             created_by_user_id, created_at, builtin_version)
+        SELECT
+            t.id, 1, '[название]',
+            '🗓 [дата]
+🕒 [время_начала] – [время_окончания]
+📍 [место]
+[адрес_места]
+
+[описание]',
+            '🔗 [ссылка_места]
+📞 [контакт]',
+            NULL, CURRENT_TIMESTAMP, 1
+        FROM templates AS t
+        WHERE t.kind = 'standard'
+          AND NOT EXISTS (
+              SELECT 1 FROM template_versions AS v
+              WHERE v.template_id = t.id AND v.version = 1
+          )
+        """,
+        """
+        INSERT INTO template_version_bricks (template_version_id, brick_id)
+        SELECT v.id, b.id
+        FROM template_versions AS v
+        JOIN templates AS t ON t.id = v.template_id
+        JOIN bricks AS b
+          ON b.id IN (1, 2, 3, 4, 5, 6, 7, 8, 9)
+         AND b.scope = 'system'
+        WHERE t.kind = 'standard'
+          AND v.version = 1
+          AND v.builtin_version = 1
+        """,
+    ),
+)
+
 DEFAULT_MIGRATIONS: tuple[Migration, ...] = (
     MIGRATION_1_USERS_PLACES,
     MIGRATION_2_PLACE_CONTACTS_UI,
@@ -655,6 +993,7 @@ DEFAULT_MIGRATIONS: tuple[Migration, ...] = (
     MIGRATION_5_ADMIN_TRANSFERS,
     MIGRATION_6_BRICKS,
     MIGRATION_7_BRICK_MANAGEMENT,
+    MIGRATION_8_TEMPLATES,
 )
 
 LATEST_VERSION = DEFAULT_MIGRATIONS[-1].version if DEFAULT_MIGRATIONS else 0

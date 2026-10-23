@@ -28,6 +28,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from models import Place, PlaceName, utcnow
+from template_store import create_standard_template_for_place
 
 # Предел интерфейса: название должно помещаться в карточку/кнопку вместе с
 # остальными полями без молчаливого обрезания. Превышение — явная ошибка.
@@ -185,15 +186,16 @@ def create_place(
     url: str | None = None,
 ) -> Place:
     """
-    Создаёт место и его каноническое название в одной транзакции.
+    Создаёт место, каноническое название и стандартный шаблон в одной транзакции.
 
     Возвращает сохранённый `Place` с заполненным `id`. При любой ошибке
-    (включая нарушение внешнего ключа создателя) транзакция откатывается:
-    место без названия или название без места не остаются.
+    (включая нарушение внешнего ключа создателя или сбой создания шаблона)
+    транзакция откатывается: место без названия, названия без места или
+    места без стандартного шаблона не остаются.
 
     `created_by_user_id` — внутренний `users.id`, а не Telegram user ID.
-    Адрес/ссылка необязательны: в Stage 19B их заполняет не Telegram-флоу,
-    но карточка умеет показывать уже известные контакты.
+    Создатель не становится администратором места и не получает права
+    редактировать стандартный шаблон. Адрес/ссылка необязательны.
     """
     display_name = _validated_name(canonical_name)
     name_search = normalize_place_name(display_name)
@@ -207,7 +209,7 @@ def create_place(
     )
     session.add(place)
     try:
-        session.flush()  # нужен place.id для названия
+        session.flush()  # нужен place.id для названия и шаблона
         session.add(
             PlaceName(
                 place_id=place.id,
@@ -217,6 +219,13 @@ def create_place(
                 created_by_user_id=created_by_user_id,
                 created_at=now,
             )
+        )
+        create_standard_template_for_place(
+            session,
+            place.id,
+            created_by_user_id=created_by_user_id,
+            now=now,
+            commit=False,
         )
         session.commit()
     except Exception:
