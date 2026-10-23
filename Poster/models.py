@@ -473,6 +473,140 @@ class PlaceSession(Base):
         return f"<PlaceSession(telegram_user_id={self.telegram_user_id})>"
 
 
+# --- Реестр кирпичиков (Stage 22A) ------------------------------------------
+
+
+class Brick(Base):
+    """
+    Определение типизированного поля, а не его значение в анонсе.
+
+    `id` — постоянный внутренний ключ для будущих шаблонов и `draft_values`.
+    `code` — технический токен `[код]`; `title` — человекочитаемое имя.
+    `scope` (system/place/personal) отделён от `source` (ask/place/context).
+
+    Принадлежность согласована со scope CHECK-ограничением: у системного
+    кирпичика нет владельца, у местного есть `place_id`, у личного —
+    `owner_user_id`. Частичные UNIQUE-индексы допускают одинаковые коды у
+    разных пользователей/мест, но не внутри одной области. Коды системных
+    кирпичиков резервируются триггерами миграции 6.
+
+    Значения анонсов сюда не пишутся: `draft_values` появится на этапе
+    шаблонов. Фотографии — независимые вложения и не являются типом Brick.
+    """
+
+    __tablename__ = "bricks"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    code: Mapped[str] = mapped_column(Text, nullable=False)
+    title: Mapped[str] = mapped_column(Text, nullable=False)
+    value_type: Mapped[str] = mapped_column("type", Text, nullable=False)
+    scope: Mapped[str] = mapped_column(Text, nullable=False)
+    source: Mapped[str] = mapped_column(Text, nullable=False)
+    place_id: Mapped[int | None] = mapped_column(
+        Integer,
+        ForeignKey("places.id", ondelete="CASCADE"),
+        nullable=True,
+    )
+    owner_user_id: Mapped[int | None] = mapped_column(
+        Integer,
+        ForeignKey("users.id", ondelete="CASCADE"),
+        nullable=True,
+    )
+    rules_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+    status: Mapped[str] = mapped_column(Text, nullable=False, default="active")
+    created_by_user_id: Mapped[int | None] = mapped_column(
+        Integer,
+        ForeignKey("users.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime, default=utcnow, nullable=False
+    )
+    updated_at: Mapped[datetime | None] = mapped_column(
+        DateTime, default=utcnow, onupdate=utcnow, nullable=True
+    )
+
+    __table_args__ = (
+        CheckConstraint(
+            "type IN ('short_text', 'long_text', 'date', 'time', 'url', "
+            "'number', 'choice')",
+            name="ck_bricks_type",
+        ),
+        CheckConstraint(
+            "scope IN ('system', 'place', 'personal')",
+            name="ck_bricks_scope",
+        ),
+        CheckConstraint(
+            "source IN ('ask', 'place', 'context')",
+            name="ck_bricks_source",
+        ),
+        CheckConstraint(
+            "status IN ('active', 'archived')",
+            name="ck_bricks_status",
+        ),
+        CheckConstraint(
+            "(scope = 'system' AND place_id IS NULL AND owner_user_id IS NULL) "
+            "OR (scope = 'place' AND place_id IS NOT NULL "
+            "AND owner_user_id IS NULL) "
+            "OR (scope = 'personal' AND place_id IS NULL "
+            "AND owner_user_id IS NOT NULL)",
+            name="ck_bricks_scope_owner",
+        ),
+        CheckConstraint(
+            "length(code) BETWEEN 2 AND 64",
+            name="ck_bricks_code_length",
+        ),
+        CheckConstraint("code = trim(code)", name="ck_bricks_code_trimmed"),
+        CheckConstraint("instr(code, ' ') = 0", name="ck_bricks_code_no_space"),
+        CheckConstraint(
+            "instr(code, '[') = 0 AND instr(code, ']') = 0",
+            name="ck_bricks_code_no_brackets",
+        ),
+        CheckConstraint("code <> 'фото'", name="ck_bricks_no_photo_code"),
+        CheckConstraint(
+            "length(trim(title)) > 0",
+            name="ck_bricks_title_not_empty",
+        ),
+        CheckConstraint(
+            "rules_json IS NULL OR (json_valid(rules_json) "
+            "AND json_type(rules_json) = 'object')",
+            name="ck_bricks_rules_json_object",
+        ),
+        Index(
+            "ux_bricks_system_code",
+            "code",
+            unique=True,
+            sqlite_where=text("scope = 'system'"),
+        ),
+        Index(
+            "ux_bricks_place_code",
+            "place_id",
+            "code",
+            unique=True,
+            sqlite_where=text("scope = 'place'"),
+        ),
+        Index(
+            "ux_bricks_personal_code",
+            "owner_user_id",
+            "code",
+            unique=True,
+            sqlite_where=text("scope = 'personal'"),
+        ),
+        Index("ix_bricks_scope_status_code", "scope", "status", "code"),
+        Index("ix_bricks_place_status", "place_id", "status"),
+        Index("ix_bricks_owner_status", "owner_user_id", "status"),
+        Index("ix_bricks_type_status", "type", "status"),
+        Index("ix_bricks_code", "code"),
+        Index("ix_bricks_title", "title"),
+    )
+
+    def __repr__(self) -> str:
+        return (
+            f"<Brick(id={self.id}, code={self.code!r}, scope={self.scope!r}, "
+            f"type={self.value_type!r})>"
+        )
+
+
 # --- Фотографии поста (медиа-группы) -----------------------------------------
 
 

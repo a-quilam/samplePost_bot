@@ -406,8 +406,8 @@ class PlaceCreationFlowTests(unittest.TestCase):
             )
         finally:
             session.close()
-        # В Stage 19B нет ни администраторов, ни шаблонов — как таблиц,
-        # так и пользовательских обещаний на экране.
+        # Создание места не выдаёт админку и не создаёт шаблон. Реестр
+        # кирпичиков Stage 22A существует отдельно и на этот поток не влияет.
         self.assertNotIn("администратор", h.screen_text().lower())
         self.assertNotIn("шаблон", h.screen_text().lower())
         from base import Base
@@ -415,7 +415,6 @@ class PlaceCreationFlowTests(unittest.TestCase):
         forbidden = {
             "templates",
             "template_versions",
-            "bricks",
             "draft_values",
         }
         self.assertFalse(forbidden & set(Base.metadata.tables))

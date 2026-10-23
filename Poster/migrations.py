@@ -341,12 +341,282 @@ MIGRATION_5_ADMIN_TRANSFERS = Migration(
     ),
 )
 
+# --- Версия 6: универсальный реестр кирпичиков (Stage 22A) ------------------
+
+
+MIGRATION_6_BRICKS = Migration(
+    version=6,
+    name="bricks_registry",
+    statements=(
+        # Определение поля отделено от значения в анонсе. Системные коды
+        # резервируются триггерами ниже; системные определения вставляются
+        # этой же миграцией со стабильными ID 1..9.
+        """
+        CREATE TABLE bricks (
+            id INTEGER NOT NULL PRIMARY KEY,
+            code TEXT NOT NULL,
+            title TEXT NOT NULL,
+            type TEXT NOT NULL,
+            scope TEXT NOT NULL,
+            source TEXT NOT NULL,
+            place_id INTEGER,
+            owner_user_id INTEGER,
+            rules_json TEXT,
+            status TEXT NOT NULL DEFAULT 'active',
+            created_by_user_id INTEGER,
+            created_at DATETIME NOT NULL,
+            updated_at DATETIME,
+            CONSTRAINT ck_bricks_type
+                CHECK (type IN (
+                    'short_text', 'long_text', 'date', 'time', 'url',
+                    'number', 'choice'
+                )),
+            CONSTRAINT ck_bricks_scope
+                CHECK (scope IN ('system', 'place', 'personal')),
+            CONSTRAINT ck_bricks_source
+                CHECK (source IN ('ask', 'place', 'context')),
+            CONSTRAINT ck_bricks_status
+                CHECK (status IN ('active', 'archived')),
+            CONSTRAINT ck_bricks_scope_owner
+                CHECK (
+                    (scope = 'system'
+                        AND place_id IS NULL AND owner_user_id IS NULL)
+                    OR (scope = 'place'
+                        AND place_id IS NOT NULL AND owner_user_id IS NULL)
+                    OR (scope = 'personal'
+                        AND place_id IS NULL AND owner_user_id IS NOT NULL)
+                ),
+            CONSTRAINT ck_bricks_code_length
+                CHECK (length(code) BETWEEN 2 AND 64),
+            CONSTRAINT ck_bricks_code_trimmed
+                CHECK (code = trim(code)),
+            CONSTRAINT ck_bricks_code_no_space
+                CHECK (instr(code, ' ') = 0),
+            CONSTRAINT ck_bricks_code_no_brackets
+                CHECK (instr(code, '[') = 0 AND instr(code, ']') = 0),
+            CONSTRAINT ck_bricks_no_photo_code
+                CHECK (code <> 'фото'),
+            CONSTRAINT ck_bricks_title_not_empty
+                CHECK (length(trim(title)) > 0),
+            CONSTRAINT ck_bricks_rules_json_object
+                CHECK (
+                    rules_json IS NULL
+                    OR (json_valid(rules_json)
+                        AND json_type(rules_json) = 'object')
+                ),
+            CONSTRAINT fk_bricks_place_id
+                FOREIGN KEY (place_id) REFERENCES places (id)
+                ON DELETE CASCADE,
+            CONSTRAINT fk_bricks_owner_user_id
+                FOREIGN KEY (owner_user_id) REFERENCES users (id)
+                ON DELETE CASCADE,
+            CONSTRAINT fk_bricks_created_by_user_id
+                FOREIGN KEY (created_by_user_id) REFERENCES users (id)
+                ON DELETE SET NULL
+        )
+        """,
+        # Один код внутри области. Системные коды глобально уникальны;
+        # разные пользователи/места могут использовать одинаковый код.
+        """
+        CREATE UNIQUE INDEX ux_bricks_system_code
+            ON bricks (code) WHERE scope = 'system'
+        """,
+        """
+        CREATE UNIQUE INDEX ux_bricks_place_code
+            ON bricks (place_id, code) WHERE scope = 'place'
+        """,
+        """
+        CREATE UNIQUE INDEX ux_bricks_personal_code
+            ON bricks (owner_user_id, code) WHERE scope = 'personal'
+        """,
+        # Индексы доступности/поиска. Частичные уникальные индексы выше
+        # обслуживают точный поиск в своей области, эти — общие выборки.
+        """
+        CREATE INDEX ix_bricks_scope_status_code
+            ON bricks (scope, status, code)
+        """,
+        """
+        CREATE INDEX ix_bricks_place_status ON bricks (place_id, status)
+        """,
+        """
+        CREATE INDEX ix_bricks_owner_status ON bricks (owner_user_id, status)
+        """,
+        """
+        CREATE INDEX ix_bricks_type_status ON bricks (type, status)
+        """,
+        "CREATE INDEX ix_bricks_code ON bricks (code)",
+        "CREATE INDEX ix_bricks_title ON bricks (title)",
+        # Постоянный внутренний ID нельзя переписать UPDATE-ом.
+        """
+        CREATE TRIGGER trg_bricks_id_immutable
+        BEFORE UPDATE OF id ON bricks
+        FOR EACH ROW
+        WHEN NEW.id <> OLD.id
+        BEGIN
+            SELECT RAISE(ABORT, 'bricks.id is immutable');
+        END
+        """,
+        # Код и глобальная принадлежность системного кирпичика неизменяемы.
+        """
+        CREATE TRIGGER trg_bricks_system_code_immutable
+        BEFORE UPDATE OF code ON bricks
+        FOR EACH ROW
+        WHEN OLD.scope = 'system' AND NEW.code <> OLD.code
+        BEGIN
+            SELECT RAISE(ABORT, 'system brick code is immutable');
+        END
+        """,
+        """
+        CREATE TRIGGER trg_bricks_system_owner_immutable
+        BEFORE UPDATE OF scope, place_id, owner_user_id ON bricks
+        FOR EACH ROW
+        WHEN OLD.scope = 'system'
+            AND (NEW.scope <> 'system'
+                OR NEW.place_id IS NOT NULL
+                OR NEW.owner_user_id IS NOT NULL)
+        BEGIN
+            SELECT RAISE(ABORT, 'system brick is global');
+        END
+        """,
+        # Системный кирпичик можно архивировать, но не удалить: код остаётся
+        # зарезервированным навсегда.
+        """
+        CREATE TRIGGER trg_bricks_system_no_delete
+        BEFORE DELETE ON bricks
+        FOR EACH ROW
+        WHEN OLD.scope = 'system'
+        BEGIN
+            SELECT RAISE(ABORT, 'system brick cannot be deleted');
+        END
+        """,
+        # Системные и несистемные коды не могут сосуществовать: [код] всегда
+        # означает системный кирпичик и не может быть подменён личным/местным.
+        """
+        CREATE TRIGGER trg_bricks_reserve_codes_insert
+        BEFORE INSERT ON bricks
+        FOR EACH ROW
+        WHEN EXISTS (
+            SELECT 1 FROM bricks b
+            WHERE b.code = NEW.code
+              AND (
+                  (NEW.scope = 'system' AND b.scope <> 'system')
+                  OR (NEW.scope <> 'system' AND b.scope = 'system')
+              )
+        )
+        BEGIN
+            SELECT RAISE(ABORT, 'system brick code is reserved');
+        END
+        """,
+        """
+        CREATE TRIGGER trg_bricks_reserve_codes_update
+        BEFORE UPDATE OF code, scope ON bricks
+        FOR EACH ROW
+        WHEN EXISTS (
+            SELECT 1 FROM bricks b
+            WHERE b.id <> OLD.id
+              AND b.code = NEW.code
+              AND (
+                  (NEW.scope = 'system' AND b.scope <> 'system')
+                  OR (NEW.scope <> 'system' AND b.scope = 'system')
+              )
+        )
+        BEGIN
+            SELECT RAISE(ABORT, 'system brick code is reserved');
+        END
+        """,
+        # Системный реестр Stage 22A. ID и коды стабильны; изменение
+        # определения — только новой миграцией, а не повторным сидированием.
+        """
+        INSERT INTO bricks
+            (id, code, title, type, scope, source, rules_json, status,
+             created_by_user_id, created_at, updated_at)
+        VALUES
+            (1, 'название', 'Название мероприятия', 'short_text',
+             'system', 'ask', NULL, 'active', NULL,
+             CURRENT_TIMESTAMP, NULL)
+        """,
+        """
+        INSERT INTO bricks
+            (id, code, title, type, scope, source, rules_json, status,
+             created_by_user_id, created_at, updated_at)
+        VALUES
+            (2, 'дата', 'Дата', 'date', 'system', 'ask',
+             '{"horizon_months": 12}', 'active', NULL,
+             CURRENT_TIMESTAMP, NULL)
+        """,
+        """
+        INSERT INTO bricks
+            (id, code, title, type, scope, source, rules_json, status,
+             created_by_user_id, created_at, updated_at)
+        VALUES
+            (3, 'время_начала', 'Время начала', 'time',
+             'system', 'ask', NULL, 'active', NULL,
+             CURRENT_TIMESTAMP, NULL)
+        """,
+        """
+        INSERT INTO bricks
+            (id, code, title, type, scope, source, rules_json, status,
+             created_by_user_id, created_at, updated_at)
+        VALUES
+            (4, 'время_окончания', 'Время окончания', 'time',
+             'system', 'ask', NULL, 'active', NULL,
+             CURRENT_TIMESTAMP, NULL)
+        """,
+        """
+        INSERT INTO bricks
+            (id, code, title, type, scope, source, rules_json, status,
+             created_by_user_id, created_at, updated_at)
+        VALUES
+            (5, 'место', 'Название места', 'short_text',
+             'system', 'place', NULL, 'active', NULL,
+             CURRENT_TIMESTAMP, NULL)
+        """,
+        """
+        INSERT INTO bricks
+            (id, code, title, type, scope, source, rules_json, status,
+             created_by_user_id, created_at, updated_at)
+        VALUES
+            (6, 'адрес_места', 'Адрес места', 'short_text',
+             'system', 'place', NULL, 'active', NULL,
+             CURRENT_TIMESTAMP, NULL)
+        """,
+        """
+        INSERT INTO bricks
+            (id, code, title, type, scope, source, rules_json, status,
+             created_by_user_id, created_at, updated_at)
+        VALUES
+            (7, 'ссылка_места', 'Ссылка места', 'url',
+             'system', 'place', NULL, 'active', NULL,
+             CURRENT_TIMESTAMP, NULL)
+        """,
+        """
+        INSERT INTO bricks
+            (id, code, title, type, scope, source, rules_json, status,
+             created_by_user_id, created_at, updated_at)
+        VALUES
+            (8, 'описание', 'Описание', 'long_text',
+             'system', 'ask', NULL, 'active', NULL,
+             CURRENT_TIMESTAMP, NULL)
+        """,
+        """
+        INSERT INTO bricks
+            (id, code, title, type, scope, source, rules_json, status,
+             created_by_user_id, created_at, updated_at)
+        VALUES
+            (9, 'контакт', 'Контакт', 'short_text',
+             'system', 'ask', NULL, 'active', NULL,
+             CURRENT_TIMESTAMP, NULL)
+        """,
+    ),
+)
+
 DEFAULT_MIGRATIONS: tuple[Migration, ...] = (
     MIGRATION_1_USERS_PLACES,
     MIGRATION_2_PLACE_CONTACTS_UI,
     MIGRATION_3_PLACE_ADMINS,
     MIGRATION_4_PLACE_EDIT_LOG,
     MIGRATION_5_ADMIN_TRANSFERS,
+    MIGRATION_6_BRICKS,
 )
 
 LATEST_VERSION = DEFAULT_MIGRATIONS[-1].version if DEFAULT_MIGRATIONS else 0

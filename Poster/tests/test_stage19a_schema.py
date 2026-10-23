@@ -318,20 +318,20 @@ class PlaceSchemaTests(unittest.TestCase):
 
     # --- границы Stage 19A ---------------------------------------------------
 
-    def test_no_future_tables_and_photos_stay_draft_data(self) -> None:
+    def test_bricks_exist_but_future_template_tables_do_not(self) -> None:
         from base import Base
 
         Base.metadata.create_all(bind=self.engine)
         tables = set(Base.metadata.tables)
         forbidden = {
-            "bricks",
             "templates",
             "template_versions",
             "draft_values",
             "brick_proposals",
         }
         self.assertFalse(forbidden & tables)
-        self.assertFalse({name for name in table_names(self.path) if "brick" in name})
+        self.assertIn("bricks", tables)
+        self.assertIn("bricks", table_names(self.path))
         self.assertIn("photos", Draft.__table__.columns)
         self.assertFalse(
             any(
