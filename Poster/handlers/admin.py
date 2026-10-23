@@ -70,6 +70,7 @@ from admin_transfer_store import (
     reject_admin_transfer,
     transfer_status_label,
 )
+from brick_state import clear_brick_session
 from database import SessionLocal
 from models import User
 from permissions import (
@@ -1744,6 +1745,7 @@ async def open_admin(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     if query is not None:
         await query.answer()
     clear_place_session(user_id)
+    clear_brick_session(user_id)
     state = load_admin_session(user_id)
     if not isinstance(state, dict) or state.get("phase") not in PHASES:
         state = _new_state()

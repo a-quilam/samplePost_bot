@@ -20,6 +20,7 @@ from telegram.ext import (
 )
 
 from admin_state import clear_admin_session
+from brick_state import clear_brick_session
 from database import SessionLocal
 from models import Draft
 from place_state import clear_place_session
@@ -198,6 +199,7 @@ async def view_drafts(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     await screen.reanchor_screen(update, context)
     clear_place_session(ctx.user(update).id)
     clear_admin_session(ctx.user(update).id)
+    clear_brick_session(ctx.user(update).id)
     await _render_drafts_screen(update, context)
     await screen.drop_user_input(update, context)
 

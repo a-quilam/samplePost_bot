@@ -26,6 +26,7 @@ from telegram.ext import (
 )
 
 from admin_state import clear_admin_session, has_admin_session
+from brick_state import clear_brick_session, has_brick_draft
 from database import SessionLocal
 from handlers.drafts import view_drafts
 from permissions import can_access_admin_panel, is_superadmin
@@ -41,13 +42,14 @@ def main_menu_keyboard(*, show_admin: bool = False) -> InlineKeyboardMarkup:
     Inline-клавиатура главного меню (кнопки экрана).
 
     Callback-данные: create_post (entry-точка ConversationHandler),
-    places — справочник мест, admin_panel — административный кабинет (только
-    для суперадмина/администратора места), drafts — список черновиков,
-    help — справка, main_menu — возврат в меню.
+    places — справочник мест, bricks — личные кирпичики, admin_panel —
+    административный кабинет (только для суперадмина/администратора места),
+    drafts — список черновиков, help — справка, main_menu — возврат в меню.
     """
     rows = [
         [InlineKeyboardButton("✏️ Создать пост", callback_data="create_post")],
         [InlineKeyboardButton("📍 Места", callback_data="places")],
+        [InlineKeyboardButton("🧱 Мои кирпичики", callback_data="bricks")],
     ]
     if show_admin:
         rows.append([InlineKeyboardButton("🛡 Админка", callback_data="admin_panel")])
@@ -94,11 +96,12 @@ async def render_main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     await screen.reanchor_screen(update, context)
     user_data = ctx.data(context)
     user_id = ctx.user(update).id
-    # Главное меню — другая ветка сценария: незавершённый выбор места и
-    # административный ввод не должны перехватывать следующий текст.
-    # WIP-пост при этом не трогается.
+    # Главное меню — другая ветка сценария: незавершённый выбор места,
+    # конструктор личного кирпичика и административный ввод не должны
+    # перехватывать следующий текст. WIP-пост при этом не трогается.
     clear_place_session(user_id)
     clear_admin_session(user_id)
+    clear_brick_session(user_id)
     if screen.screen_ref(user_data) is None:
         screen.hydrate_screen_ref(user_data, user_id)
     chat_id = ctx.chat(update).id
@@ -147,14 +150,18 @@ def help_text() -> str:
         "позже;\n"
         "— «📍 Места» — найти место по названию, посмотреть карточку, выбрать "
         "его или добавить новое место/альтернативное название;\n"
+        "— «🧱 Мои кирпичики» — создавать личные типизированные поля для "
+        "будущих шаблонов, менять их, убирать в архив и восстанавливать. "
+        "В посты они пока не вставляются;\n"
         "— при выходе из создания (/cancel, /start, /drafts, /places, "
-        "/admin) незавершённый "
+        "/bricks, /admin) незавершённый "
         "пост автоматически сохраняется в черновиках — вернуться к нему можно "
         "через «📂 Черновики» → «✏️ Редактировать черновик».\n\n"
         "Команды:\n"
         "/start — главное меню\n"
         "/create_post — создать новый пост\n"
         "/places — справочник мест\n"
+        "/bricks — мои кирпичики\n"
         "/admin — кабинет, если у вас есть права администратора\n"
         "/drafts — список ваших черновиков\n"
         "/cancel — отменить текущий диалог\n"
@@ -168,6 +175,7 @@ async def render_help(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     await screen.reanchor_screen(update, context)
     clear_place_session(ctx.user(update).id)
     clear_admin_session(ctx.user(update).id)
+    clear_brick_session(ctx.user(update).id)
     keyboard = InlineKeyboardMarkup(
         [[InlineKeyboardButton("◀️ Главное меню", callback_data="main_menu")]]
     )
@@ -210,10 +218,13 @@ async def cancel_without_dialog(
     user_id = ctx.user(update).id
     place_active = has_place_session(user_id)
     admin_active = has_admin_session(user_id)
+    brick_active = has_brick_draft(user_id)
     if place_active:
         clear_place_session(user_id)
     if admin_active:
         clear_admin_session(user_id)
+    if brick_active:
+        clear_brick_session(user_id)
     user_data = ctx.data(context)
     if screen.screen_ref(user_data) is None:
         screen.hydrate_screen_ref(user_data, user_id)
@@ -221,9 +232,11 @@ async def cancel_without_dialog(
         text = "Сценарий выбора места отменён."
     elif admin_active:
         text = "Административный сценарий отменён."
+    elif brick_active:
+        text = "Создание или изменение кирпичика отменено. Данные не изменены."
     else:
         text = "Сейчас нет активного создания поста."
-    cancelled = place_active or admin_active
+    cancelled = place_active or admin_active or brick_active
     await screen.render_screen(
         context,
         user_data,

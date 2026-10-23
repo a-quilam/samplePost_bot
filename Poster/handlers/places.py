@@ -33,6 +33,7 @@ from telegram.ext import (
 
 import config
 from admin_state import clear_admin_session
+from brick_state import clear_brick_session
 from database import SessionLocal
 from models import PlaceName, User
 from permissions import can_manage_place
@@ -839,9 +840,10 @@ async def open_places(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     if query is not None:
         await query.answer()
     await screen.reanchor_screen(update, context)
-    # «Места» и кабинет — взаимоисключающие ветки: старый административный
-    # ввод не должен перехватывать следующий текст.
+    # «Места» и кабинет/кирпичики — взаимоисключающие ветки: старый
+    # административный ввод или конструктор не должен перехватывать текст.
     clear_admin_session(ctx.user(update).id)
+    clear_brick_session(ctx.user(update).id)
     state = load_place_session(ctx.user(update).id)
     if not isinstance(state, dict) or state.get("phase") not in PHASES:
         state = _new_hub()

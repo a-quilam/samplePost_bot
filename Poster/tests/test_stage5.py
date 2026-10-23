@@ -508,12 +508,20 @@ class MainMenuKeyboardTests(unittest.TestCase):
         texts = [button.text for row in keyboard.inline_keyboard for button in row]
         self.assertEqual(
             texts,
-            ["✏️ Создать пост", "📍 Места", "📂 Черновики", "❔ Помощь"],
+            [
+                "✏️ Создать пост",
+                "📍 Места",
+                "🧱 Мои кирпичики",
+                "📂 Черновики",
+                "❔ Помощь",
+            ],
         )
         callbacks = [
             button.callback_data for row in keyboard.inline_keyboard for button in row
         ]
-        self.assertEqual(callbacks, ["create_post", "places", "drafts", "help"])
+        self.assertEqual(
+            callbacks, ["create_post", "places", "bricks", "drafts", "help"]
+        )
 
     def test_help_lists_commands(self):
         bot = _ScreenBot()

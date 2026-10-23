@@ -93,6 +93,7 @@ class FullCreationFlowTests(unittest.TestCase):
             [
                 ("✏️ Создать пост", "create_post"),
                 ("📍 Места", "places"),
+                ("🧱 Мои кирпичики", "bricks"),
                 ("📂 Черновики", "drafts"),
                 ("❔ Помощь", "help"),
             ],

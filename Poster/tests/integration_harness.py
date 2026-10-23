@@ -43,8 +43,10 @@ try:
 
     import admin_state as admin_state_module
     import bot as bot_module
+    import brick_state as brick_state_module
     import errors as errors_module
     import handlers.admin as admin_module
+    import handlers.bricks as bricks_module
     import handlers.drafts as drafts_module
     import handlers.main_menu as main_menu_module
     import handlers.places as places_module
@@ -452,6 +454,8 @@ class Harness:
             admin_state_module.SessionLocal,
             main_menu_module.SessionLocal,
             user_tracking_module.SessionLocal,
+            bricks_module.SessionLocal,
+            brick_state_module.SessionLocal,
         )
         post_creation_module.SessionLocal = self.session_factory
         drafts_module.SessionLocal = self.session_factory
@@ -462,6 +466,8 @@ class Harness:
         admin_state_module.SessionLocal = self.session_factory
         main_menu_module.SessionLocal = self.session_factory
         user_tracking_module.SessionLocal = self.session_factory
+        bricks_module.SessionLocal = self.session_factory
+        brick_state_module.SessionLocal = self.session_factory
 
         # Уведомления об ошибках троттлятся по (chat_id, time.monotonic) —
         # без сброса тесты «повторно заметили бы» чужие уведомления
@@ -519,6 +525,8 @@ class Harness:
         admin_state_module.SessionLocal = self._orig_session_local[6]
         main_menu_module.SessionLocal = self._orig_session_local[7]
         user_tracking_module.SessionLocal = self._orig_session_local[8]
+        bricks_module.SessionLocal = self._orig_session_local[9]
+        brick_state_module.SessionLocal = self._orig_session_local[10]
         errors_module._last_error_notice.clear()
         errors_module._last_error_notice.update(self._orig_error_notice)
         self.engine.dispose()

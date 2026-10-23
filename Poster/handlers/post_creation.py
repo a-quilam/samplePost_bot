@@ -24,6 +24,7 @@ from telegram.ext import (
 )
 
 from admin_state import clear_admin_session
+from brick_state import clear_brick_session
 from database import SessionLocal
 from handlers.admin import open_admin
 from handlers.callbacks import handle_main_menu_selection
@@ -461,6 +462,7 @@ async def start_post_creation(
     # должен перехватывать текст следующего шага поста.
     clear_place_session(ctx.user(update).id)
     clear_admin_session(ctx.user(update).id)
+    clear_brick_session(ctx.user(update).id)
     logger.info("Начало создания поста.")
     await _save_wip_before_exit(update, context)
     user_data = ctx.data(context)
@@ -489,6 +491,7 @@ async def restore_wip(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int
 
     clear_place_session(ctx.user(update).id)
     clear_admin_session(ctx.user(update).id)
+    clear_brick_session(ctx.user(update).id)
     user_data = ctx.data(context)
     user_id = ctx.user(update).id
     payload = screen.load_payload(user_id)
@@ -537,6 +540,7 @@ async def start_edit_draft(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     await query.answer()
     clear_place_session(ctx.user(update).id)
     clear_admin_session(ctx.user(update).id)
+    clear_brick_session(ctx.user(update).id)
 
     try:
         draft_id = int((query.data or "")[len("editdraft_") :])
@@ -2510,6 +2514,7 @@ async def cancel_creation(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     await _save_wip_before_exit(update, context)
     clear_place_session(ctx.user(update).id)
     clear_admin_session(ctx.user(update).id)
+    clear_brick_session(ctx.user(update).id)
     user_data = ctx.data(context)
     if screen.screen_ref(user_data) is None:
         screen.hydrate_screen_ref(user_data, ctx.user(update).id)
@@ -2551,6 +2556,24 @@ async def help_during_creation(
         await query.answer()
     await _save_wip_before_exit(update, context)
     await help_command(update, context)
+    return ConversationHandler.END
+
+
+async def bricks_during_creation(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> int:
+    """
+    Переход в «Мои кирпичики» ВНУТРИ диалога поста.
+
+    Незавершённый пост сохраняется, диалог завершается: иначе следующий текст
+    мог бы уйти в поле поста, а конструктор кирпичика — перехватить его.
+    """
+    from handlers.bricks import open_bricks
+
+    await _save_wip_before_exit(update, context)
+    clear_place_session(ctx.user(update).id)
+    clear_admin_session(ctx.user(update).id)
+    await open_bricks(update, context)
     return ConversationHandler.END
 
 
@@ -2726,6 +2749,7 @@ def post_creation_handlers() -> list[BaseHandler]:
                 CommandHandler("help", help_during_creation),
                 CommandHandler("drafts", view_drafts_and_exit),
                 CommandHandler("places", places_during_creation),
+                CommandHandler("bricks", bricks_during_creation),
                 CommandHandler("admin", admin_during_creation),
                 # Кнопки главного меню, нажатые во время диалога: WIP
                 # сохраняется, диалог завершается — иначе состояние оставалось
@@ -2735,6 +2759,7 @@ def post_creation_handlers() -> list[BaseHandler]:
                 CallbackQueryHandler(view_drafts_and_exit, pattern=r"^drafts$"),
                 CallbackQueryHandler(help_during_creation, pattern=r"^help$"),
                 CallbackQueryHandler(places_during_creation, pattern=r"^places$"),
+                CallbackQueryHandler(bricks_during_creation, pattern=r"^bricks$"),
                 CallbackQueryHandler(admin_during_creation, pattern=r"^admin_panel$"),
                 # Повторное «Продолжить пост» при уже активном диалоге: без
                 # этого fallback'а кнопка проваливалась бы в stale-хендлер

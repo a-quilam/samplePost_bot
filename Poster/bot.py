@@ -15,6 +15,7 @@ from config import TELEGRAM_BOT_TOKEN
 from database import init_db
 from errors import error_handler
 from handlers.admin import admin_handlers
+from handlers.bricks import bricks_handlers
 from handlers.callbacks import callbacks_handlers
 from handlers.drafts import drafts_handlers
 from handlers.main_menu import main_menu_handlers
@@ -73,6 +74,11 @@ def build_application() -> Application:
     # Административный кабинет: после «Мест», до главного меню. Текстовый
     # поиск получателя активен только в своей явной фазе.
     for handler in admin_handlers():
+        application.add_handler(handler)
+
+    # Личные кирпичики: после мастера/«Мест»/кабинета, но до глобального
+    # обработчика текста главного меню. У него собственный префикс bk_.
+    for handler in bricks_handlers():
         application.add_handler(handler)
 
     # Обработчики главного меню
