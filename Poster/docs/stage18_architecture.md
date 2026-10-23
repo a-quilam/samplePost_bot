@@ -206,7 +206,8 @@ drafts.image / drafts.photos   (вложения анонса: фото/альб
 
 ### 3.1. `users`
 
-**Stage 19A — реализовано** (без `is_superadmin`; колонка появится в Stage 20):
+**Stage 19A — реализовано** (роли в Stage 20A определяет только конфигурация;
+колонка `is_superadmin` не добавлялась и не планируется):
 
 ```sql
 CREATE TABLE users (
@@ -224,13 +225,19 @@ CREATE TABLE users (
   которое может меняться и не является идентификатором.
 - В Stage 19A есть слой хранения (`user_store.get_or_create_user`,
   атомарный UPSERT). В Stage 19B справочник создаёт/находит пользователя
-  при создании места и добавлении альтернативы; мастер поста пользователей
-  по-прежнему не создаёт. Роли/кабинеты — Stage 20+.
+  при создании места и добавлении альтернативы. **Stage 20A**: фоновый
+  обработчик (`handlers/user_tracking.py`, группа -1) регистрирует и
+  обновляет профиль пользователя при каждом Update, поэтому кабинеты видят
+  актуальные username/имя у всех, кто писал боту.
 - Роль суперадмина: список постоянных Telegram user id в конфигурации
-  (`.env: SUPERADMIN_USER_IDS`, разделитель «,»). Источник истины — env;
-  колонка `is_superadmin` (Stage 20) будет лишь проекцией. username — не
-  идентификатор (меняется пользователем). Суперадмин назначает админа места
-  по Telegram user ID, который приложение переводит во внутренний `users.id`.
+  (`.env: SUPERADMIN_USER_IDS`, разделитель «,», только числа). Источник
+  истины — **только env** (`permissions.is_superadmin` читает
+  `config.SUPERADMIN_USER_IDS` при каждом вызове); колонки `is_superadmin`
+  нет, DB/кнопками суперадмина назначить нельзя. Пустая конфигурация
+  закрывает административные функции, обычные сценарии работают. username —
+  не идентификатор (меняется пользователем). Суперадмин назначает админа
+  места по постоянному Telegram user ID, который приложение переводит во
+  внутренний `users.id`.
 
 ### 3.2. `places` и `place_names`
 
@@ -288,24 +295,68 @@ CREATE UNIQUE INDEX ux_place_names_one_canonical
 - `places.created_by_user_id` — только авторство. Создатель не получает
   администратора, шаблон или иные скрытые права.
 
-### 3.3. `place_admins`
+### 3.3. `place_admins` — администраторы мест
 
-**Не реализовано в Stage 19A** (Stage 20):
+**Stage 20A — реализовано** (миграция 3):
 
 ```sql
 CREATE TABLE place_admins (
-    place_id          INTEGER PRIMARY KEY REFERENCES places(id) ON DELETE CASCADE,
-    admin_user_id     INTEGER NOT NULL REFERENCES users(id),
-    granted_by_user_id INTEGER REFERENCES users(id),
-    since             DATETIME NOT NULL
+    id                 INTEGER NOT NULL PRIMARY KEY,
+    place_id           INTEGER NOT NULL,
+    user_id            INTEGER NOT NULL,
+    assigned_by_user_id INTEGER,
+    assigned_at        DATETIME NOT NULL,
+    revoked_by_user_id INTEGER,
+    revoked_at         DATETIME,
+    CONSTRAINT fk_place_admins_place_id
+        FOREIGN KEY (place_id) REFERENCES places (id) ON DELETE CASCADE,
+    CONSTRAINT fk_place_admins_user_id
+        FOREIGN KEY (user_id) REFERENCES users (id) ON DELETE CASCADE,
+    CONSTRAINT fk_place_admins_assigned_by_user_id
+        FOREIGN KEY (assigned_by_user_id) REFERENCES users (id) ON DELETE SET NULL,
+    CONSTRAINT fk_place_admins_revoked_by_user_id
+        FOREIGN KEY (revoked_by_user_id) REFERENCES users (id) ON DELETE SET NULL
+);
+CREATE INDEX ix_place_admins_place_id ON place_admins (place_id);
+CREATE INDEX ix_place_admins_user_id ON place_admins (user_id);
+CREATE UNIQUE INDEX ux_place_admins_one_active
+    ON place_admins (place_id) WHERE revoked_at IS NULL;
+```
+
+- Таблица — **история назначений**: действующая роль = строка с
+  `revoked_at IS NULL`; отозванные строки остаются для аудита (кто, кого,
+  когда назначил и снял).
+- Частичный уникальный индекс `ux_place_admins_one_active` гарантирует на
+  уровне БД «не более одного действующего администратора на место»; у места
+  может быть **ноль или один** действующий админ.
+- При создании места строка **не создаётся** (админа нет); суперадмин
+  назначает его позже по постоянному Telegram user ID. Создатель места
+  автоматически админом не становится.
+- Замена администратора — атомарная транзакция: UPDATE старой строки
+  (условный по `revoked_at IS NULL`, проверяется `rowcount == 1`) + INSERT
+  новой; конкурентные операции защищены индексом и проверкой ожидаемого
+  состояния (`expected_admin_telegram_user_id`), без молчаливой подмены.
+- `user_id`/`assigned_by_user_id`/`revoked_by_user_id` — внутренние
+  `users.id`; связь с Telegram идёт через `users.telegram_user_id`, поэтому
+  смена username не меняет права.
+
+### 3.3а. `admin_sessions` — состояние кабинета
+
+**Stage 20A — реализовано** (миграция 3):
+
+```sql
+CREATE TABLE admin_sessions (
+    telegram_user_id INTEGER NOT NULL PRIMARY KEY,
+    payload TEXT NOT NULL,
+    updated_at DATETIME NOT NULL
 );
 ```
 
-- PK по `place_id` = «не более одного администратора» на уровне схемы.
-  У места может быть **ноль или один** действующий администратор.
-- При создании места строка **не создаётся** (админа нет); суперадмин
-  назначает его позже по постоянному Telegram user ID (Stage 20).
-- Создатель места автоматически админом не становится.
+- Интерфейсное состояние кабинета: фаза, выбранное место, кандидат,
+  ожидаемый текущий админ — переживает рестарт (см. `admin_state.py`).
+- Роли здесь **не хранятся**: права перепроверяются по конфигурации
+  суперадминов и таблице `place_admins` при каждом действии; JSON — только
+  навигация, а не источник полномочий.
 
 ### 3.4. `bricks` — реестр кирпичиков
 
@@ -566,8 +617,8 @@ CREATE TABLE schema_migrations (
 
 | Роль | Определение | Где хранится |
 |---|---|---|
-| Суперадмин | Постоянный Telegram **user id** из конфигурации `.env` (`SUPERADMIN_USER_IDS`), не username | env + проекция `users.is_superadmin` (Stage 20) |
-| Администратор места | **Ноль или один** действующий админ на место, строка в `place_admins`; назначается суперадмином по Telegram user ID | БД |
+| Суперадмин | Постоянный Telegram **user id** из конфигурации `.env` (`SUPERADMIN_USER_IDS`), не username | только env, `permissions.is_superadmin` (Stage 20A; DB/кнопками не назначается) |
+| Администратор места | **Ноль или один** действующий админ на место, активная строка в `place_admins` (`revoked_at IS NULL`); назначается суперадмином по Telegram user ID | БД (Stage 20A) |
 | Обычный пользователь | Любой, кто взаимодействует с ботом; права определяются отсутствием двух ролей выше | — |
 
 ### 4.2. Матрица прав (бизнес-операции)
@@ -590,23 +641,33 @@ CREATE TABLE schema_migrations (
 | Искать/просматривать справочник мест | ✓ | ✓ | ✓ |
 | Кнопка «Я админ места» | — | — | ✓ (показ контакта суперадмина; прав не даёт) |
 
-Правила реализации:
+Правила реализации (Stage 20A):
 
-1. Проверка прав — **функцией бизнес-логики** (`utils/roles.py`, Stage 20),
-   вызываемой в каждом обработчике записи, плюс ограничениями самой БД
-   (`ON DELETE`, уникальные индексы). Видимость Telegram-кнопки —
+1. Проверка прав — **функцией бизнес-логики** (`permissions.py`,
+   `place_admin_store.py`), вызываемой в каждом административном действии и
+   перепроверяемой внутри транзакций store-слоя, плюс ограничениями самой БД
+   (`ON DELETE`, частичный уникальный индекс). Видимость Telegram-кнопки —
    только удобство, не граница безопасности.
-2. Все обращения к чужим сущностям (`place_id` в callback и т. п.)
-   перепроверяются: `admin_transfers.place_id` + `from_user_id == текущий админ`.
-3. Кнопка «Я админ места» показывает контакт суперадмина (username/ссылка
-   из `.env: SUPERADMIN_CONTACT`). Нажатие не выдаёт полномочий, не создаёт
-   заявку и не меняет ролей — обращение к суперадмину пользователь делает сам.
+2. Актор — только `update.effective_user.id`; callback передаёт лишь
+   `place_id`/`telegram_user_id` цели, никогда роль или ID актора. Все
+   обращения к чужим сущностям перепроверяются; подделанный callback получает
+   отказ, не меняя данных.
+3. Кнопка «Я админ места» показывает контакт суперадмина (ссылка из
+   `.env: SUPERADMIN_CONTACT_URL`, валидируется при старте; если не задана —
+   честно сообщает «контакт не указан»). Нажатие не выдаёт полномочий, не
+   создаёт заявку и не меняет ролей — обращение к суперадмину пользователь
+   делает сам.
 4. Суперадмин назначает администратора места **по постоянному Telegram user
-   ID** (не по username); создатель места администратором автоматически не
-   становится. У места может не быть администратора вовсе.
+   ID** (не по username); получатель должен быть уже известен боту. Создатель
+   места администратором автоматически не становится. У места может не быть
+   администратора вовсе.
 5. Права проверяются на уровне бизнес-логики и ограничений БД, а не только
    видимостью кнопок: callback с чужим `place_id` должен получить отказ
    независимо от того, как выглядел экран.
+6. Конкуренция: назначение опирается на частичный уникальный индекс, замена
+   и отзыв — на условный UPDATE с проверкой ожидаемого действующего админа;
+   параллельные операции дают честный отказ (`changed`/`has_admin`/
+   `conflict`), а не порчу аудита.
 
 ---
 
