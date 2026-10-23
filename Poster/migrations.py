@@ -187,9 +187,61 @@ MIGRATION_2_PLACE_CONTACTS_UI = Migration(
     ),
 )
 
+# --- Версия 3: администраторы мест и состояние админского сценария ----------
+
+MIGRATION_3_PLACE_ADMINS = Migration(
+    version=3,
+    name="place_admins_and_admin_ui_state",
+    statements=(
+        # История назначений. Действующая роль = revoked_at IS NULL.
+        # Частичный уникальный индекс ниже гарантирует не более одного
+        # действующего администратора на место. Отозванные строки остаются
+        # для аудита; при замене они помечаются в той же транзакции.
+        """
+        CREATE TABLE place_admins (
+            id INTEGER NOT NULL PRIMARY KEY,
+            place_id INTEGER NOT NULL,
+            user_id INTEGER NOT NULL,
+            assigned_by_user_id INTEGER,
+            assigned_at DATETIME NOT NULL,
+            revoked_by_user_id INTEGER,
+            revoked_at DATETIME,
+            CONSTRAINT fk_place_admins_place_id
+                FOREIGN KEY (place_id) REFERENCES places (id)
+                ON DELETE CASCADE,
+            CONSTRAINT fk_place_admins_user_id
+                FOREIGN KEY (user_id) REFERENCES users (id)
+                ON DELETE CASCADE,
+            CONSTRAINT fk_place_admins_assigned_by_user_id
+                FOREIGN KEY (assigned_by_user_id) REFERENCES users (id)
+                ON DELETE SET NULL,
+            CONSTRAINT fk_place_admins_revoked_by_user_id
+                FOREIGN KEY (revoked_by_user_id) REFERENCES users (id)
+                ON DELETE SET NULL
+        )
+        """,
+        "CREATE INDEX ix_place_admins_place_id ON place_admins (place_id)",
+        "CREATE INDEX ix_place_admins_user_id ON place_admins (user_id)",
+        """
+        CREATE UNIQUE INDEX ux_place_admins_one_active
+            ON place_admins (place_id) WHERE revoked_at IS NULL
+        """,
+        # Интерфейсное состояние кабинета: фаза, выбранное место и кандидат.
+        # Права здесь не хранятся и не восстанавливаются из этого JSON.
+        """
+        CREATE TABLE admin_sessions (
+            telegram_user_id INTEGER NOT NULL PRIMARY KEY,
+            payload TEXT NOT NULL,
+            updated_at DATETIME NOT NULL
+        )
+        """,
+    ),
+)
+
 DEFAULT_MIGRATIONS: tuple[Migration, ...] = (
     MIGRATION_1_USERS_PLACES,
     MIGRATION_2_PLACE_CONTACTS_UI,
+    MIGRATION_3_PLACE_ADMINS,
 )
 
 LATEST_VERSION = DEFAULT_MIGRATIONS[-1].version if DEFAULT_MIGRATIONS else 0

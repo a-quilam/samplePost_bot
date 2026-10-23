@@ -27,6 +27,13 @@ _FIXTURE_TOKEN = "123456789:FIXTUREFAKETOKENforTestsOnly00000000"
 if not os.environ.get("TELEGRAM_BOT_TOKEN"):
     os.environ["TELEGRAM_BOT_TOKEN"] = _FIXTURE_TOKEN
 
+# Конфигурация ролей в наборе тестов детерминирована и не зависит от
+# локального .env: конкретные суперадмины задаются в интеграционных тестах
+# через patch config.SUPERADMIN_USER_IDS. Так обычные сценарии не получают
+# случайную административную кнопку на машине разработчика.
+os.environ.setdefault("SUPERADMIN_USER_IDS", "")
+os.environ.setdefault("SUPERADMIN_CONTACT_URL", "")
+
 # Настоящий post_bot.db тестам недоступен ВООБЩЕ: unit-тесты зовут
 # обработчики напрямую (без интеграционного каркаса) и могут дойти до
 # записи состояния (sync_wip → screen.save_state). DATABASE_URL ВСЕГДА

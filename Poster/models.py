@@ -222,6 +222,88 @@ class PlaceName(Base):
         )
 
 
+class PlaceAdmin(Base):
+    """
+    История назначений администратора места (Stage 20A).
+
+    Действующая роль — строка с `revoked_at IS NULL`. Частичный уникальный
+    индекс не позволяет иметь у одного места двух действующих администраторов;
+    при замене прежняя строка сначала помечается отозванной, затем в той же
+    транзакции создаётся новая. Отозванные строки сохраняются для аудита.
+
+    `user_id`/`assigned_by_user_id` — внутренние `users.id`. Внешний
+    идентификатор получателя — постоянный Telegram user ID, но связи в БД
+    идут через `users.id`, поэтому смена username права не меняет.
+    """
+
+    __tablename__ = "place_admins"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    place_id: Mapped[int] = mapped_column(
+        Integer,
+        ForeignKey("places.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    user_id: Mapped[int] = mapped_column(
+        Integer,
+        ForeignKey("users.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    assigned_by_user_id: Mapped[int | None] = mapped_column(
+        Integer,
+        ForeignKey("users.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+    assigned_at: Mapped[datetime] = mapped_column(
+        DateTime, default=utcnow, nullable=False
+    )
+    revoked_by_user_id: Mapped[int | None] = mapped_column(
+        Integer,
+        ForeignKey("users.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+    revoked_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+
+    __table_args__ = (
+        Index(
+            "ux_place_admins_one_active",
+            "place_id",
+            unique=True,
+            sqlite_where=text("revoked_at IS NULL"),
+        ),
+    )
+
+    def __repr__(self) -> str:
+        return (
+            f"<PlaceAdmin(id={self.id}, place_id={self.place_id}, "
+            f"user_id={self.user_id}, revoked={self.revoked_at is not None})>"
+        )
+
+
+class AdminSession(Base):
+    """
+    Ограниченное состояние административного сценария Stage 20A.
+
+    Хранится отдельно от WIP-поста и от `place_sessions`: выбранное место,
+    фаза и кандидат в администраторы переживают рестарт, но не являются
+    доменными правами. Права на каждом действии проверяются заново по
+    Telegram user ID и таблице `place_admins`, а не по этому JSON.
+    """
+
+    __tablename__ = "admin_sessions"
+
+    telegram_user_id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    payload: Mapped[str] = mapped_column(Text, nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime, default=utcnow, onupdate=utcnow, nullable=False
+    )
+
+    def __repr__(self) -> str:
+        return f"<AdminSession(telegram_user_id={self.telegram_user_id})>"
+
+
 class PlaceSession(Base):
     """
     Ограниченное состояние Telegram-сценария выбора/создания места.
