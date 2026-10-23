@@ -13,6 +13,8 @@
 и старые сценарии, и привычка пользователя набрать текст не ломаются.
 """
 
+import logging
+
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import (
     BaseHandler,
@@ -23,30 +25,53 @@ from telegram.ext import (
     filters,
 )
 
+from admin_state import clear_admin_session, has_admin_session
+from database import SessionLocal
 from handlers.drafts import view_drafts
+from permissions import can_access_admin_panel, is_superadmin
 from place_state import clear_place_session, has_place_session
 from utils import screen
 from utils import tg_context as ctx
 
+logger = logging.getLogger(__name__)
 
-def main_menu_keyboard() -> InlineKeyboardMarkup:
+
+def main_menu_keyboard(*, show_admin: bool = False) -> InlineKeyboardMarkup:
     """
     Inline-клавиатура главного меню (кнопки экрана).
 
     Callback-данные: create_post (entry-точка ConversationHandler),
-    places — справочник мест, drafts — список черновиков, help — справка,
-    main_menu — возврат в меню.
+    places — справочник мест, admin_panel — административный кабинет (только
+    для суперадмина/администратора места), drafts — список черновиков,
+    help — справка, main_menu — возврат в меню.
     """
-    return InlineKeyboardMarkup(
+    rows = [
+        [InlineKeyboardButton("✏️ Создать пост", callback_data="create_post")],
+        [InlineKeyboardButton("📍 Места", callback_data="places")],
+    ]
+    if show_admin:
+        rows.append([InlineKeyboardButton("🛡 Админка", callback_data="admin_panel")])
+    rows.append(
         [
-            [InlineKeyboardButton("✏️ Создать пост", callback_data="create_post")],
-            [InlineKeyboardButton("📍 Места", callback_data="places")],
-            [
-                InlineKeyboardButton("📂 Черновики", callback_data="drafts"),
-                InlineKeyboardButton("❔ Помощь", callback_data="help"),
-            ],
+            InlineKeyboardButton("📂 Черновики", callback_data="drafts"),
+            InlineKeyboardButton("❔ Помощь", callback_data="help"),
         ]
     )
+    return InlineKeyboardMarkup(rows)
+
+
+def _show_admin_button(telegram_user_id: int) -> bool:
+    """Видимость кнопки кабинета; роль всё равно перепроверяется в handler."""
+    if is_superadmin(telegram_user_id):
+        return True
+    session = SessionLocal()
+    try:
+        return can_access_admin_panel(session, telegram_user_id)
+    except Exception as e:  # noqa: BLE001 — меню должно открыться и без кабинета
+        logger.error("Не удалось проверить доступ в кабинет: %s", e)
+        return False
+    finally:
+        session.close()
 
 
 def main_menu_text() -> str:
@@ -69,13 +94,15 @@ async def render_main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     await screen.reanchor_screen(update, context)
     user_data = ctx.data(context)
     user_id = ctx.user(update).id
-    # Главное меню — другая ветка сценария: незавершённый выбор места не
-    # должен перехватывать следующий текст. WIP-пост при этом не трогается.
+    # Главное меню — другая ветка сценария: незавершённый выбор места и
+    # административный ввод не должны перехватывать следующий текст.
+    # WIP-пост при этом не трогается.
     clear_place_session(user_id)
+    clear_admin_session(user_id)
     if screen.screen_ref(user_data) is None:
         screen.hydrate_screen_ref(user_data, user_id)
     chat_id = ctx.chat(update).id
-    keyboard = main_menu_keyboard()
+    keyboard = main_menu_keyboard(show_admin=_show_admin_button(user_id))
     if screen.load_payload(user_id):
         # WIP пережил рестарт — предлагаем продолжение вместо потери
         keyboard = InlineKeyboardMarkup(
@@ -113,14 +140,15 @@ def help_text() -> str:
         "позже;\n"
         "— «📍 Места» — найти место по названию, посмотреть карточку, выбрать "
         "его или добавить новое место/альтернативное название;\n"
-        "— при выходе из создания (/cancel, /start, /drafts, /places) "
-        "незавершённый "
+        "— при выходе из создания (/cancel, /start, /drafts, /places, "
+        "/admin) незавершённый "
         "пост автоматически сохраняется в черновиках — вернуться к нему можно "
         "через «📂 Черновики» → «✏️ Редактировать черновик».\n\n"
         "Команды:\n"
         "/start — главное меню\n"
         "/create_post — создать новый пост\n"
         "/places — справочник мест\n"
+        "/admin — кабинет, если у вас есть права администратора\n"
         "/drafts — список ваших черновиков\n"
         "/cancel — отменить текущий диалог\n"
         "/help — эта справка"
@@ -132,6 +160,7 @@ async def render_help(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     # навигация сообщением ниже экрана → новый экран рядом с вводом
     await screen.reanchor_screen(update, context)
     clear_place_session(ctx.user(update).id)
+    clear_admin_session(ctx.user(update).id)
     keyboard = InlineKeyboardMarkup(
         [[InlineKeyboardButton("◀️ Главное меню", callback_data="main_menu")]]
     )
@@ -168,29 +197,38 @@ async def drafts_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 async def cancel_without_dialog(
     update: Update, context: ContextTypes.DEFAULT_TYPE
 ) -> None:
-    """/cancel без активного диалога: отмена выбора места или подсказка."""
+    """/cancel без активного диалога: отмена места/кабинета или подсказка."""
     # навигация сообщением ниже экрана → новый экран рядом с вводом
     await screen.reanchor_screen(update, context)
     user_id = ctx.user(update).id
     place_active = has_place_session(user_id)
+    admin_active = has_admin_session(user_id)
     if place_active:
         clear_place_session(user_id)
+    if admin_active:
+        clear_admin_session(user_id)
     user_data = ctx.data(context)
     if screen.screen_ref(user_data) is None:
         screen.hydrate_screen_ref(user_data, user_id)
-    text = (
-        "Сценарий выбора места отменён."
-        if place_active
-        else "Сейчас нет активного создания поста."
-    )
+    if place_active:
+        text = "Сценарий выбора места отменён."
+    elif admin_active:
+        text = "Административный сценарий отменён."
+    else:
+        text = "Сейчас нет активного создания поста."
+    cancelled = place_active or admin_active
     await screen.render_screen(
         context,
         user_data,
         ctx.chat(update).id,
         text,
-        main_menu_keyboard() if place_active else None,
+        (
+            main_menu_keyboard(show_admin=_show_admin_button(user_id))
+            if cancelled
+            else None
+        ),
     )
-    if place_active:
+    if cancelled:
         await screen.drop_user_input(update, context)
 
 

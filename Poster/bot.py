@@ -7,17 +7,20 @@ from telegram.ext import (
     ApplicationBuilder,
     ContextTypes,
     MessageHandler,
+    TypeHandler,
     filters,
 )
 
 from config import TELEGRAM_BOT_TOKEN
 from database import init_db
 from errors import error_handler
+from handlers.admin import admin_handlers
 from handlers.callbacks import callbacks_handlers
 from handlers.drafts import drafts_handlers
 from handlers.main_menu import main_menu_handlers
 from handlers.places import places_handlers
 from handlers.post_creation import post_creation_handlers
+from handlers.user_tracking import track_user
 from log_config import setup_logging
 from utils import tg_context as ctx
 
@@ -53,6 +56,10 @@ def build_application() -> Application:
     # предупреждение «No JobQueue set up» при старте — ожидаемое и разовое.
     application = ApplicationBuilder().token(TELEGRAM_BOT_TOKEN).job_queue(None).build()
 
+    # Регистрация известных пользователей (Stage 20A): отдельная группа -1,
+    # выполняется до сценариев, не отвечает в чат и не меняет порядок групп 0.
+    application.add_handler(TypeHandler(Update, track_user), group=-1)
+
     # Обработчики создания поста (ConversationHandler) — первыми
     for handler in post_creation_handlers():
         application.add_handler(handler)
@@ -61,6 +68,11 @@ def build_application() -> Application:
     # глобальных обработчиков главного меню (иначе outside_dialog_hint съел
     # бы ввод в фазах поиска/создания места).
     for handler in places_handlers():
+        application.add_handler(handler)
+
+    # Административный кабинет: после «Мест», до главного меню. Текстовый
+    # поиск получателя активен только в своей явной фазе.
+    for handler in admin_handlers():
         application.add_handler(handler)
 
     # Обработчики главного меню

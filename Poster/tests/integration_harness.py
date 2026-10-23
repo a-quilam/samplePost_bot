@@ -41,11 +41,15 @@ try:
     from telegram.error import BadRequest
     from telegram.ext import ConversationHandler
 
+    import admin_state as admin_state_module
     import bot as bot_module
     import errors as errors_module
+    import handlers.admin as admin_module
     import handlers.drafts as drafts_module
+    import handlers.main_menu as main_menu_module
     import handlers.places as places_module
     import handlers.post_creation as post_creation_module
+    import handlers.user_tracking as user_tracking_module
     import place_state as place_state_module
     import utils.parsers as parsers_module
     import utils.screen as screen_module
@@ -441,12 +445,20 @@ class Harness:
             screen_module.SessionLocal,
             places_module.SessionLocal,
             place_state_module.SessionLocal,
+            admin_module.SessionLocal,
+            admin_state_module.SessionLocal,
+            main_menu_module.SessionLocal,
+            user_tracking_module.SessionLocal,
         )
         post_creation_module.SessionLocal = self.session_factory
         drafts_module.SessionLocal = self.session_factory
         screen_module.SessionLocal = self.session_factory
         places_module.SessionLocal = self.session_factory
         place_state_module.SessionLocal = self.session_factory
+        admin_module.SessionLocal = self.session_factory
+        admin_state_module.SessionLocal = self.session_factory
+        main_menu_module.SessionLocal = self.session_factory
+        user_tracking_module.SessionLocal = self.session_factory
 
         # Уведомления об ошибках троттлятся по (chat_id, time.monotonic) —
         # без сброса тесты «повторно заметили бы» чужие уведомления
@@ -500,6 +512,10 @@ class Harness:
         screen_module.SessionLocal = self._orig_session_local[2]
         places_module.SessionLocal = self._orig_session_local[3]
         place_state_module.SessionLocal = self._orig_session_local[4]
+        admin_module.SessionLocal = self._orig_session_local[5]
+        admin_state_module.SessionLocal = self._orig_session_local[6]
+        main_menu_module.SessionLocal = self._orig_session_local[7]
+        user_tracking_module.SessionLocal = self._orig_session_local[8]
         errors_module._last_error_notice.clear()
         errors_module._last_error_notice.update(self._orig_error_notice)
         self.engine.dispose()

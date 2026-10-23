@@ -23,7 +23,9 @@ from telegram.ext import (
     filters,
 )
 
+from admin_state import clear_admin_session
 from database import SessionLocal
+from handlers.admin import open_admin
 from handlers.callbacks import handle_main_menu_selection
 from handlers.drafts import view_drafts
 from handlers.main_menu import help_command, main_menu_keyboard, start
@@ -458,6 +460,7 @@ async def start_post_creation(
     # Мастер и справочник — взаимоисключающие ветки: старый ввод места не
     # должен перехватывать текст следующего шага поста.
     clear_place_session(ctx.user(update).id)
+    clear_admin_session(ctx.user(update).id)
     logger.info("Начало создания поста.")
     await _save_wip_before_exit(update, context)
     user_data = ctx.data(context)
@@ -485,6 +488,7 @@ async def restore_wip(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int
         await query.answer()
 
     clear_place_session(ctx.user(update).id)
+    clear_admin_session(ctx.user(update).id)
     user_data = ctx.data(context)
     user_id = ctx.user(update).id
     payload = screen.load_payload(user_id)
@@ -532,6 +536,7 @@ async def start_edit_draft(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     query = ctx.query(update)
     await query.answer()
     clear_place_session(ctx.user(update).id)
+    clear_admin_session(ctx.user(update).id)
 
     try:
         draft_id = int((query.data or "")[len("editdraft_") :])
@@ -2503,6 +2508,8 @@ async def cancel_creation(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     # (Stage 16, дефект №7; callback — guard-пропуск)
     await screen.reanchor_screen(update, context)
     await _save_wip_before_exit(update, context)
+    clear_place_session(ctx.user(update).id)
+    clear_admin_session(ctx.user(update).id)
     user_data = ctx.data(context)
     if screen.screen_ref(user_data) is None:
         screen.hydrate_screen_ref(user_data, ctx.user(update).id)
@@ -2559,6 +2566,20 @@ async def places_during_creation(
     await _save_wip_before_exit(update, context)
     clear_place_session(ctx.user(update).id)
     await open_places(update, context)
+    return ConversationHandler.END
+
+
+async def admin_during_creation(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> int:
+    """
+    Переход в административный кабинет ВНУТРИ диалога: незавершённый пост
+    сохраняется, диалог завершается. Иначе мастер остался бы активным поверх
+    кабинета, а следующий текст мог уйти в поле поста.
+    """
+    await _save_wip_before_exit(update, context)
+    clear_place_session(ctx.user(update).id)
+    await open_admin(update, context)
     return ConversationHandler.END
 
 
@@ -2705,6 +2726,7 @@ def post_creation_handlers() -> list[BaseHandler]:
                 CommandHandler("help", help_during_creation),
                 CommandHandler("drafts", view_drafts_and_exit),
                 CommandHandler("places", places_during_creation),
+                CommandHandler("admin", admin_during_creation),
                 # Кнопки главного меню, нажатые во время диалога: WIP
                 # сохраняется, диалог завершается — иначе состояние оставалось
                 # бы активным «поверх» меню, а список/справка молча теряли бы
@@ -2713,6 +2735,7 @@ def post_creation_handlers() -> list[BaseHandler]:
                 CallbackQueryHandler(view_drafts_and_exit, pattern=r"^drafts$"),
                 CallbackQueryHandler(help_during_creation, pattern=r"^help$"),
                 CallbackQueryHandler(places_during_creation, pattern=r"^places$"),
+                CallbackQueryHandler(admin_during_creation, pattern=r"^admin_panel$"),
                 # Повторное «Продолжить пост» при уже активном диалоге: без
                 # этого fallback'а кнопка проваливалась бы в stale-хендлер
                 # (ответ «Кнопка устарела») либо висела бы со спиннером

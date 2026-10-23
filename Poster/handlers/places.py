@@ -31,8 +31,11 @@ from telegram.ext import (
     filters,
 )
 
+import config
+from admin_state import clear_admin_session
 from database import SessionLocal
 from models import PlaceName, User
+from permissions import can_manage_place
 from place_state import load_place_session, save_place_session
 from place_store import (
     PlaceDetails,
@@ -76,6 +79,7 @@ PHASES = {
     "names",
     "alias_input",
     "alias_warning",
+    "admin_request",
     "confirmed",
 }
 
@@ -111,6 +115,29 @@ def _safe_link(url: str) -> str:
     if url.lower().startswith(("http://", "https://")):
         return f'<a href="{_h(url)}">{_h(url)}</a>'
     return _h(url)
+
+
+def _admin_request_text(details: PlaceDetails) -> str:
+    """Объяснение кнопки «Я админ места»; заявка не создаётся."""
+    contact = config.SUPERADMIN_CONTACT_URL
+    if contact:
+        contact_line = (
+            "Контакт суперадминистратора Poster: "
+            f"{_safe_link(contact)}\n\n"
+            "Напишите ему сами и укажите название места."
+        )
+    else:
+        contact_line = (
+            "Контакт администратора пока не указан. Попросите владельца "
+            "Poster назначить вас администратором этого места."
+        )
+    return (
+        "🛡 Я админ места\n\n"
+        f"📍 {_h(details.canonical_name)}\n\n"
+        "Назначить администратора места может только суперадминистратор "
+        "Poster. Эта кнопка не отправляет заявку и не выдаёт полномочия.\n\n"
+        f"{contact_line}"
+    )
 
 
 def _clamp_offset(offset: int, total: int, page_size: int) -> int:
@@ -621,6 +648,7 @@ async def _render_phase(
         state.clear()
         state.update(_new_hub())
         phase = "hub"
+    telegram_user_id = ctx.user(update).id
 
     session = SessionLocal()
     try:
@@ -662,6 +690,29 @@ async def _render_phase(
                 text, keyboard = _hub_content()
             else:
                 text, keyboard = _create_check_content(session, state)
+        elif phase == "admin_request":
+            place_id = state.get("place_id")
+            details = (
+                get_place_details(session, int(place_id))
+                if isinstance(place_id, int)
+                else None
+            )
+            if details is None:
+                state.clear()
+                state.update(_new_hub())
+                notice = notice or "Место не существует или было удалено."
+                text, keyboard = _hub_content()
+            else:
+                text = _admin_request_text(details)
+                keyboard = InlineKeyboardMarkup(
+                    [
+                        [
+                            InlineKeyboardButton(
+                                "◀️ Назад к карточке", callback_data="pl_back"
+                            )
+                        ]
+                    ]
+                )
         elif phase in {"existing_choice", "confirm", "names", "alias_input"}:
             place_id = state.get("place_id")
             details = (
@@ -678,27 +729,37 @@ async def _render_phase(
                 text, keyboard = _existing_choice_content(details, state)
             elif phase == "confirm":
                 text = _card_text(details, state)
-                keyboard = InlineKeyboardMarkup(
+                confirm_rows = [
                     [
+                        InlineKeyboardButton(
+                            "✅ Подтвердить",
+                            callback_data=f"pl_confirm:{details.place_id}",
+                        )
+                    ],
+                    [
+                        InlineKeyboardButton(
+                            "🔤 Выбрать альтернативное название",
+                            callback_data="pl_names:0",
+                        )
+                    ],
+                ]
+                if not can_manage_place(session, telegram_user_id, details.place_id):
+                    confirm_rows.append(
                         [
                             InlineKeyboardButton(
-                                "✅ Подтвердить",
-                                callback_data=f"pl_confirm:{details.place_id}",
+                                "🛡 Я админ места",
+                                callback_data=(f"pl_admin_request:{details.place_id}"),
                             )
-                        ],
-                        [
-                            InlineKeyboardButton(
-                                "🔤 Выбрать альтернативное название",
-                                callback_data="pl_names:0",
-                            )
-                        ],
-                        [
-                            InlineKeyboardButton(
-                                "◀️ Вернуться к списку", callback_data="pl_back"
-                            )
-                        ],
+                        ]
+                    )
+                confirm_rows.append(
+                    [
+                        InlineKeyboardButton(
+                            "◀️ Вернуться к списку", callback_data="pl_back"
+                        )
                     ]
                 )
+                keyboard = InlineKeyboardMarkup(confirm_rows)
             elif phase == "names":
                 text, keyboard = _names_content(details, state)
             else:  # alias_input
@@ -778,6 +839,9 @@ async def open_places(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     if query is not None:
         await query.answer()
     await screen.reanchor_screen(update, context)
+    # «Места» и кабинет — взаимоисключающие ветки: старый административный
+    # ввод не должен перехватывать следующий текст.
+    clear_admin_session(ctx.user(update).id)
     state = load_place_session(ctx.user(update).id)
     if not isinstance(state, dict) or state.get("phase") not in PHASES:
         state = _new_hub()
@@ -1073,6 +1137,56 @@ async def handle_add_name(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     await _render_phase(update, context, state)
 
 
+async def handle_admin_request(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> None:
+    """
+    Кнопка «Я админ места»: только объяснение, без заявки и без выдачи прав.
+
+    Callback может быть подделан, поэтому место и текущая фаза проверяются,
+    а роль никогда не меняется этим обработчиком.
+    """
+    query = ctx.query(update)
+    state = load_place_session(ctx.user(update).id)
+    if state is None or state.get("phase") != "confirm":
+        await _stale(update)
+        return
+    data = query.data or ""
+    try:
+        place_id = int(data[len("pl_admin_request:") :])
+    except (TypeError, ValueError):
+        await _stale(update)
+        return
+    if state.get("place_id") != place_id:
+        await _stale(update)
+        return
+
+    session = SessionLocal()
+    try:
+        details = get_place_details(session, place_id)
+        manages = can_manage_place(session, ctx.user(update).id, place_id)
+    finally:
+        session.close()
+    if details is None:
+        await query.answer()
+        state.clear()
+        state.update(_new_hub())
+        await _render_phase(
+            update,
+            context,
+            state,
+            notice="Место не существует или было удалено.",
+        )
+        return
+    if manages:
+        await query.answer("У вас уже есть права на управление этим местом.")
+        await _render_phase(update, context, state)
+        return
+    await query.answer()
+    state["phase"] = "admin_request"
+    await _render_phase(update, context, state)
+
+
 async def handle_create_edit(
     update: Update, context: ContextTypes.DEFAULT_TYPE
 ) -> None:
@@ -1331,6 +1445,8 @@ async def handle_back(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             state.update(_new_hub())
     elif phase == "names":
         state["phase"] = "confirm"
+    elif phase == "admin_request":
+        state["phase"] = "confirm"
     elif phase == "alias_input":
         state["phase"] = (
             "names" if state.get("alias_return_phase") == "names" else "confirm"
@@ -1555,6 +1671,7 @@ def places_handlers() -> list[BaseHandler]:
         CallbackQueryHandler(handle_search_page, pattern=r"^pl_spage:\d+$"),
         CallbackQueryHandler(handle_open_place, pattern=r"^pl_open:\d+$"),
         CallbackQueryHandler(handle_place_confirm, pattern=r"^pl_confirm:\d+$"),
+        CallbackQueryHandler(handle_admin_request, pattern=r"^pl_admin_request:\d+$"),
         CallbackQueryHandler(handle_names, pattern=r"^pl_names:\d+$"),
         CallbackQueryHandler(handle_name_choice, pattern=r"^pl_name:\d+$"),
         CallbackQueryHandler(handle_add_name, pattern=r"^pl_addname$"),
