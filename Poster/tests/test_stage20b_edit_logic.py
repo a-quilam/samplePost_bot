@@ -125,13 +125,15 @@ class AddressValidationTests(unittest.TestCase):
     def test_address_normalizes_and_trims(self) -> None:
         self.assertEqual(clean_address_text("  ул.\u00a0Ленина,  5  "), "ул. Ленина, 5")
 
-    def test_address_rejects_empty_and_long(self) -> None:
+    def test_address_rejects_empty_but_keeps_long_text(self) -> None:
         with self.assertRaises(PlaceEditValueError):
             clean_address_text("   ")
-        with self.assertRaises(PlaceEditValueError):
-            clean_address_text("x" * 501)
-        cleaned = clean_address_text("x" * 500)
-        self.assertEqual(len(cleaned), 500)
+        # Stage 21: лимит 500 был произвольным (ограничение карточки, а не
+        # SQLite/Telegram). Длинный адрес сохраняется полностью.
+        cleaned = clean_address_text("x" * 501)
+        self.assertEqual(len(cleaned), 501)
+        very_long = clean_address_text("улица " + "x" * 5000)
+        self.assertEqual(len(very_long), 5006)
 
 
 class UrlValidationTests(unittest.TestCase):
