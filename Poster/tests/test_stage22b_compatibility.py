@@ -22,8 +22,8 @@ from sqlalchemy.orm import Session, sessionmaker
 from base import Base
 from brick_types import rules_from_json
 from migrations import DEFAULT_MIGRATIONS, run_migrations
-from models import Brick, Draft, Place, UserState
-from place_store import create_place
+from models import Brick, Draft, Place, PlaceName, UserState, utcnow
+from place_store import normalize_place_name
 from tests.stage19a_helpers import connect, make_engine, temp_db_path
 from user_store import get_or_create_user
 
@@ -62,10 +62,17 @@ class Stage22BCompatibilityTests(unittest.TestCase):
         # сессий Stage 22B. Bricks уже создан миграцией 6, поэтому его тоже
         # не отдаём create_all (иначе create_all добавил бы ревизию раньше).
         run_migrations(self.engine, DEFAULT_MIGRATIONS[:6])
+        stage23_tables = {
+            "templates",
+            "template_versions",
+            "template_version_bricks",
+            "template_snapshots",
+            "template_snapshot_bricks",
+        }
         legacy_tables = [
             table
             for name, table in Base.metadata.tables.items()
-            if name not in {"brick_sessions"}
+            if name not in {"brick_sessions"} | stage23_tables
         ]
         Base.metadata.create_all(bind=self.engine, tables=legacy_tables)
         self.Session = sessionmaker(bind=self.engine, expire_on_commit=False)
@@ -77,7 +84,21 @@ class Stage22BCompatibilityTests(unittest.TestCase):
 
     def test_stage22a_database_migrates_to_seven_and_preserves_rows(self) -> None:
         user = get_or_create_user(self.session, 9_440_001, username="owner")
-        place = create_place(self.session, "Старый клуб")
+        # Stage 22A ещё не знает шаблонов: создаём место напрямую, без
+        # сервиса Stage 23, который требует таблиц версии 8.
+        place = Place(created_by_user_id=user.id, created_at=utcnow())
+        self.session.add(place)
+        self.session.flush()
+        self.session.add(
+            PlaceName(
+                place_id=place.id,
+                name="Старый клуб",
+                name_search=normalize_place_name("Старый клуб"),
+                is_canonical=1,
+                created_by_user_id=user.id,
+                created_at=utcnow(),
+            )
+        )
         draft = Draft(
             user_id=user.id,
             title="Черновик до Stage 22B",
@@ -108,7 +129,7 @@ class Stage22BCompatibilityTests(unittest.TestCase):
         self.session.close()
 
         self.assertEqual(journal(self.path)[-1], (6, "bricks_registry"))
-        self.assertEqual(run_migrations(self.engine), 7)
+        self.assertEqual(run_migrations(self.engine), 8)
         copies = self.backup_paths()
         self.assertEqual(len(copies), 1, copies)
         backup = copies[0]
@@ -142,7 +163,7 @@ class Stage22BCompatibilityTests(unittest.TestCase):
         finally:
             backup_connection.close()
 
-        self.assertEqual(journal(self.path)[-1], (7, "brick_management"))
+        self.assertEqual(journal(self.path)[-1], (8, "templates_versions_snapshots"))
         with self.Session() as session:
             stored_draft = session.get(Draft, draft_id)
             stored_state = session.get(UserState, user.id)
@@ -164,7 +185,7 @@ class Stage22BCompatibilityTests(unittest.TestCase):
             self.assertIsNotNone(session.get(Place, place.id))
 
     def test_migration_seven_is_idempotent_and_sessions_survive_restart(self) -> None:
-        self.assertEqual(run_migrations(self.engine), 7)
+        self.assertEqual(run_migrations(self.engine), 8)
         with self.engine.begin() as connection:
             connection.exec_driver_sql(
                 "INSERT INTO brick_sessions "
@@ -172,9 +193,9 @@ class Stage22BCompatibilityTests(unittest.TestCase):
                 "VALUES (?, ?, '2026-01-01 00:00:00')",
                 (9_440_002, '{"phase":"hub","page":0}'),
             )
-        self.assertEqual(run_migrations(self.engine), 7)
-        self.assertEqual(run_migrations(self.engine), 7)
-        self.assertEqual(len(journal(self.path)), 7)
+        self.assertEqual(run_migrations(self.engine), 8)
+        self.assertEqual(run_migrations(self.engine), 8)
+        self.assertEqual(len(journal(self.path)), 8)
         self.assertEqual(
             scalar(
                 self.path,

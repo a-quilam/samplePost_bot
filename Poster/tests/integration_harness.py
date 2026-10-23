@@ -57,6 +57,7 @@ try:
     import utils.screen as screen_module
     from base import Base
     from handlers.post_creation import POST_STEPS
+    from migrations import run_migrations
     from models import Draft, UserState
 
     HARNESS_IMPORT_ERROR = None
@@ -440,6 +441,9 @@ class Harness:
         self._tmp = tempfile.TemporaryDirectory(prefix="poster_stage9_")
         db_path = Path(self._tmp.name) / "stage9.db"
         self.engine = create_engine(f"sqlite:///{db_path}")
+        # Как в production init_db: сначала нумерованные миграции (включая
+        # системные кирпичики Stage 22A), затем legacy-таблицы create_all.
+        run_migrations(self.engine)
         Base.metadata.create_all(self.engine)
         self.session_factory = sessionmaker(bind=self.engine)
 

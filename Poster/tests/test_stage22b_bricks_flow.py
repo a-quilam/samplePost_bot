@@ -51,8 +51,14 @@ class BricksUiTests(unittest.TestCase):
             )
 
     def brick_rows(self, h) -> list[Brick]:
+        # Системные кирпичики приходят миграцией 6 и не являются
+        # пользовательскими строками этого сценария.
         with h.session_factory() as session:
-            return list(session.scalars(select(Brick).order_by(Brick.id)).all())
+            return list(
+                session.scalars(
+                    select(Brick).where(Brick.scope != "system").order_by(Brick.id)
+                ).all()
+            )
 
     def answer_text(self, h) -> str:
         parts: list[str] = []

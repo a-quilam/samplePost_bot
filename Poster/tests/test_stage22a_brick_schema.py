@@ -87,6 +87,7 @@ class BrickSchemaTests(BrickDatabaseTestCase):
                 (5, "admin_transfers"),
                 (6, "bricks_registry"),
                 (7, "brick_management"),
+                (8, "templates_versions_snapshots"),
             ],
         )
         definitions = list_system_bricks(self.session)
@@ -111,8 +112,8 @@ class BrickSchemaTests(BrickDatabaseTestCase):
             (item.id, item.code, item.title, item.created_at)
             for item in list_system_bricks(self.session)
         ]
-        self.assertEqual(run_migrations(self.engine), 7)
-        self.assertEqual(run_migrations(self.engine), 7)
+        self.assertEqual(run_migrations(self.engine), 8)
+        self.assertEqual(run_migrations(self.engine), 8)
         after = [
             (item.id, item.code, item.title, item.created_at)
             for item in list_system_bricks(self.session)
@@ -125,14 +126,14 @@ class BrickSchemaTests(BrickDatabaseTestCase):
                 ).scalar_one()
             )
         self.assertEqual(count, 9)
-        self.assertEqual(len(self.journal()), 7)
+        self.assertEqual(len(self.journal()), 8)
 
     def test_restart_does_not_overwrite_a_controlled_system_definition(self) -> None:
         with self.engine.begin() as connection:
             connection.execute(
                 text("UPDATE bricks SET title='Название (изменено)' WHERE id=1")
             )
-        self.assertEqual(run_migrations(self.engine), 7)
+        self.assertEqual(run_migrations(self.engine), 8)
         self.session.expire_all()
         changed = list_system_bricks(self.session)[0]
         self.assertEqual(changed.id, 1)
@@ -381,8 +382,9 @@ class BrickSchemaTests(BrickDatabaseTestCase):
             }
         self.assertIn("bricks", tables)
         self.assertNotIn("draft_values", tables)
-        self.assertNotIn("templates", tables)
-        self.assertNotIn("template_versions", tables)
+        self.assertIn("templates", tables)
+        self.assertIn("template_versions", tables)
+        self.assertIn("template_snapshots", tables)
         self.assertNotIn("brick_proposals", tables)
 
 

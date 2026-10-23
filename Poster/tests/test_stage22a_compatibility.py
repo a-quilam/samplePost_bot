@@ -27,7 +27,7 @@ from admin_transfer_store import (
 )
 from base import Base
 from migrations import DEFAULT_MIGRATIONS, run_migrations
-from models import Draft, Place, PlaceAdmin, UserState, utcnow
+from models import Draft, Place, PlaceAdmin, PlaceName, UserState, utcnow
 from permissions import (
     can_access_admin_panel,
     can_manage_place,
@@ -36,7 +36,7 @@ from permissions import (
     is_superadmin,
 )
 from place_admin_store import get_active_place_admin
-from place_store import create_place
+from place_store import normalize_place_name
 from tests.stage19a_helpers import connect, make_engine, temp_db_path
 from user_store import get_or_create_user
 
@@ -82,10 +82,17 @@ class Stage22ACompatibilityTests(unittest.TestCase):
         # Ровно схема Stage 21: миграции 1–5 и legacy-таблицы create_all,
         # но ещё без bricks.
         run_migrations(self.engine, DEFAULT_MIGRATIONS[:5])
+        stage23_tables = {
+            "templates",
+            "template_versions",
+            "template_version_bricks",
+            "template_snapshots",
+            "template_snapshot_bricks",
+        }
         legacy_tables = [
             table
             for name, table in Base.metadata.tables.items()
-            if name not in {"bricks", "brick_sessions"}
+            if name not in {"bricks", "brick_sessions"} | stage23_tables
         ]
         Base.metadata.create_all(bind=self.engine, tables=legacy_tables)
         self.Session = sessionmaker(bind=self.engine, expire_on_commit=False)
@@ -104,13 +111,28 @@ class Stage22ACompatibilityTests(unittest.TestCase):
         )
 
     def make_place(self, name: str, *, created_by_user_id: int | None = None):
-        return create_place(
-            self.session,
-            name,
+        # Схема Stage 21 ещё не знает шаблонов, поэтому создаём её строки
+        # напрямую, не вызывая сервис Stage 23.
+        place = Place(
             created_by_user_id=created_by_user_id,
             address="улица Ленина, 1",
             url="https://example.com/place",
+            created_at=utcnow(),
         )
+        self.session.add(place)
+        self.session.flush()
+        self.session.add(
+            PlaceName(
+                place_id=place.id,
+                name=name,
+                name_search=normalize_place_name(name),
+                is_canonical=1,
+                created_by_user_id=created_by_user_id,
+                created_at=utcnow(),
+            )
+        )
+        self.session.commit()
+        return place
 
     def make_admin(self, place_id: int, user_id: int) -> PlaceAdmin:
         row = PlaceAdmin(
@@ -177,7 +199,7 @@ class Stage22ACompatibilityTests(unittest.TestCase):
                 (5, "admin_transfers"),
             ],
         )
-        self.assertEqual(run_migrations(self.engine), 7)
+        self.assertEqual(run_migrations(self.engine), 8)
 
         copies = self.backup_paths()
         self.assertEqual(len(copies), 1, copies)
@@ -218,7 +240,7 @@ class Stage22ACompatibilityTests(unittest.TestCase):
         finally:
             connection.close()
 
-        self.assertEqual(journal(self.path)[-1], (7, "brick_management"))
+        self.assertEqual(journal(self.path)[-1], (8, "templates_versions_snapshots"))
         with self.Session() as session:
             stored_draft = session.get(Draft, 7)
             stored_state = session.get(UserState, user.telegram_user_id)
@@ -265,7 +287,7 @@ class Stage22ACompatibilityTests(unittest.TestCase):
         assignment = self.make_admin(place.id, admin.id)
         self.session.close()
 
-        self.assertEqual(run_migrations(self.engine), 7)
+        self.assertEqual(run_migrations(self.engine), 8)
         with self.Session() as session:
             self.assertTrue(is_place_admin(session, admin.telegram_user_id, place.id))
             self.assertTrue(can_manage_place(session, admin.telegram_user_id, place.id))
@@ -314,7 +336,7 @@ class Stage22ACompatibilityTests(unittest.TestCase):
         transfer_id = created.transfer.transfer_id
         self.session.close()
 
-        self.assertEqual(run_migrations(self.engine), 7)
+        self.assertEqual(run_migrations(self.engine), 8)
         with self.Session() as session:
             pending = get_transfer_view(session, transfer_id)
             self.assertIsNotNone(pending)
