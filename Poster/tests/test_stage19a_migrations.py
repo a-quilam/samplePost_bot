@@ -76,7 +76,7 @@ class MigrationMechanismTests(unittest.TestCase):
 
         self.assertEqual(version, LATEST_VERSION)
         tables = table_names(self.path)
-        self.assertTrue({"users", "places", "place_names"} <= tables)
+        self.assertTrue({"users", "places", "place_names", "admin_transfers"} <= tables)
         self.assertIn("schema_migrations", tables)
         self.assertEqual(
             _journal(self.path),
@@ -85,6 +85,7 @@ class MigrationMechanismTests(unittest.TestCase):
                 (2, "place_contacts_and_ui_state"),
                 (3, "place_admins_and_admin_ui_state"),
                 (4, "place_edit_log"),
+                (5, "admin_transfers"),
             ],
         )
 
@@ -168,12 +169,13 @@ class MigrationMechanismTests(unittest.TestCase):
                 (2, "place_contacts_and_ui_state"),
                 (3, "place_admins_and_admin_ui_state"),
                 (4, "place_edit_log"),
+                (5, "admin_transfers"),
             ],
         )
 
         # Повторный старт (как рестарт процесса) не переприменяет миграции.
         run_init_db_subprocess(self.path)
-        self.assertEqual(len(_journal(self.path)), 4)
+        self.assertEqual(len(_journal(self.path)), 5)
 
     def test_full_init_upgrades_ancient_drafts_columns(self) -> None:
         create_old_schema(self.path, ancient=True)

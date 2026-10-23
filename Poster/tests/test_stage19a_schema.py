@@ -328,7 +328,6 @@ class PlaceSchemaTests(unittest.TestCase):
             "templates",
             "template_versions",
             "draft_values",
-            "admin_transfers",
             "brick_proposals",
         }
         self.assertFalse(forbidden & tables)

@@ -270,11 +270,83 @@ MIGRATION_4_PLACE_EDIT_LOG = Migration(
     ),
 )
 
+# --- Версия 5: передачи администратора места (Stage 21) ---------------------
+
+MIGRATION_5_ADMIN_TRANSFERS = Migration(
+    version=5,
+    name="admin_transfers",
+    statements=(
+        # Одно предложение передачи. Сырой токен ссылки-приглашения не
+        # хранится: только SHA-256. from_assignment_id фиксирует назначение,
+        # на основании которого начата передача; после замены администратора
+        # предложение становится непригодным для подтверждения.
+        """
+        CREATE TABLE admin_transfers (
+            id INTEGER NOT NULL PRIMARY KEY,
+            place_id INTEGER NOT NULL,
+            from_user_id INTEGER NOT NULL,
+            from_assignment_id INTEGER,
+            to_user_id INTEGER,
+            opened_by_user_id INTEGER,
+            to_username VARCHAR(255),
+            token_hash VARCHAR(64),
+            status TEXT NOT NULL,
+            created_at DATETIME NOT NULL,
+            expires_at DATETIME NOT NULL,
+            opened_at DATETIME,
+            confirmed_at DATETIME,
+            closed_at DATETIME,
+            notified_at DATETIME,
+            CONSTRAINT ck_admin_transfers_status
+                CHECK (status IN (
+                    'pending', 'confirmed', 'rejected', 'cancelled',
+                    'expired', 'superseded'
+                )),
+            CONSTRAINT fk_admin_transfers_place_id
+                FOREIGN KEY (place_id) REFERENCES places (id)
+                ON DELETE CASCADE,
+            CONSTRAINT fk_admin_transfers_from_user_id
+                FOREIGN KEY (from_user_id) REFERENCES users (id)
+                ON DELETE CASCADE,
+            CONSTRAINT fk_admin_transfers_from_assignment_id
+                FOREIGN KEY (from_assignment_id) REFERENCES place_admins (id)
+                ON DELETE SET NULL,
+            CONSTRAINT fk_admin_transfers_to_user_id
+                FOREIGN KEY (to_user_id) REFERENCES users (id)
+                ON DELETE SET NULL,
+            CONSTRAINT fk_admin_transfers_opened_by_user_id
+                FOREIGN KEY (opened_by_user_id) REFERENCES users (id)
+                ON DELETE SET NULL
+        )
+        """,
+        "CREATE INDEX ix_admin_transfers_place_id ON admin_transfers (place_id)",
+        "CREATE INDEX ix_admin_transfers_from_user_id "
+        "ON admin_transfers (from_user_id)",
+        "CREATE INDEX ix_admin_transfers_to_user_id " "ON admin_transfers (to_user_id)",
+        # Не более одного активного предложения на место. Просроченные и
+        # закрытые строки сохраняются как аудит и новому предложению не мешают.
+        """
+        CREATE UNIQUE INDEX ux_admin_transfers_one_pending_place
+            ON admin_transfers (place_id) WHERE status = 'pending'
+        """,
+        """
+        CREATE INDEX ix_admin_transfers_pending_to_user
+            ON admin_transfers (to_user_id) WHERE status = 'pending'
+        """,
+        # Токен приглашения уникален; NULL у передач известному получателю.
+        """
+        CREATE UNIQUE INDEX ux_admin_transfers_token_hash
+            ON admin_transfers (token_hash) WHERE token_hash IS NOT NULL
+        """,
+    ),
+)
+
 DEFAULT_MIGRATIONS: tuple[Migration, ...] = (
     MIGRATION_1_USERS_PLACES,
     MIGRATION_2_PLACE_CONTACTS_UI,
     MIGRATION_3_PLACE_ADMINS,
     MIGRATION_4_PLACE_EDIT_LOG,
+    MIGRATION_5_ADMIN_TRANSFERS,
 )
 
 LATEST_VERSION = DEFAULT_MIGRATIONS[-1].version if DEFAULT_MIGRATIONS else 0
