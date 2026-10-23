@@ -27,7 +27,8 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import date, datetime
 
-from sqlalchemy import ColumnElement, and_, or_, select
+from sqlalchemy import ColumnElement, and_, func, or_, select
+from sqlalchemy import update as sqlalchemy_update
 from sqlalchemy.exc import IntegrityError, OperationalError
 from sqlalchemy.orm import Session
 
@@ -40,6 +41,7 @@ from brick_types import (
     BRICK_SOURCE_CONTEXT,
     BRICK_SOURCE_PLACE,
     BRICK_STATUS_ACTIVE,
+    BRICK_STATUS_ARCHIVED,
     FORBIDDEN_BRICK_CODES,
     SYSTEM_BRICK_CODES,
     SYSTEM_BRICKS,
@@ -109,6 +111,7 @@ class BrickDefinition:
     owner_user_id: int | None
     rules: dict[str, object]
     status: str
+    revision: int
     created_by_user_id: int | None
     created_at: datetime
     updated_at: datetime | None
@@ -116,6 +119,43 @@ class BrickDefinition:
     @property
     def is_active(self) -> bool:
         return self.status == BRICK_STATUS_ACTIVE
+
+
+@dataclass(frozen=True)
+class BrickCodeCandidates:
+    """
+    Кандидаты на один и тот же `[код]` в порядке видимости Stage 22A.
+
+    Для будущего редактора шаблонов: если `ambiguous`, одного кода недостаточно
+    для однозначного намерения автора. Шаблон обязан сохранить выбранный
+    `brick_id`, а не переразрешать код при каждом применении. Текущий runtime
+    по-прежнему использует `selected` (system → place → personal).
+    """
+
+    code: str | None
+    candidates: tuple[BrickDefinition, ...]
+    selected: BrickDefinition | None
+    ambiguous: bool
+    blocked_by_archived_system: bool = False
+
+
+@dataclass(frozen=True)
+class BrickMutationResult:
+    """Понятный результат изменяющей операции над личным кирпичиком."""
+
+    status: str
+    brick: BrickDefinition | None = None
+    message: str | None = None
+
+    @property
+    def ok(self) -> bool:
+        return self.status in {
+            "updated",
+            "archived",
+            "restored",
+            "already_active",
+            "already_archived",
+        }
 
 
 @dataclass(frozen=True)
@@ -140,6 +180,7 @@ def _snapshot(row: Brick) -> BrickDefinition:
         owner_user_id=row.owner_user_id,
         rules=rules_from_json(row.value_type, row.rules_json),
         status=row.status,
+        revision=row.revision,
         created_by_user_id=row.created_by_user_id,
         created_at=row.created_at,
         updated_at=row.updated_at,
@@ -269,29 +310,35 @@ def get_visible_brick(
     return None
 
 
-def resolve_brick_by_code(
+def resolve_brick_code_candidates(
     session: Session,
     code: str,
     *,
     viewer_telegram_user_id: int | None = None,
     place_id: int | None = None,
     include_archived: bool = False,
-) -> BrickDefinition | None:
+) -> BrickCodeCandidates:
     """
-    Детерминированное разрешение текстового `[код]`.
+    Все видимые кандидаты на `[код]` и детерминированный выбор runtime.
 
-    Порядок строго фиксирован: system → place выбранного места → personal
-    текущего пользователя. Внутри каждой области код уникален частичным
-    UNIQUE-индексом. Системный код зарезервирован навсегда и не может быть
-    подменён личным/местным; архивный системный код не «проваливается» в
-    другую область. Если у места и пользователя есть одинаковый несистемный
-    код, побеждает место — это явное правило, а не порядок строк SQL.
+    Порядок кандидатов: system → place выбранного места → personal зрителя.
+    Внутри области код уникален. Системный код зарезервирован навсегда: его
+    архивная строка не «проваливается» в другую область.
+
+    Для будущего шаблона `candidates` важнее одного `selected`: если
+    `ambiguous=True`, редактор обязан попросить пользователя выбрать конкретный
+    `brick_id` и сохранить его. Повторное разрешение кода при применении
+    шаблона запрещено — иначе `[стоимость]` могла бы незаметно сменить
+    значение после появления одноимённого кирпичика места.
     """
     try:
         canonical = normalize_brick_code(code)
     except ValueError:
-        return None
+        return BrickCodeCandidates(
+            code=None, candidates=(), selected=None, ambiguous=False
+        )
     status_filter = [] if include_archived else [Brick.status == BRICK_STATUS_ACTIVE]
+    candidates: list[Brick] = []
 
     system_row = session.scalar(
         select(Brick).where(
@@ -301,10 +348,16 @@ def resolve_brick_by_code(
     )
     if system_row is not None:
         if not include_archived and system_row.status != BRICK_STATUS_ACTIVE:
-            return None
-        return _snapshot(system_row)
+            return BrickCodeCandidates(
+                code=canonical,
+                candidates=(),
+                selected=None,
+                ambiguous=False,
+                blocked_by_archived_system=True,
+            )
+        candidates.append(system_row)
 
-    if place_id is not None:
+    if not candidates and place_id is not None:
         place_row = session.scalar(
             select(Brick).where(
                 Brick.scope == BRICK_SCOPE_PLACE,
@@ -314,21 +367,72 @@ def resolve_brick_by_code(
             )
         )
         if place_row is not None:
-            return _snapshot(place_row)
+            candidates.append(place_row)
 
-    viewer = _actor_user(session, viewer_telegram_user_id)
-    if viewer is not None:
-        personal_row = session.scalar(
-            select(Brick).where(
-                Brick.scope == BRICK_SCOPE_PERSONAL,
-                Brick.owner_user_id == viewer.id,
-                Brick.code == canonical,
-                *status_filter,
+    # Системный код не может сосуществовать с несистемным (триггер БД), но
+    # проверка `not candidates` сохраняет тот же приоритет и на legacy-базах
+    # без триггеров. Для несистемного кода место и личный кирпичик могут
+    # совпасть — тогда кандидатов два, и это осознанная неоднозначность.
+    if not candidates:
+        viewer = _actor_user(session, viewer_telegram_user_id)
+        if viewer is not None:
+            personal_row = session.scalar(
+                select(Brick).where(
+                    Brick.scope == BRICK_SCOPE_PERSONAL,
+                    Brick.owner_user_id == viewer.id,
+                    Brick.code == canonical,
+                    *status_filter,
+                )
             )
-        )
-        if personal_row is not None:
-            return _snapshot(personal_row)
-    return None
+            if personal_row is not None:
+                candidates.append(personal_row)
+    elif place_id is not None:
+        viewer = _actor_user(session, viewer_telegram_user_id)
+        if viewer is not None:
+            personal_row = session.scalar(
+                select(Brick).where(
+                    Brick.scope == BRICK_SCOPE_PERSONAL,
+                    Brick.owner_user_id == viewer.id,
+                    Brick.code == canonical,
+                    *status_filter,
+                )
+            )
+            if personal_row is not None and all(
+                row.id != personal_row.id for row in candidates
+            ):
+                candidates.append(personal_row)
+
+    snapshots = tuple(_snapshot(row) for row in candidates)
+    return BrickCodeCandidates(
+        code=canonical,
+        candidates=snapshots,
+        selected=snapshots[0] if snapshots else None,
+        ambiguous=len(snapshots) > 1,
+    )
+
+
+def resolve_brick_by_code(
+    session: Session,
+    code: str,
+    *,
+    viewer_telegram_user_id: int | None = None,
+    place_id: int | None = None,
+    include_archived: bool = False,
+) -> BrickDefinition | None:
+    """
+    Детерминированное разрешение текстового `[код]` (system → place → personal).
+
+    Сохранено для текущего runtime; будущая привязка шаблона должна вызывать
+    `resolve_brick_code_candidates` и сохранять конкретный `brick_id`, если
+    кандидатов несколько.
+    """
+    return resolve_brick_code_candidates(
+        session,
+        code,
+        viewer_telegram_user_id=viewer_telegram_user_id,
+        place_id=place_id,
+        include_archived=include_archived,
+    ).selected
 
 
 # --- Списки доступных определений -------------------------------------------
@@ -424,17 +528,97 @@ def list_personal_bricks(
     actor_telegram_user_id: int | None,
     *,
     include_archived: bool = False,
+    status_filter: str | None = None,
+    limit: int | None = None,
+    offset: int = 0,
 ) -> list[BrickDefinition]:
-    """Личные определения только этого пользователя."""
+    """
+    Личные определения только этого пользователя.
+
+    `status_filter` (active/archived) имеет приоритет над `include_archived`.
+    `limit/offset` — серверная пагинация для Telegram-списка. Чужие личные
+    кирпичики не попадают в выборку ни при каких параметрах.
+    """
     actor = _require_actor_user(session, actor_telegram_user_id)
+    if status_filter is not None and status_filter not in {
+        BRICK_STATUS_ACTIVE,
+        BRICK_STATUS_ARCHIVED,
+    }:
+        raise BrickError(f"Неизвестный статус кирпичика: {status_filter!r}.")
+    if limit is not None and (
+        isinstance(limit, bool) or not isinstance(limit, int) or limit <= 0
+    ):
+        raise BrickError("limit должен быть положительным целым числом.")
+    if isinstance(offset, bool) or not isinstance(offset, int) or offset < 0:
+        raise BrickError("offset должен быть неотрицательным целым числом.")
     statement = select(Brick).where(
+        Brick.scope == BRICK_SCOPE_PERSONAL,
+        Brick.owner_user_id == actor.id,
+    )
+    if status_filter is not None:
+        statement = statement.where(Brick.status == status_filter)
+    elif not include_archived:
+        statement = statement.where(Brick.status == BRICK_STATUS_ACTIVE)
+    statement = statement.order_by(Brick.code, Brick.id)
+    if offset:
+        statement = statement.offset(offset)
+    if limit is not None:
+        statement = statement.limit(limit)
+    rows = list(session.scalars(statement).all())
+    return [_snapshot(row) for row in rows]
+
+
+def count_personal_bricks(
+    session: Session,
+    actor_telegram_user_id: int | None,
+    *,
+    include_archived: bool = False,
+    status_filter: str | None = None,
+) -> int:
+    """Количество личных кирпичиков владельца без загрузки всех строк."""
+    actor = _require_actor_user(session, actor_telegram_user_id)
+    if status_filter is not None and status_filter not in {
+        BRICK_STATUS_ACTIVE,
+        BRICK_STATUS_ARCHIVED,
+    }:
+        raise BrickError(f"Неизвестный статус кирпичика: {status_filter!r}.")
+    statement = select(func.count(Brick.id)).where(
+        Brick.scope == BRICK_SCOPE_PERSONAL,
+        Brick.owner_user_id == actor.id,
+    )
+    if status_filter is not None:
+        statement = statement.where(Brick.status == status_filter)
+    elif not include_archived:
+        statement = statement.where(Brick.status == BRICK_STATUS_ACTIVE)
+    return int(session.scalar(statement) or 0)
+
+
+def get_personal_brick(
+    session: Session,
+    actor_telegram_user_id: int | None,
+    brick_id: int,
+    *,
+    include_archived: bool = True,
+) -> BrickDefinition | None:
+    """
+    Личный кирпичик по ID только для владельца.
+
+    Чужой/системный/местный ID возвращает None, не раскрывая определение.
+    """
+    if isinstance(brick_id, bool) or not isinstance(brick_id, int) or brick_id <= 0:
+        return None
+    actor = _actor_user(session, actor_telegram_user_id)
+    if actor is None:
+        return None
+    statement = select(Brick).where(
+        Brick.id == brick_id,
         Brick.scope == BRICK_SCOPE_PERSONAL,
         Brick.owner_user_id == actor.id,
     )
     if not include_archived:
         statement = statement.where(Brick.status == BRICK_STATUS_ACTIVE)
-    rows = list(session.scalars(statement.order_by(Brick.code, Brick.id)).all())
-    return [_snapshot(row) for row in rows]
+    row = session.scalar(statement)
+    return _snapshot(row) if row is not None else None
 
 
 def list_place_bricks(
@@ -465,6 +649,7 @@ def check_code_availability(
     scope: str,
     place_id: int | None = None,
     owner_user_id: int | None = None,
+    exclude_brick_id: int | None = None,
 ) -> BrickCodeAvailability:
     """
     Проверяет технический код для области без записи.
@@ -472,6 +657,11 @@ def check_code_availability(
     Системные коды зарезервированы во всех областях. Повтор кода запрещён
     внутри области: `(place_id, code)` или `(owner_user_id, code)`. Два
     разных пользователя/места могут иметь одинаковый несистемный код.
+    `exclude_brick_id` применяется только при редактировании того же
+    кирпичика, чтобы неизменённый код не считался конфликтом с собой.
+
+    Архивные кирпичики участвуют в проверке: код остаётся занятым навсегда.
+    Это исключает неоднозначность при восстановлении и старых ссылках.
     """
     if scope not in BRICK_SCOPES:
         raise BrickError(f"Неизвестная область кирпичика: {scope!r}.")
@@ -481,6 +671,12 @@ def check_code_availability(
         raise BrickError("Для области personal нужен owner_user_id.")
     if scope == BRICK_SCOPE_SYSTEM and (place_id or owner_user_id):
         raise BrickError("Системный кирпичик не имеет владельца.")
+    if exclude_brick_id is not None and (
+        isinstance(exclude_brick_id, bool)
+        or not isinstance(exclude_brick_id, int)
+        or exclude_brick_id <= 0
+    ):
+        raise BrickError("exclude_brick_id должен быть положительным целым числом.")
 
     try:
         canonical = normalize_brick_code(code)
@@ -520,7 +716,10 @@ def check_code_availability(
             ),
         )
     if scope == BRICK_SCOPE_SYSTEM:
-        any_row = session.scalar(select(Brick.id).where(Brick.code == canonical))
+        statement = select(Brick.id).where(Brick.code == canonical)
+        if exclude_brick_id is not None:
+            statement = statement.where(Brick.id != exclude_brick_id)
+        any_row = session.scalar(statement)
         if system_row is not None or any_row is not None or system_reserved:
             return BrickCodeAvailability(
                 code=canonical,
@@ -531,21 +730,20 @@ def check_code_availability(
         return BrickCodeAvailability(code=canonical, available=True)
 
     if scope == BRICK_SCOPE_PLACE:
-        duplicate = session.scalar(
-            select(Brick.id).where(
-                Brick.scope == BRICK_SCOPE_PLACE,
-                Brick.place_id == place_id,
-                Brick.code == canonical,
-            )
+        statement = select(Brick.id).where(
+            Brick.scope == BRICK_SCOPE_PLACE,
+            Brick.place_id == place_id,
+            Brick.code == canonical,
         )
     else:
-        duplicate = session.scalar(
-            select(Brick.id).where(
-                Brick.scope == BRICK_SCOPE_PERSONAL,
-                Brick.owner_user_id == owner_user_id,
-                Brick.code == canonical,
-            )
+        statement = select(Brick.id).where(
+            Brick.scope == BRICK_SCOPE_PERSONAL,
+            Brick.owner_user_id == owner_user_id,
+            Brick.code == canonical,
         )
+    if exclude_brick_id is not None:
+        statement = statement.where(Brick.id != exclude_brick_id)
+    duplicate = session.scalar(statement)
     if duplicate is not None:
         return BrickCodeAvailability(
             code=canonical,
@@ -713,6 +911,312 @@ def create_system_brick(
         place_id=None,
         owner_user_id=None,
     )
+
+
+# --- Изменение, архив и восстановление личных кирпичиков -------------------
+
+
+def _owned_personal_brick(
+    session: Session,
+    actor: User,
+    brick_id: int,
+) -> Brick | None:
+    """Строка только личного кирпичика этого пользователя, без утечки чужого."""
+    if isinstance(brick_id, bool) or not isinstance(brick_id, int) or brick_id <= 0:
+        return None
+    return session.scalar(
+        select(Brick).where(
+            Brick.id == brick_id,
+            Brick.scope == BRICK_SCOPE_PERSONAL,
+            Brick.owner_user_id == actor.id,
+        )
+    )
+
+
+def _mutation(
+    status: str,
+    row: Brick | None,
+    message: str | None = None,
+) -> BrickMutationResult:
+    return BrickMutationResult(
+        status=status,
+        brick=_snapshot(row) if row is not None else None,
+        message=message,
+    )
+
+
+def _reload_brick(session: Session, brick_id: int) -> Brick | None:
+    session.expire_all()
+    return session.get(Brick, brick_id)
+
+
+def _commit_conditional_brick_update(
+    session: Session,
+    *,
+    brick_id: int,
+    actor_id: int,
+    expected_revision: int,
+    values: Mapping[str, object],
+    required_status: str,
+) -> bool:
+    """
+    Условный UPDATE с проверкой владельца, статуса и ревизии.
+
+    Сравнение и запись выполняются одним SQL-оператором, поэтому два
+    конкурентных редактора не могут оба получить rowcount=1. Коммит — одна
+    транзакция; ошибка SQLite откатывает её целиком.
+    """
+    statement = (
+        sqlalchemy_update(Brick)
+        .where(
+            Brick.id == brick_id,
+            Brick.scope == BRICK_SCOPE_PERSONAL,
+            Brick.owner_user_id == actor_id,
+            Brick.status == required_status,
+            Brick.revision == expected_revision,
+        )
+        .values(
+            **values,
+            revision=expected_revision + 1,
+            updated_at=utcnow(),
+        )
+        .execution_options(synchronize_session=False)
+    )
+    result = session.execute(statement)
+    if getattr(result, "rowcount", 0) != 1:
+        session.rollback()
+        return False
+    session.commit()
+    return True
+
+
+def update_personal_brick(
+    session: Session,
+    *,
+    actor_telegram_user_id: int,
+    brick_id: int,
+    expected_revision: int,
+    code: object,
+    title: object,
+    rules: Mapping[str, object] | str | None,
+) -> BrickMutationResult:
+    """
+    Меняет название, код и допустимые настройки личного кирпичика.
+
+    Тип не является параметром и не может измениться. `brick_id` сохраняется.
+    При несовпадении ревизии возвращается `stale`, при занятом коде —
+    `conflict`; обе операции не пишут частичных данных.
+    """
+    actor = _require_actor_user(session, actor_telegram_user_id)
+    row = _owned_personal_brick(session, actor, brick_id)
+    if row is None:
+        return _mutation(
+            "not_found",
+            None,
+            "Кирпичик не найден. Возможно, он уже удалён или принадлежит другому.",
+        )
+    if row.status != BRICK_STATUS_ACTIVE:
+        return _mutation(
+            "archived",
+            row,
+            "Архивный кирпичик нельзя редактировать. Сначала восстановите его.",
+        )
+    if (
+        isinstance(expected_revision, bool)
+        or not isinstance(expected_revision, int)
+        or expected_revision <= 0
+        or row.revision != expected_revision
+    ):
+        return _mutation(
+            "stale",
+            row,
+            "Кирпичик уже изменился в другом окне. Откройте его заново.",
+        )
+
+    canonical_code = validate_brick_code(code)
+    cleaned_title = clean_brick_title(title)
+    validated_rules = parse_rules(row.value_type, rules)
+    availability = check_code_availability(
+        session,
+        canonical_code,
+        scope=BRICK_SCOPE_PERSONAL,
+        owner_user_id=actor.id,
+        exclude_brick_id=row.id,
+    )
+    if not availability.available:
+        return _mutation(
+            "conflict",
+            row,
+            availability.message or "Код уже используется.",
+        )
+
+    values = {
+        "code": canonical_code,
+        "title": cleaned_title,
+        "rules_json": rules_to_json(row.value_type, validated_rules),
+    }
+    try:
+        updated = _commit_conditional_brick_update(
+            session,
+            brick_id=row.id,
+            actor_id=actor.id,
+            expected_revision=expected_revision,
+            values=values,
+            required_status=BRICK_STATUS_ACTIVE,
+        )
+    except (IntegrityError, OperationalError):
+        session.rollback()
+        return _mutation(
+            "conflict",
+            _reload_brick(session, brick_id),
+            "Не удалось сохранить изменения: код занят или одновременная "
+            "запись не завершилась. Повторите попытку.",
+        )
+    except Exception:
+        session.rollback()
+        raise
+    if not updated:
+        current = _reload_brick(session, brick_id)
+        return _mutation(
+            "stale",
+            current,
+            "Кирпичик уже изменился в другом окне. Откройте его заново.",
+        )
+    current = _reload_brick(session, brick_id)
+    return _mutation("updated", current, "Изменения сохранены.")
+
+
+def archive_personal_brick(
+    session: Session,
+    *,
+    actor_telegram_user_id: int,
+    brick_id: int,
+    expected_revision: int,
+) -> BrickMutationResult:
+    """
+    Мягко архивирует личный кирпичик владельца.
+
+    Строка не удаляется, ID и код не меняются. Архивный код остаётся занятым,
+    поэтому восстановление однозначно. Системный/чужой ID даёт `not_found`.
+    """
+    actor = _require_actor_user(session, actor_telegram_user_id)
+    row = _owned_personal_brick(session, actor, brick_id)
+    if row is None:
+        return _mutation(
+            "not_found",
+            None,
+            "Кирпичик не найден или принадлежит другому пользователю.",
+        )
+    if row.status == BRICK_STATUS_ARCHIVED:
+        return _mutation("already_archived", row, "Кирпичик уже в архиве.")
+    if (
+        isinstance(expected_revision, bool)
+        or not isinstance(expected_revision, int)
+        or expected_revision <= 0
+        or row.revision != expected_revision
+    ):
+        return _mutation(
+            "stale",
+            row,
+            "Кирпичик уже изменился в другом окне. Откройте его заново.",
+        )
+    try:
+        updated = _commit_conditional_brick_update(
+            session,
+            brick_id=row.id,
+            actor_id=actor.id,
+            expected_revision=expected_revision,
+            values={"status": BRICK_STATUS_ARCHIVED},
+            required_status=BRICK_STATUS_ACTIVE,
+        )
+    except (IntegrityError, OperationalError):
+        session.rollback()
+        return _mutation(
+            "conflict",
+            _reload_brick(session, brick_id),
+            "Не удалось переместить кирпичик в архив из-за ошибки базы. "
+            "Повторите попытку.",
+        )
+    except Exception:
+        session.rollback()
+        raise
+    if not updated:
+        current = _reload_brick(session, brick_id)
+        if current is not None and current.status == BRICK_STATUS_ARCHIVED:
+            return _mutation("already_archived", current, "Кирпичик уже в архиве.")
+        return _mutation(
+            "stale",
+            current,
+            "Кирпичик уже изменился в другом окне. Откройте его заново.",
+        )
+    current = _reload_brick(session, brick_id)
+    return _mutation("archived", current, "Кирпичик перемещён в архив.")
+
+
+def restore_personal_brick(
+    session: Session,
+    *,
+    actor_telegram_user_id: int,
+    brick_id: int,
+    expected_revision: int,
+) -> BrickMutationResult:
+    """
+    Восстанавливает архивный личный кирпичик владельца.
+
+    Код не переприсваивается и остаётся тем же: пока кирпичик был в архиве,
+    код был занят, поэтому конфликт с новым кирпичиком невозможен.
+    """
+    actor = _require_actor_user(session, actor_telegram_user_id)
+    row = _owned_personal_brick(session, actor, brick_id)
+    if row is None:
+        return _mutation(
+            "not_found",
+            None,
+            "Кирпичик не найден или принадлежит другому пользователю.",
+        )
+    if row.status == BRICK_STATUS_ACTIVE:
+        return _mutation("already_active", row, "Кирпичик уже активен.")
+    if (
+        isinstance(expected_revision, bool)
+        or not isinstance(expected_revision, int)
+        or expected_revision <= 0
+        or row.revision != expected_revision
+    ):
+        return _mutation(
+            "stale",
+            row,
+            "Кирпичик уже изменился в другом окне. Откройте его заново.",
+        )
+    try:
+        updated = _commit_conditional_brick_update(
+            session,
+            brick_id=row.id,
+            actor_id=actor.id,
+            expected_revision=expected_revision,
+            values={"status": BRICK_STATUS_ACTIVE},
+            required_status=BRICK_STATUS_ARCHIVED,
+        )
+    except (IntegrityError, OperationalError):
+        session.rollback()
+        return _mutation(
+            "conflict",
+            _reload_brick(session, brick_id),
+            "Не удалось восстановить кирпичик из-за ошибки базы. " "Повторите попытку.",
+        )
+    except Exception:
+        session.rollback()
+        raise
+    if not updated:
+        current = _reload_brick(session, brick_id)
+        if current is not None and current.status == BRICK_STATUS_ACTIVE:
+            return _mutation("already_active", current, "Кирпичик уже активен.")
+        return _mutation(
+            "stale",
+            current,
+            "Кирпичик уже изменился в другом окне. Откройте его заново.",
+        )
+    current = _reload_brick(session, brick_id)
+    return _mutation("restored", current, "Кирпичик восстановлен.")
 
 
 # --- Источник значения и пять состояний -------------------------------------

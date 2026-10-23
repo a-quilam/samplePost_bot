@@ -610,6 +610,43 @@ MIGRATION_6_BRICKS = Migration(
     ),
 )
 
+# --- Версия 7: управление личными кирпичиками (Stage 22B) ------------------
+
+
+MIGRATION_7_BRICK_MANAGEMENT = Migration(
+    version=7,
+    name="brick_management",
+    statements=(
+        # Ревизия — явная оптимистическая блокировка для редактирования.
+        # Она не заменяет id и не участвует в ссылках шаблонов.
+        "ALTER TABLE bricks ADD COLUMN revision INTEGER NOT NULL DEFAULT 1",
+        # Состояние Telegram-конструктора отделено от WIP-поста, «Мест» и
+        # админки: переход в другой раздел не смешивает текстовые вводы.
+        """
+        CREATE TABLE brick_sessions (
+            telegram_user_id INTEGER NOT NULL PRIMARY KEY,
+            payload TEXT NOT NULL,
+            updated_at DATETIME NOT NULL,
+            CONSTRAINT ck_brick_sessions_payload_object CHECK (
+                json_valid(payload) AND json_type(payload) = 'object'
+            )
+        )
+        """,
+        # Ревизия может только расти. Условный UPDATE в сервисе дополнительно
+        # проверяет ожидаемую ревизию, поэтому потерянное обновление не
+        # проходит даже при конкурентном редактировании.
+        """
+        CREATE TRIGGER trg_bricks_revision_increases
+        BEFORE UPDATE OF revision ON bricks
+        FOR EACH ROW
+        WHEN NEW.revision <= OLD.revision
+        BEGIN
+            SELECT RAISE(ABORT, 'brick revision must increase');
+        END
+        """,
+    ),
+)
+
 DEFAULT_MIGRATIONS: tuple[Migration, ...] = (
     MIGRATION_1_USERS_PLACES,
     MIGRATION_2_PLACE_CONTACTS_UI,
@@ -617,6 +654,7 @@ DEFAULT_MIGRATIONS: tuple[Migration, ...] = (
     MIGRATION_4_PLACE_EDIT_LOG,
     MIGRATION_5_ADMIN_TRANSFERS,
     MIGRATION_6_BRICKS,
+    MIGRATION_7_BRICK_MANAGEMENT,
 )
 
 LATEST_VERSION = DEFAULT_MIGRATIONS[-1].version if DEFAULT_MIGRATIONS else 0

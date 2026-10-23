@@ -473,7 +473,29 @@ class PlaceSession(Base):
         return f"<PlaceSession(telegram_user_id={self.telegram_user_id})>"
 
 
-# --- Реестр кирпичиков (Stage 22A) ------------------------------------------
+# --- Реестр кирпичиков (Stage 22A) и управление (Stage 22B) -----------------
+
+
+class BrickSession(Base):
+    """
+    Состояние Telegram-конструктора личных кирпичиков (Stage 22B).
+
+    Хранится отдельно от WIP-поста, «Мест» и админки: незавершённый черновик
+    определения не должен перехватывать текст другого сценария. Payload
+    ограничен UI-фазой и черновиком определения; значения анонсов здесь не
+    хранятся. Ключ — Telegram user ID, потому что это интерфейсное состояние.
+    """
+
+    __tablename__ = "brick_sessions"
+
+    telegram_user_id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    payload: Mapped[str] = mapped_column(Text, nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime, default=utcnow, onupdate=utcnow, nullable=False
+    )
+
+    def __repr__(self) -> str:
+        return f"<BrickSession(telegram_user_id={self.telegram_user_id})>"
 
 
 class Brick(Base):
@@ -514,6 +536,12 @@ class Brick(Base):
     )
     rules_json: Mapped[str | None] = mapped_column(Text, nullable=True)
     status: Mapped[str] = mapped_column(Text, nullable=False, default="active")
+    # Оптимистическая блокировка Stage 22B: увеличивается только сервисом при
+    # успешном изменении/архивировании/восстановлении. Идентификатор brick_id
+    # при этом не меняется.
+    revision: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=1, server_default=text("1")
+    )
     created_by_user_id: Mapped[int | None] = mapped_column(
         Integer,
         ForeignKey("users.id", ondelete="SET NULL"),
