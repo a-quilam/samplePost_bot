@@ -238,10 +238,43 @@ MIGRATION_3_PLACE_ADMINS = Migration(
     ),
 )
 
+# --- Версия 4: аудит административных изменений данных места (Stage 20B) ------
+
+MIGRATION_4_PLACE_EDIT_LOG = Migration(
+    version=4,
+    name="place_edit_log",
+    statements=(
+        # Аудит редактирования места (Stage 20B): одна строка на успешную
+        # операцию. Секретов нет: здесь только поля места (названия, адрес,
+        # ссылка) и внутренние ключи.
+        """
+        CREATE TABLE place_edit_log (
+            id INTEGER NOT NULL PRIMARY KEY,
+            place_id INTEGER NOT NULL,
+            actor_user_id INTEGER,
+            action TEXT NOT NULL,
+            old_value TEXT,
+            new_value TEXT,
+            created_at DATETIME NOT NULL,
+            CONSTRAINT fk_place_edit_log_place_id
+                FOREIGN KEY (place_id)
+                REFERENCES places (id)
+                ON DELETE CASCADE,
+            CONSTRAINT fk_place_edit_log_actor_user_id
+                FOREIGN KEY (actor_user_id)
+                REFERENCES users (id)
+                ON DELETE SET NULL
+        )
+        """,
+        "CREATE INDEX ix_place_edit_log_place_id ON place_edit_log (place_id)",
+    ),
+)
+
 DEFAULT_MIGRATIONS: tuple[Migration, ...] = (
     MIGRATION_1_USERS_PLACES,
     MIGRATION_2_PLACE_CONTACTS_UI,
     MIGRATION_3_PLACE_ADMINS,
+    MIGRATION_4_PLACE_EDIT_LOG,
 )
 
 LATEST_VERSION = DEFAULT_MIGRATIONS[-1].version if DEFAULT_MIGRATIONS else 0

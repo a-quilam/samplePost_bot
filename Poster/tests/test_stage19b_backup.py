@@ -96,7 +96,7 @@ class MigrationBackupTests(unittest.TestCase):
             self.assertEqual(
                 connection.execute("PRAGMA integrity_check").fetchone()[0], "ok"
             )
-        self.assertEqual([version for version, _ in journal(self.path)], [1, 2, 3])
+        self.assertEqual([version for version, _ in journal(self.path)], [1, 2, 3, 4])
 
     def test_second_migration_is_backed_up_before_it_runs(self) -> None:
         engine = make_engine(self.path)
@@ -137,7 +137,7 @@ class MigrationBackupTests(unittest.TestCase):
             scalar(str(copy), "SELECT name FROM place_names WHERE place_id = 7"),
             ("Театр",),
         )
-        self.assertEqual([version for version, _ in journal(self.path)], [1, 2, 3])
+        self.assertEqual([version for version, _ in journal(self.path)], [1, 2, 3, 4])
         self.assertEqual(
             scalar(self.path, "SELECT name FROM place_names WHERE place_id = 7"),
             ("Театр",),
@@ -251,7 +251,7 @@ class MigrationBackupTests(unittest.TestCase):
         restored_engine = make_engine(restored)
         self.addCleanup(restored_engine.dispose)
         run_migrations(restored_engine)
-        self.assertEqual([version for version, _ in journal(restored)], [1, 2, 3])
+        self.assertEqual([version for version, _ in journal(restored)], [1, 2, 3, 4])
         self.assertEqual(len(backups(restored)), 1)
 
     def test_second_run_at_latest_version_does_not_create_copy(self) -> None:

@@ -222,6 +222,52 @@ class PlaceName(Base):
         )
 
 
+class PlaceEditLog(Base):
+    """
+    Аудит административных изменений данных места (Stage 20B).
+
+    Каждая успешная операция редактирования (переименование канонического
+    названия, добавление/переименование/удаление альтернативного названия,
+    установка/удаление адреса и ссылки) записывает ровно одну строку:
+    кто изменил (`actor_user_id` — внутренний `users.id`), какое место
+    (`place_id`), какая операция (`action`), что было и что стало
+    (`old_value`/`new_value`), когда (`created_at`).
+
+    Запись делается в той же транзакции, что и само изменение: если
+    изменение не применилось, аудит не остаётся. Секреты и тексты
+    пользовательских сообщений не сохраняются — только поля места.
+    """
+
+    __tablename__ = "place_edit_log"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    place_id: Mapped[int] = mapped_column(
+        Integer,
+        ForeignKey("places.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    actor_user_id: Mapped[int | None] = mapped_column(
+        Integer,
+        ForeignKey("users.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+    action: Mapped[str] = mapped_column(Text, nullable=False)
+    # Для названий — отображаемый текст; для адреса/ссылки — сохранённое
+    # значение. NULL там, где значения не было (или не стало).
+    old_value: Mapped[str | None] = mapped_column(Text, nullable=True)
+    new_value: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime, default=utcnow, nullable=False
+    )
+
+    def __repr__(self) -> str:
+        return (
+            f"<PlaceEditLog(id={self.id}, place_id={self.place_id}, "
+            f"action={self.action!r})>"
+        )
+
+
 class PlaceAdmin(Base):
     """
     История назначений администратора места (Stage 20A).
