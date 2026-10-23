@@ -20,11 +20,18 @@ import logging
 from dataclasses import dataclass
 from datetime import datetime
 
-from sqlalchemy import and_, exists, func, select
+from sqlalchemy import and_, exists, func, select, update
 from sqlalchemy.exc import IntegrityError, OperationalError
 from sqlalchemy.orm import Session
 
-from models import Place, PlaceAdmin, PlaceName, User, utcnow
+from models import (
+    AdminTransfer,
+    Place,
+    PlaceAdmin,
+    PlaceName,
+    User,
+    utcnow,
+)
 from permissions import has_any_place_admin_role, is_superadmin
 
 logger = logging.getLogger(__name__)
@@ -152,6 +159,26 @@ def _target_user(session: Session, telegram_user_id: int) -> User | None:
     ):
         return None
     return session.scalar(select(User).where(User.telegram_user_id == telegram_user_id))
+
+
+def _supersede_pending_transfers(
+    session: Session, place_id: int, *, now: datetime
+) -> None:
+    """
+    Инвалидирует ожидающую передачу при изменении администратора суперадмином.
+
+    Выполняется в той же транзакции, что и замена/снятие. Так старое
+    предложение нельзя подтвердить даже после повторного назначения прежнего
+    администратора: оно уже закрыто как `superseded`.
+    """
+    session.execute(
+        update(AdminTransfer)
+        .where(
+            AdminTransfer.place_id == place_id,
+            AdminTransfer.status == "pending",
+        )
+        .values(status="superseded", closed_at=now)
+    )
 
 
 def list_places_for_administration(
@@ -299,12 +326,14 @@ def assign_place_admin(
             )
         return AdminMutationResult(status="has_admin")
 
+    now = utcnow()
     assignment = PlaceAdmin(
         place_id=place_id,
         user_id=target.id,
         assigned_by_user_id=actor.id,
-        assigned_at=utcnow(),
+        assigned_at=now,
     )
+    _supersede_pending_transfers(session, place_id, now=now)
     session.add(assignment)
     try:
         session.commit()
@@ -376,6 +405,7 @@ def replace_place_admin(
         session.rollback()
         return AdminMutationResult(status="changed")
 
+    _supersede_pending_transfers(session, place_id, now=now)
     session.add(
         PlaceAdmin(
             place_id=place_id,
@@ -421,6 +451,7 @@ def revoke_place_admin(
     if current_user.telegram_user_id != expected_admin_telegram_user_id:
         return AdminMutationResult(status="changed")
 
+    now = utcnow()
     try:
         updated = session.execute(
             PlaceAdmin.__table__.update()
@@ -428,7 +459,7 @@ def revoke_place_admin(
                 PlaceAdmin.id == assignment.id,
                 PlaceAdmin.revoked_at.is_(None),
             )
-            .values(revoked_at=utcnow(), revoked_by_user_id=actor.id)
+            .values(revoked_at=now, revoked_by_user_id=actor.id)
         )
     except OperationalError:
         session.rollback()
@@ -436,6 +467,7 @@ def revoke_place_admin(
     if getattr(updated, "rowcount", 0) != 1:
         session.rollback()
         return AdminMutationResult(status="changed")
+    _supersede_pending_transfers(session, place_id, now=now)
     try:
         session.commit()
     except (IntegrityError, OperationalError):
