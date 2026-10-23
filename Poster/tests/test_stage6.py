@@ -1404,7 +1404,6 @@ class NoWorkflowTests(unittest.TestCase):
         "add_responsible",
         "remove_responsible",
         "handlers.approval",
-        "handlers.admin",
         "notify_responsible",
         "edit_block_reason",
         "reset_declined",

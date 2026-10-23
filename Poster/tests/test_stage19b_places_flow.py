@@ -413,7 +413,6 @@ class PlaceCreationFlowTests(unittest.TestCase):
         from base import Base
 
         forbidden = {
-            "place_admins",
             "templates",
             "template_versions",
             "bricks",

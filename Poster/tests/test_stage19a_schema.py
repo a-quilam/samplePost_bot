@@ -327,7 +327,6 @@ class PlaceSchemaTests(unittest.TestCase):
             "bricks",
             "templates",
             "template_versions",
-            "place_admins",
             "draft_values",
             "admin_transfers",
             "brick_proposals",
