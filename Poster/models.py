@@ -767,6 +767,8 @@ class TemplateVersionBrick(Base):
 
     Код `[имя]` остаётся авторским текстом; исполнимая идентичность хранится
     только здесь. Связи не пересчитываются по имени при применении шаблона.
+    Колонка `code` — мост между сохранённой версией и исполнением: рендер
+    восстанавливает brick_id из этой строки, не разрешая код заново.
     """
 
     __tablename__ = "template_version_bricks"
@@ -781,13 +783,24 @@ class TemplateVersionBrick(Base):
         ForeignKey("bricks.id", ondelete="RESTRICT"),
         primary_key=True,
     )
+    code: Mapped[str] = mapped_column(
+        Text, nullable=False, default="", server_default="''"
+    )
 
-    __table_args__ = (Index("ix_template_version_bricks_brick_id", "brick_id"),)
+    __table_args__ = (
+        Index("ix_template_version_bricks_brick_id", "brick_id"),
+        Index(
+            "ux_template_version_bricks_version_code",
+            "template_version_id",
+            "code",
+            unique=True,
+        ),
+    )
 
     def __repr__(self) -> str:
         return (
             f"<TemplateVersionBrick(version_id={self.template_version_id}, "
-            f"brick_id={self.brick_id})>"
+            f"brick_id={self.brick_id}, code={self.code!r})>"
         )
 
 
@@ -900,13 +913,24 @@ class TemplateSnapshotBrick(Base):
         ForeignKey("bricks.id", ondelete="RESTRICT"),
         primary_key=True,
     )
+    code: Mapped[str] = mapped_column(
+        Text, nullable=False, default="", server_default="''"
+    )
 
-    __table_args__ = (Index("ix_template_snapshot_bricks_brick_id", "brick_id"),)
+    __table_args__ = (
+        Index("ix_template_snapshot_bricks_brick_id", "brick_id"),
+        Index(
+            "ux_template_snapshot_bricks_snapshot_code",
+            "template_snapshot_id",
+            "code",
+            unique=True,
+        ),
+    )
 
     def __repr__(self) -> str:
         return (
             f"<TemplateSnapshotBrick(snapshot_id={self.template_snapshot_id}, "
-            f"brick_id={self.brick_id})>"
+            f"brick_id={self.brick_id}, code={self.code!r})>"
         )
 
 

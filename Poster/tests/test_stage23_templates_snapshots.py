@@ -48,7 +48,6 @@ class TemplateSnapshotTests(TemplateDatabaseTestCase):
             header="Заголовок [название]",
             body="Тело [снапкод]",
             footer="Подвал",
-            brick_ids=(brick_id,),
         )
         snapshot = create_template_snapshot(
             self.session,
@@ -63,7 +62,7 @@ class TemplateSnapshotTests(TemplateDatabaseTestCase):
         self.assertEqual(snapshot.header, "Заголовок [название]")
         self.assertEqual(snapshot.body, "Тело [снапкод]")
         self.assertEqual(snapshot.footer, "Подвал")
-        self.assertEqual(snapshot.brick_ids, (brick_id,))
+        self.assertEqual(snapshot.brick_ids, tuple(sorted((1, brick_id))))
 
     def test_standard_snapshot_copies_builtin_version(self) -> None:
         from template_store import get_standard_template

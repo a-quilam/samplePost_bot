@@ -281,7 +281,7 @@ class StandardTemplateServiceTests(TemplateDatabaseTestCase):
 
         self.assertEqual(
             list_template_brick_ids(self.session, OWNER_TG, self.template_id),
-            (1, 2, 3, 4, 5, 6, 7, 8, 9),
+            (2, 3, 4, 5, 6, 7, 8, 9),
         )
 
     def test_read_access_for_any_registered_user(self) -> None:
@@ -408,10 +408,13 @@ class PersonalTemplateServiceTests(TemplateDatabaseTestCase):
             header="Header [название]",
             body="Body [личное]",
             footer="Footer",
-            brick_ids=(brick_id,),
         )
         self.assertEqual(created.owner_user_id, self.owner.id)
-        self.assertEqual(created.current_version.brick_ids, (brick_id,))
+        # [название] в шапке привязан к системному кирпичику #1,
+        # [личное] в теле — к личному кирпичику владельца.
+        self.assertEqual(
+            created.current_version.brick_ids, tuple(sorted((1, brick_id)))
+        )
         self.assertEqual(created.current_version.version, 1)
         self.assertEqual(created.current_version.created_by_user_id, self.owner.id)
 
@@ -481,7 +484,7 @@ class PersonalTemplateServiceTests(TemplateDatabaseTestCase):
         brick_a = self.make_personal_brick(self.owner, "первый")
         brick_b = self.make_personal_brick(self.owner, "второй")
         created = self.make_personal_template(
-            self.owner, "Привязки", brick_ids=(brick_a,)
+            self.owner, "Привязки", body="Текст [первый]"
         )
         self.assertEqual(created.current_version.brick_ids, (brick_a,))
 
@@ -492,7 +495,6 @@ class PersonalTemplateServiceTests(TemplateDatabaseTestCase):
             expected_revision=1,
             section="body",
             content="Новый текст [второй]",
-            brick_ids=(brick_b,),
         )
         self.assertEqual(replace.status, "updated")
         assert replace.template is not None
@@ -519,7 +521,6 @@ class PersonalTemplateServiceTests(TemplateDatabaseTestCase):
             expected_revision=2,
             section="body",
             content="Без привязок",
-            brick_ids=None,
         )
         self.assertEqual(cleared.status, "updated")
         assert cleared.template is not None

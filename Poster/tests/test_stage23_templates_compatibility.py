@@ -12,8 +12,8 @@ from __future__ import annotations
 import unittest
 
 from brick_store import archive_personal_brick
+from template_compiler import TemplateCompileError
 from template_store import (
-    TemplateError,
     list_template_brick_ids,
     update_template_body,
     validate_template_compatibility,
@@ -64,13 +64,11 @@ class TemplateCompatibilityTests(TemplateDatabaseTestCase):
         self.assertTrue(any("другому месту" in issue for issue in compatibility.issues))
 
     def test_personal_template_uses_only_owner_and_system_bricks(self) -> None:
-        system_id = 1  # системный кирпичик «название»
-        brick_id = self.make_personal_brick(self.owner, "личный")
+        self.make_personal_brick(self.owner, "личный")
         created = self.make_personal_template(
             self.owner,
             "Личный перенос",
             body="Тело [личный] [название]",
-            brick_ids=(system_id, brick_id),
         )
         compatibility = validate_template_compatibility(
             self.session,
@@ -81,13 +79,12 @@ class TemplateCompatibilityTests(TemplateDatabaseTestCase):
         self.assertEqual(compatibility.issues, ())
 
     def test_foreign_owner_brick_causes_incompatible(self) -> None:
-        brick = self.make_personal_brick(self.other, "чужой")
-        with self.assertRaises(TemplateError):
+        self.make_personal_brick(self.other, "чужой")
+        with self.assertRaises(TemplateCompileError):
             self.make_personal_template(
                 self.owner,
                 "Привязка к чужому",
                 body="Тело чужого [чужой]",
-                brick_ids=(brick,),
             )
 
     def test_archived_brick_is_flagged_but_stays_bound(self) -> None:
@@ -96,7 +93,6 @@ class TemplateCompatibilityTests(TemplateDatabaseTestCase):
             self.owner,
             "Архивный шаблон",
             body="Тело [архивный]",
-            brick_ids=(brick_id,),
         )
         self.assertTrue(
             validate_template_compatibility(
@@ -136,7 +132,6 @@ class TemplateCompatibilityTests(TemplateDatabaseTestCase):
             template_id=created.template_id,
             expected_revision=1,
             content="Новый текст [новый]",
-            brick_ids=(brick_id,),
         )
         from template_store import list_template_brick_ids
 
@@ -153,47 +148,45 @@ class TemplateCompatibilityTests(TemplateDatabaseTestCase):
             True,
         )
 
-    def test_unknown_brick_id_in_bindings_is_rejected(self) -> None:
-        with self.assertRaises(TemplateError):
+    def test_unknown_brick_code_in_text_is_rejected(self) -> None:
+        with self.assertRaises(TemplateCompileError):
             self.make_personal_template(
-                self.owner, "Некорректные привязки", brick_ids=(99999,)
+                self.owner, "Некорректные привязки", body="Текст [несуществующий]"
             )
 
     def test_foreign_brick_cannot_be_bound_on_create(self) -> None:
-        foreign = self.make_personal_brick(self.other, "чужой_код")
-        with self.assertRaises(TemplateError):
+        self.make_personal_brick(self.other, "чужой_код")
+        with self.assertRaises(TemplateCompileError):
             self.make_personal_template(
-                self.owner, "Чужие привязки", brick_ids=(foreign,)
+                self.owner, "Чужие привязки", body="Тело [чужой_код]"
             )
 
     def test_cannot_update_template_with_foreign_brick(self) -> None:
         created = self.make_personal_template(self.owner, "Собственный")
-        foreign = self.make_personal_brick(self.other, "чужой_код")
+        self.make_personal_brick(self.other, "чужой_код")
         from template_store import update_template_header
 
-        with self.assertRaises(TemplateError):
-            update_template_header(
-                self.session,
-                actor_telegram_user_id=OWNER_TG,
-                template_id=created.template_id,
-                expected_revision=1,
-                content="Подмена",
-                brick_ids=(foreign,),
-            )
-        created = self.make_personal_template(self.owner, "Собственный 2")
+        result = update_template_header(
+            self.session,
+            actor_telegram_user_id=OWNER_TG,
+            template_id=created.template_id,
+            expected_revision=1,
+            content="Подмена [чужой_код]",
+        )
+        self.assertEqual(result.status, "invalid")
+        self.assertIn("чужой_код", result.message or "")
 
     def test_place_scoped_template_cannot_use_foreign_place_brick(self) -> None:
         place = self.make_place("Локальное место")
         other_place = self.make_place("Другое место")
-        foreign = self.make_personal_brick(self.other, "чужой_код")
-        with self.assertRaises(TemplateError):
+        self.make_personal_brick(self.other, "чужой_код")
+        with self.assertRaises(TemplateCompileError):
             self.make_personal_template(
                 self.owner,
                 "Личный шаблон",
                 body="Тело [чужой_код]",
-                brick_ids=(foreign,),
             )
-        del place, other_place, foreign
+        del place, other_place
 
 
 if __name__ == "__main__":  # pragma: no cover

@@ -30,13 +30,7 @@ from sqlalchemy.orm import Session
 
 from brick_store import BrickDefinition, resolve_brick_code_candidates
 from brick_types import (
-    BRICK_TYPE_CHOICE,
-    BRICK_TYPE_DATE,
-    BRICK_TYPE_LONG_TEXT,
-    BRICK_TYPE_NUMBER,
-    BRICK_TYPE_SHORT_TEXT,
-    BRICK_TYPE_TIME,
-    BRICK_TYPE_URL,
+    validate_brick_value,
 )
 from template_parser import (
     BrickNode,
@@ -51,6 +45,7 @@ from template_types import (
     TEMPLATE_SECTION_FOOTER,
     TEMPLATE_SECTION_HEADER,
 )
+from utils.validators import normalize_url
 
 _SECTION_ORDER = (
     TEMPLATE_SECTION_HEADER,
@@ -139,12 +134,19 @@ def _resolve_codes_in_section(
     *,
     actor_telegram_user_id: int | None,
     place_id: int | None,
+    chosen_brick_ids: Mapping[str, int] | None = None,
 ) -> tuple[dict[str, int], list[AmbiguousCode], list[str]]:
     """
     Внутренняя привязка одного текста: заполняет `brick_id` у `BrickNode`.
 
     Дважды повторяющиеся коды одного варианта не создают дублирующих
     привязок; каждая привязка однозначно указывает на конкретный brick_id.
+
+    `chosen_brick_ids` — явный выбор пользователя для неоднозначных кодов.
+    Он используется только для кодов, по которым найдено несколько
+    кандидатов, и только если выбранный brick_id есть среди кандидатов.
+    Для однозначных кодов выбор вызывающего кода игнорируется — так
+    невозможно обойти проверку, передав произвольный список ID.
     """
     resolved: dict[str, int] = {}
     ambiguous: list[AmbiguousCode] = []
@@ -166,6 +168,16 @@ def _resolve_codes_in_section(
                 unknown.append(code)
                 return
             if candidates.ambiguous:
+                explicit = (chosen_brick_ids or {}).get(code)
+                if explicit is not None:
+                    match = next(
+                        (row for row in candidates.candidates if row.id == explicit),
+                        None,
+                    )
+                    if match is not None:
+                        resolved[code] = explicit
+                        node.brick_id = explicit
+                        return
                 ambiguous.append(
                     AmbiguousCode(
                         section=section,
@@ -203,6 +215,7 @@ def resolve_template_bindings(
     *,
     actor_telegram_user_id: int | None,
     place_id: int | None,
+    chosen_brick_ids: Mapping[str, int] | None = None,
 ) -> TemplateBindings:
     """
     Разбирает три секции и возвращает привязки для сохранения версии.
@@ -210,6 +223,11 @@ def resolve_template_bindings(
     Секции обрабатываются в порядке header → body → footer, чтобы порядок
     ошибок был предсказуемым. Список `unknown_codes` содержит неизвестные
     коды, для которых не найдено ни одного доступного кирпичика.
+
+    `chosen_brick_ids` — явный выбор пользователя для неоднозначных кодов:
+    отображение «код → brick_id». Выбор применяется только если выбранный
+    brick_id действительно является кандидатом для этого кода; для
+    однозначных кодов выбор вызывающего кода игнорируется.
     """
     bindings = TemplateBindings()
     for section in _SECTION_ORDER:
@@ -231,6 +249,7 @@ def resolve_template_bindings(
             tokens,
             actor_telegram_user_id=actor_telegram_user_id,
             place_id=place_id,
+            chosen_brick_ids=chosen_brick_ids,
         )
         for code, brick_id in resolved.items():
             bindings.resolved_brick_ids.setdefault(code, brick_id)
@@ -239,26 +258,46 @@ def resolve_template_bindings(
     return bindings
 
 
-def _format_brick_value(value: Any, value_type: str) -> str:
+def _brick_text(value: Any, definition: BrickDefinition) -> str:
     """
-    Приводит значение кирпичика к стабильному тексту для конечного анонса.
+    Стабильный текст значения кирпичика с строгой валидацией.
 
-    Даты и время рендерятся по правилам Stage 17 (`дд.мм.гггг` / `чч:мм`).
-    Логические и пустые значения выводятся как пустая строка.
+    Все семь типов проверяются через `validate_brick_value` — значение
+    не подменяется молча на short_text, ошибки данных не превращаются
+    в правдоподобный, но некорректный анонс.
     """
-    if value is None:
-        return ""
-    if value_type == BRICK_TYPE_DATE:
-        return str(value)
-    if value_type == BRICK_TYPE_TIME:
-        return str(value)
-    if value_type in (BRICK_TYPE_NUMBER, BRICK_TYPE_SHORT_TEXT, BRICK_TYPE_URL):
-        return str(value)
-    if value_type == BRICK_TYPE_LONG_TEXT:
-        return str(value)
-    if value_type == BRICK_TYPE_CHOICE:
-        return str(value)
-    return str(value)
+    result = validate_brick_value(definition.value_type, value, rules=definition.rules)
+    if not result.is_valid:
+        raise TemplateCompileError(
+            f"Значение кирпичика «{definition.code}» некорректно: {result.error}"
+        )
+    payload = result.payload or {}
+    for key in ("text", "date", "time", "url", "number", "choice"):
+        if key in payload:
+            return str(payload[key])
+    if "choices" in payload:
+        choices = payload["choices"]
+        if isinstance(choices, (list, tuple)):
+            return ", ".join(str(item) for item in choices)
+    return str(payload) if payload else ""
+
+
+def _safe_url(value: Any, *, code: str = "") -> str:
+    """
+    Безопасный адрес гиперссылки из значения кирпичика.
+
+    Проверяет схему http/https, отклоняет `javascript:`, `data:`, `file:`
+    и произвольный текст. Некорректный адрес — ошибка, а не правдоподобный
+    анонс с битой ссылкой.
+    """
+    text = str(value) if value is not None else ""
+    normalized = normalize_url(text)
+    if normalized is None:
+        raise TemplateCompileError(
+            f"Значение кирпичика «{code}» не является корректной "
+            f"http(s)-ссылкой: {text!r}."
+        )
+    return normalized
 
 
 _FORMAT_TAGS = {"**": "b", "*": "i", "__": "u", "~~": "s"}
@@ -280,15 +319,16 @@ def _section_html(
     tokens: Sequence[Any],
     values_by_id: Mapping[int, Any],
     definitions_by_id: Mapping[int, BrickDefinition],
-    *,
-    skip_missing: bool = True,
 ) -> str:
     """
     Визуализирует дерево одной секции, подставляя значения кирпичиков.
 
-    `skip_missing=True` удаляет токены кирпичиков, для которых значение
-    отсутствует (вместо вывода `None`/`[]`). Тексты экранируются один раз;
-    форматирование превращается в теги Telegram (`<b>`, `<i>`, `<u>`, `<s>`).
+    Значения валидируются по типу кирпичика (`validate_brick_value`):
+    дата/время/число/выбор/текст/ссылка — все семь типов. URL дополнительно
+    нормализуется и проверяется на схему непосредственно перед созданием
+    гиперссылки. Отсутствующее значение пропускает токен (необязательное
+    поле); некорректное значение — диагностируемая ошибка, а не вывод
+    `None`/`[]` в готовом анонсе.
     """
     parts: list[str] = []
 
@@ -297,27 +337,48 @@ def _section_html(
             return _escape_html(node.text)
         if isinstance(node, BrickNode):
             if node.brick_id is None:
-                return None
-            value = values_by_id.get(node.brick_id)
-            if value is None or value == "":
-                return None
+                raise TemplateCompileError(
+                    "Токен кирпичика без привязки brick_id: "
+                    "версия шаблона повреждена."
+                )
             definition = definitions_by_id.get(node.brick_id)
-            value_type = definition.value_type if definition else BRICK_TYPE_SHORT_TEXT
-            return _escape_html(_format_brick_value(value, value_type))
+            if definition is None:
+                raise TemplateCompileError(
+                    f"Определение кирпичика #{node.brick_id} не найдено: "
+                    "нельзя подменить тип значения на short_text."
+                )
+            if node.brick_id not in values_by_id:
+                return None  # Необязательное значение пропускается.
+            value = values_by_id[node.brick_id]
+            if value is None or (isinstance(value, str) and not value.strip()):
+                return None
+            return _escape_html(_brick_text(value, definition))
         if isinstance(node, LinkNode):
             label = _visit_token_list(node.label)
             if not label:
                 return None
             if isinstance(node.url, BrickNode):
                 if node.url.brick_id is None:
-                    return None
-                url_value = values_by_id.get(node.url.brick_id)
-                if not url_value:
+                    raise TemplateCompileError(
+                        "URL ссылки без привязки brick_id: "
+                        "версия шаблона повреждена."
+                    )
+                url_definition = definitions_by_id.get(node.url.brick_id)
+                if url_definition is None:
+                    raise TemplateCompileError(
+                        f"Определение кирпичика #{node.url.brick_id} не найдено."
+                    )
+                if node.url.brick_id not in values_by_id:
                     # Не выводим пустые/битые ссылки; подпись тоже скрываем.
                     return None
-                url = _format_brick_value(url_value, BRICK_TYPE_URL)
+                url_value = values_by_id[node.url.brick_id]
+                if not url_value or (
+                    isinstance(url_value, str) and not url_value.strip()
+                ):
+                    return None
+                url = _safe_url(url_value, code=url_definition.code)
             else:
-                url = node.url
+                url = _normalize_render_url(node.url)
             if not url:
                 return None
             return f'<a href="{_escape_html(url, quote=True)}">{label}</a>'
@@ -344,6 +405,25 @@ def _section_html(
         if rendered is not None:
             parts.append(rendered)
     return "".join(parts)
+
+
+def _normalize_render_url(raw: str) -> str:
+    """
+    Нормализует литеральный URL гиперссылки перед созданием `<a href>`.
+
+    Опасные схемы и произвольный текст отклоняются; корректные адреса
+    приводятся к https://.
+    """
+    value = str(raw).strip()
+    lowered = value.lower()
+    if lowered.startswith(("javascript:", "data:", "file:", "vbscript:")):
+        raise TemplateCompileError(f"Схема ссылки запрещена: {value!r}.")
+    if lowered.startswith(("http://", "https://")):
+        return value
+    normalized = normalize_url(value)
+    if normalized is None:
+        raise TemplateCompileError(f"Некорректный адрес гиперссылки: {value!r}.")
+    return normalized
 
 
 def render_template(

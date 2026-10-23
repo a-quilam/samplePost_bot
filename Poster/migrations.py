@@ -985,6 +985,94 @@ MIGRATION_8_TEMPLATES = Migration(
     ),
 )
 
+# --- Версия 9: коды в привязках шаблонов (Stage 24) -------------------------
+
+MIGRATION_9_BINDING_CODES = Migration(
+    version=9,
+    name="template_binding_codes",
+    statements=(
+        # Код в привязках — мост между сохранённой версией и исполнением.
+        # Рендер восстанавливает brick_id из этих строк, не разрешая
+        # текстовый код заново: переименование кирпичика после сохранения
+        # не должно незаметно подменять значение.
+        "ALTER TABLE template_version_bricks ADD COLUMN code TEXT NOT NULL DEFAULT ''",
+        "ALTER TABLE template_snapshot_bricks ADD COLUMN code TEXT NOT NULL DEFAULT ''",
+        # Триггеры неизменяемости привязок временно снимаются: backfill
+        # заполняет код для уже существующих строк; без этого UPDATE
+        # заблокирован триггером миграции 8.
+        "DROP TRIGGER IF EXISTS trg_template_version_bricks_no_update",
+        "DROP TRIGGER IF EXISTS trg_template_version_bricks_no_delete",
+        "DROP TRIGGER IF EXISTS trg_template_snapshot_bricks_no_update",
+        "DROP TRIGGER IF EXISTS trg_template_snapshot_bricks_no_delete",
+        # Backfill: код берём из bricks по brick_id, не предполагая структуру
+        # текста. Каждая связь версии/снимка получает код своего кирпичика.
+        """
+        UPDATE template_version_bricks
+        SET code = (
+            SELECT bricks.code FROM bricks
+            WHERE bricks.id = template_version_bricks.brick_id
+        )
+        WHERE code = ''
+        """,
+        """
+        UPDATE template_snapshot_bricks
+        SET code = (
+            SELECT bricks.code FROM bricks
+            WHERE bricks.id = template_snapshot_bricks.brick_id
+        )
+        WHERE code = ''
+        """,
+        # Триггеры неизменяемости восстанавливаются после backfill.
+        """
+        CREATE TRIGGER trg_template_version_bricks_no_update
+        BEFORE UPDATE ON template_version_bricks
+        FOR EACH ROW
+        BEGIN
+            SELECT RAISE(ABORT, 'template bindings are immutable');
+        END
+        """,
+        """
+        CREATE TRIGGER trg_template_version_bricks_no_delete
+        BEFORE DELETE ON template_version_bricks
+        FOR EACH ROW
+        WHEN EXISTS (
+            SELECT 1 FROM template_versions
+            WHERE id = OLD.template_version_id
+        )
+        BEGIN
+            SELECT RAISE(ABORT, 'template bindings cannot be deleted');
+        END
+        """,
+        """
+        CREATE TRIGGER trg_template_snapshot_bricks_no_update
+        BEFORE UPDATE ON template_snapshot_bricks
+        FOR EACH ROW
+        BEGIN
+            SELECT RAISE(ABORT, 'snapshot bindings are immutable');
+        END
+        """,
+        """
+        CREATE TRIGGER trg_template_snapshot_bricks_no_delete
+        BEFORE DELETE ON template_snapshot_bricks
+        FOR EACH ROW
+        BEGIN
+            SELECT RAISE(ABORT, 'snapshot bindings cannot be deleted');
+        END
+        """,
+        # Один код может быть привязан к одной версии ровно один раз, чтобы
+        # рендер однозначно восстанавливал brick_id по коду из сохранённой
+        # версии (без повторного разрешения кода при исполнении).
+        """
+        CREATE UNIQUE INDEX ux_template_version_bricks_version_code
+            ON template_version_bricks (template_version_id, code)
+        """,
+        """
+        CREATE UNIQUE INDEX ux_template_snapshot_bricks_snapshot_code
+            ON template_snapshot_bricks (template_snapshot_id, code)
+        """,
+    ),
+)
+
 DEFAULT_MIGRATIONS: tuple[Migration, ...] = (
     MIGRATION_1_USERS_PLACES,
     MIGRATION_2_PLACE_CONTACTS_UI,
@@ -994,6 +1082,7 @@ DEFAULT_MIGRATIONS: tuple[Migration, ...] = (
     MIGRATION_6_BRICKS,
     MIGRATION_7_BRICK_MANAGEMENT,
     MIGRATION_8_TEMPLATES,
+    MIGRATION_9_BINDING_CODES,
 )
 
 LATEST_VERSION = DEFAULT_MIGRATIONS[-1].version if DEFAULT_MIGRATIONS else 0

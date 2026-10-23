@@ -27,9 +27,10 @@
 
 from __future__ import annotations
 
-from collections.abc import Iterable, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import datetime
+from typing import TYPE_CHECKING, Any
 
 from sqlalchemy import select
 from sqlalchemy import update as sqlalchemy_update
@@ -68,6 +69,10 @@ from template_types import (
     validate_template_section_name,
     validate_template_sections,
 )
+
+if TYPE_CHECKING:
+    from brick_store import BrickDefinition
+    from template_compiler import TemplateCompileError
 
 _UNSET = object()
 
@@ -313,19 +318,23 @@ def _version_row(
 def _binding_views_for_version(
     session: Session, version_id: int
 ) -> tuple[TemplateBrickBinding, ...]:
-    rows = session.scalars(
-        select(Brick)
-        .join(
-            TemplateVersionBrick,
-            TemplateVersionBrick.brick_id == Brick.id,
+    """Привязки версии: код берётся из binding-строки, а не из текущего Brick."""
+    rows = session.execute(
+        select(
+            TemplateVersionBrick.brick_id,
+            TemplateVersionBrick.code,
+            Brick.title,
+            Brick.scope,
+            Brick.status,
         )
+        .join(Brick, Brick.id == TemplateVersionBrick.brick_id)
         .where(TemplateVersionBrick.template_version_id == version_id)
-        .order_by(Brick.id)
+        .order_by(TemplateVersionBrick.brick_id)
     ).all()
     return tuple(
         TemplateBrickBinding(
-            brick_id=row.id,
-            code=row.code,
+            brick_id=row.brick_id,
+            code=row.code or "",
             title=row.title,
             scope=row.scope,
             status=row.status,
@@ -337,19 +346,23 @@ def _binding_views_for_version(
 def _binding_views_for_snapshot(
     session: Session, snapshot_id: int
 ) -> tuple[TemplateBrickBinding, ...]:
-    rows = session.scalars(
-        select(Brick)
-        .join(
-            TemplateSnapshotBrick,
-            TemplateSnapshotBrick.brick_id == Brick.id,
+    """Привязки снимка: код берётся из binding-строки, а не из текущего Brick."""
+    rows = session.execute(
+        select(
+            TemplateSnapshotBrick.brick_id,
+            TemplateSnapshotBrick.code,
+            Brick.title,
+            Brick.scope,
+            Brick.status,
         )
+        .join(Brick, Brick.id == TemplateSnapshotBrick.brick_id)
         .where(TemplateSnapshotBrick.template_snapshot_id == snapshot_id)
-        .order_by(Brick.id)
+        .order_by(TemplateSnapshotBrick.brick_id)
     ).all()
     return tuple(
         TemplateBrickBinding(
-            brick_id=row.id,
-            code=row.code,
+            brick_id=row.brick_id,
+            code=row.code or "",
             title=row.title,
             scope=row.scope,
             status=row.status,
@@ -482,30 +495,69 @@ def _validate_binding_ids(
 
 
 def _insert_bindings(
-    session: Session, *, template_version_id: int, brick_ids: Sequence[int]
+    session: Session,
+    *,
+    template_version_id: int,
+    bindings: Sequence[tuple[str, int]],
 ) -> None:
-    for brick_id in brick_ids:
+    """Сохраняет пары «код → brick_id» для конкретной версии шаблона."""
+    for code, brick_id in bindings:
         session.add(
             TemplateVersionBrick(
                 template_version_id=template_version_id,
                 brick_id=brick_id,
+                code=code,
             )
         )
 
 
 def _insert_snapshot_bindings(
-    session: Session, *, snapshot_id: int, brick_ids: Sequence[int]
+    session: Session,
+    *,
+    snapshot_id: int,
+    bindings: Sequence[tuple[str, int]],
 ) -> None:
-    for brick_id in brick_ids:
+    """Сохраняет пары «код → brick_id» внутри самостоятельного снимка."""
+    for code, brick_id in bindings:
         session.add(
             TemplateSnapshotBrick(
                 template_snapshot_id=snapshot_id,
                 brick_id=brick_id,
+                code=code,
             )
         )
 
 
 # --- Встроенный стандарт ----------------------------------------------------
+
+
+def _builtin_binding_pairs(
+    session: Session, place_id: int | None
+) -> tuple[tuple[str, int], ...]:
+    """
+    Разбирает встроенный стандарт и возвращает пары «код → brick_id».
+
+    Встроенный текст ссылается только на системные кирпичики Stage 22A
+    с известными стабильными ID; компилятор проверяет их доступность.
+    """
+    from template_compiler import resolve_template_bindings  # ленивый импорт
+
+    compiled = resolve_template_bindings(
+        session,
+        {
+            TEMPLATE_SECTION_HEADER: BUILTIN_TEMPLATE.header,
+            TEMPLATE_SECTION_BODY: BUILTIN_TEMPLATE.body,
+            TEMPLATE_SECTION_FOOTER: BUILTIN_TEMPLATE.footer,
+        },
+        actor_telegram_user_id=None,
+        place_id=place_id,
+    )
+    if not compiled.ok:
+        raise TemplateCompileError(
+            "Встроенный шаблон ссылается на недоступные кирпичики: "
+            + "; ".join(f"[код={c}]" for c in compiled.unknown_codes)
+        )
+    return tuple(sorted(compiled.resolved_brick_ids.items()))
 
 
 def get_builtin_template() -> BuiltinTemplateDefinition:
@@ -538,13 +590,7 @@ def _insert_standard_template(
     if existing is not None:
         return existing
 
-    binding_ids = _validate_binding_ids(
-        session,
-        kind=TEMPLATE_KIND_STANDARD,
-        place_id=place_id,
-        owner_user_id=None,
-        brick_ids=BUILTIN_TEMPLATE.brick_ids,
-    )
+    binding_pairs = _builtin_binding_pairs(session, place_id)
     template = Template(
         kind=TEMPLATE_KIND_STANDARD,
         place_id=place_id,
@@ -572,7 +618,7 @@ def _insert_standard_template(
     _insert_bindings(
         session,
         template_version_id=version.id,
-        brick_ids=binding_ids,
+        bindings=binding_pairs,
     )
     session.flush()
     return template
@@ -771,27 +817,51 @@ def create_personal_template(
     header: object,
     body: object,
     footer: object,
-    brick_ids: Iterable[int] | None = None,
+    chosen_brick_ids: Mapping[str, int] | None = None,
 ) -> TemplateDetails:
     """
     Создаёт личный шаблон действующего пользователя.
 
     Владелец всегда берётся из Telegram user ID → `users.id`; клиент не может
     передать чужой owner_id. Названия могут повторяться, в том числе у одного
-    владельца. Привязки по умолчанию пусты: Stage 24 добавит разбор текста,
-    а Stage 23 сохраняет уже известные явные brick_id.
+    владельца. Привязки кирпичиков всегда выводятся из реального текста
+    секций компилятором Stage 24; произвольный список ID невозможен.
+
+    `chosen_brick_ids` — явный выбор для неоднозначных кодов.
     """
     actor = _require_actor_user(session, actor_telegram_user_id)
     checked_name = validate_template_name(name)
     checked_header, checked_body, checked_footer = validate_template_sections(
         header, body, footer
     )
-    checked_bricks = _validate_binding_ids(
+    from template_compiler import TemplateCompileError, resolve_template_bindings
+
+    compiled = resolve_template_bindings(
         session,
-        kind=TEMPLATE_KIND_PERSONAL,
+        {
+            TEMPLATE_SECTION_HEADER: checked_header,
+            TEMPLATE_SECTION_BODY: checked_body,
+            TEMPLATE_SECTION_FOOTER: checked_footer,
+        },
+        actor_telegram_user_id=actor.telegram_user_id,
         place_id=None,
-        owner_user_id=actor.id,
-        brick_ids=brick_ids,
+        chosen_brick_ids=chosen_brick_ids,
+    )
+    if not compiled.ok:
+        issues: list[str] = []
+        for err in compiled.parse_errors:
+            issues.append(str(err))
+        for code in compiled.unknown_codes:
+            issues.append(f"Неизвестный кирпичик [код={code}].")
+        for amb in compiled.ambiguous_codes:
+            candidates = ", ".join(f"#{c.brick_id} ({c.scope})" for c in amb.candidates)
+            issues.append(
+                f"Код [код={amb.code}] неоднозначен (секция {amb.section}); "
+                f"кандидаты: {candidates}. Требуется явный выбор."
+            )
+        raise TemplateCompileError("; ".join(issues))
+    checked_bindings: tuple[tuple[str, int], ...] = tuple(
+        sorted(compiled.resolved_brick_ids.items())
     )
     now = utcnow()
     template = Template(
@@ -822,7 +892,7 @@ def create_personal_template(
         _insert_bindings(
             session,
             template_version_id=version.id,
-            brick_ids=checked_bricks,
+            bindings=checked_bindings,
         )
         session.commit()
     except (IntegrityError, OperationalError) as exc:
@@ -962,11 +1032,11 @@ def _commit_new_version(
     header: str,
     body: str,
     footer: str,
-    brick_ids: Sequence[int],
+    bindings: Sequence[tuple[str, int]],
     builtin_version: int | None,
 ) -> TemplateMutationResult:
     """
-    Атомарно поднимает revision и добавляет версию.
+    Атомарно поднимает revision и добавляет версию с проверенными привязками.
 
     Условный UPDATE первым получает блокировку записи SQLite. Повторная
     проверка прав идёт после него и до коммита. Любая ошибка откатывает
@@ -1018,7 +1088,7 @@ def _commit_new_version(
         _insert_bindings(
             session,
             template_version_id=version.id,
-            brick_ids=brick_ids,
+            bindings=bindings,
         )
         session.commit()
     except (IntegrityError, OperationalError):
@@ -1057,14 +1127,19 @@ def update_template_section(
     expected_revision: int,
     section: object,
     content: object,
-    brick_ids: Iterable[int] | object = _UNSET,
+    chosen_brick_ids: Mapping[str, int] | None = None,
 ) -> TemplateMutationResult:
     """
     Меняет одну секцию, сохраняя две другие и историю.
 
-    - `brick_ids` не передан — существующие явные привязки копируются;
-    - `brick_ids=None` — очистить привязки;
-    - передан список — заменить привязки с проверкой области/владельца;
+    Реальное содержимое ВСЕХ трёх секций разбирается компилятором Stage 24:
+    синтаксис, доступность кирпичиков и неоднозначность проверяются до
+    создания новой версии. При ошибке версия не создаётся.
+
+    - `chosen_brick_ids=None` — привязки всегда выводятся из текста секций;
+    - передан отображение «код → brick_id» — используется ТОЛЬКО для
+      неоднозначных кодов; для однозначных кодов выбор вызывающего кода
+      игнорируется, так что обход проверки произвольным списком невозможен.
     - то же содержимое и те же привязки не создают новую версию.
 
     Стандарт может менять только действующий админ места или суперадмин.
@@ -1117,18 +1192,52 @@ def update_template_section(
         sections[TEMPLATE_SECTION_FOOTER],
     )
 
-    if brick_ids is _UNSET:
-        new_brick_ids = current.brick_ids
-        bindings_changed = False
-    else:
-        new_brick_ids = _validate_binding_ids(
+    # --- Stage 24: разбор и привязка реального содержимого всех секций ---
+    from template_compiler import TemplateCompileError, resolve_template_bindings
+
+    try:
+        compiled = resolve_template_bindings(
             session,
-            kind=row.kind,
+            {
+                TEMPLATE_SECTION_HEADER: checked_header,
+                TEMPLATE_SECTION_BODY: checked_body,
+                TEMPLATE_SECTION_FOOTER: checked_footer,
+            },
+            actor_telegram_user_id=actor.telegram_user_id,
             place_id=row.place_id,
-            owner_user_id=row.owner_user_id,
-            brick_ids=brick_ids,  # type: ignore[arg-type]
+            chosen_brick_ids=chosen_brick_ids,
         )
-        bindings_changed = set(new_brick_ids) != set(current.brick_ids)
+    except TemplateCompileError as exc:
+        return _mutation(
+            "invalid",
+            _template_details(session, row),
+            str(exc),
+        )
+    if not compiled.ok:
+        issues: list[str] = []
+        for err in compiled.parse_errors:
+            issues.append(str(err))
+        for code in compiled.unknown_codes:
+            issues.append(f"Неизвестный кирпичик [код={code}].")
+        for amb in compiled.ambiguous_codes:
+            candidates = ", ".join(f"#{c.brick_id} ({c.scope})" for c in amb.candidates)
+            issues.append(
+                f"Код [код={amb.code}] неоднозначен (секция {amb.section}); "
+                f"кандидаты: {candidates}. Требуется явный выбор."
+            )
+        return _mutation(
+            "invalid",
+            _template_details(session, row),
+            "; ".join(issues),
+        )
+
+    new_bindings: tuple[tuple[str, int], ...] = tuple(
+        sorted(compiled.resolved_brick_ids.items())
+    )
+    old_bindings: tuple[tuple[str, int], ...] = tuple(
+        sorted((b.code, b.brick_id) for b in current.bindings)
+    )
+    bindings_changed = new_bindings != old_bindings
 
     changed = content != getattr(current, section_name) or bindings_changed
     if not changed:
@@ -1146,7 +1255,7 @@ def update_template_section(
         header=checked_header,
         body=checked_body,
         footer=checked_footer,
-        brick_ids=new_brick_ids,
+        bindings=new_bindings,
         builtin_version=None,
     )
 
@@ -1158,7 +1267,7 @@ def update_template_header(
     template_id: int,
     expected_revision: int,
     content: object,
-    brick_ids: Iterable[int] | object = _UNSET,
+    chosen_brick_ids: Mapping[str, int] | None = None,
 ) -> TemplateMutationResult:
     """Безопасно меняет только шапку."""
     return update_template_section(
@@ -1168,7 +1277,7 @@ def update_template_header(
         expected_revision=expected_revision,
         section=TEMPLATE_SECTION_HEADER,
         content=content,
-        brick_ids=brick_ids,
+        chosen_brick_ids=chosen_brick_ids,
     )
 
 
@@ -1179,7 +1288,7 @@ def update_template_body(
     template_id: int,
     expected_revision: int,
     content: object,
-    brick_ids: Iterable[int] | object = _UNSET,
+    chosen_brick_ids: Mapping[str, int] | None = None,
 ) -> TemplateMutationResult:
     """Безопасно меняет только тело."""
     return update_template_section(
@@ -1189,7 +1298,7 @@ def update_template_body(
         expected_revision=expected_revision,
         section=TEMPLATE_SECTION_BODY,
         content=content,
-        brick_ids=brick_ids,
+        chosen_brick_ids=chosen_brick_ids,
     )
 
 
@@ -1200,7 +1309,7 @@ def update_template_footer(
     template_id: int,
     expected_revision: int,
     content: object,
-    brick_ids: Iterable[int] | object = _UNSET,
+    chosen_brick_ids: Mapping[str, int] | None = None,
 ) -> TemplateMutationResult:
     """Безопасно меняет только подвал."""
     return update_template_section(
@@ -1210,7 +1319,7 @@ def update_template_footer(
         expected_revision=expected_revision,
         section=TEMPLATE_SECTION_FOOTER,
         content=content,
-        brick_ids=brick_ids,
+        chosen_brick_ids=chosen_brick_ids,
     )
 
 
@@ -1254,18 +1363,38 @@ def reset_standard_template(
         )
 
     current = _version_details(session, _version_row(session, row))
-    binding_ids = _validate_binding_ids(
+    from template_compiler import resolve_template_bindings
+
+    compiled = resolve_template_bindings(
         session,
-        kind=TEMPLATE_KIND_STANDARD,
+        {
+            TEMPLATE_SECTION_HEADER: BUILTIN_TEMPLATE.header,
+            TEMPLATE_SECTION_BODY: BUILTIN_TEMPLATE.body,
+            TEMPLATE_SECTION_FOOTER: BUILTIN_TEMPLATE.footer,
+        },
+        actor_telegram_user_id=actor.telegram_user_id,
         place_id=row.place_id,
-        owner_user_id=None,
-        brick_ids=BUILTIN_TEMPLATE.brick_ids,
+    )
+    if not compiled.ok:
+        issues: list[str] = []
+        for code in compiled.unknown_codes:
+            issues.append(f"Неизвестный кирпичик [код={code}].")
+        for amb in compiled.ambiguous_codes:
+            issues.append(f"Код [код={amb.code}] неоднозначен.")
+        return _mutation(
+            "invalid",
+            _template_details(session, row),
+            "; ".join(issues),
+        )
+    binding_pairs: tuple[tuple[str, int], ...] = tuple(
+        sorted(compiled.resolved_brick_ids.items())
     )
     unchanged = (
         current.header == BUILTIN_TEMPLATE.header
         and current.body == BUILTIN_TEMPLATE.body
         and current.footer == BUILTIN_TEMPLATE.footer
-        and set(current.brick_ids) == set(binding_ids)
+        and tuple(sorted((b.code, b.brick_id) for b in current.bindings))
+        == binding_pairs
     )
     if unchanged:
         return _mutation(
@@ -1282,7 +1411,7 @@ def reset_standard_template(
         header=BUILTIN_TEMPLATE.header,
         body=BUILTIN_TEMPLATE.body,
         footer=BUILTIN_TEMPLATE.footer,
-        brick_ids=binding_ids,
+        bindings=binding_pairs,
         builtin_version=BUILTIN_TEMPLATE_VERSION,
     )
 
@@ -1369,7 +1498,7 @@ def create_template_snapshot(
         _insert_snapshot_bindings(
             session,
             snapshot_id=snapshot.id,
-            brick_ids=tuple(binding.brick_id for binding in binding_ids),
+            bindings=[(binding.code, binding.brick_id) for binding in binding_ids],
         )
         if not _still_readable(session, actor.id, actor.telegram_user_id, template):
             session.rollback()
@@ -1512,3 +1641,140 @@ def _brick_place_id(session: Session, brick_id: int) -> int | None:
 
 def _brick_owner_id(session: Session, brick_id: int) -> int | None:
     return session.scalar(select(Brick.owner_user_id).where(Brick.id == brick_id))
+
+
+# --- Исполнение сохранённых версий и снимков (Stage 24) ---------------------
+
+
+def _restore_bindings_on_tokens(
+    tokens: Sequence[Any],
+    bindings_by_code: Mapping[str, int],
+) -> None:
+    """
+    Восстанавливает brick_id у токенов по коду из сохранённых привязок.
+
+    Никакого разрешения кода заново: если код отсутствует в привязках,
+    это ошибка, а не автоматический выбор другого кирпичика.
+    """
+    from template_parser import BrickNode, LinkNode  # ленивый импорт
+
+    def _visit(node: Any) -> None:
+        if isinstance(node, BrickNode):
+            if node.code not in bindings_by_code:
+                raise TemplateCompileError(
+                    f"У токена [код={node.code}] нет сохранённой привязки; "
+                    "отсутствующая привязка — ошибка."
+                )
+            node.brick_id = bindings_by_code[node.code]
+        elif isinstance(node, LinkNode):
+            for child in node.label:
+                _visit(child)
+            if isinstance(node.url, BrickNode):
+                _visit(node.url)
+        elif hasattr(node, "children"):
+            for child in getattr(node, "children"):
+                _visit(child)
+
+    for token in tokens:
+        _visit(token)
+
+
+def _load_brick_definitions(
+    session: Session, brick_ids: Iterable[int]
+) -> dict[int, BrickDefinition]:
+    """Загружает определения кирпичиков по набору ID; пропускает удалённые."""
+    ids = list(set(brick_ids))
+    if not ids:
+        return {}
+    rows = session.scalars(select(Brick).where(Brick.id.in_(ids))).all()
+    from brick_store import _snapshot as brick_snapshot  # локальный импорт
+
+    return {row.id: brick_snapshot(row) for row in rows}
+
+
+def render_template_version(
+    session: Session,
+    *,
+    actor_telegram_user_id: int | None,
+    template_id: int,
+    values_by_id: Mapping[int, Any],
+    version: int | None = None,
+) -> str:
+    """
+    Компилирует сохранённую версию шаблона в HTML-анонс.
+
+    Загружает доступную версию, разбирает сохранённый текст, восстанавливает
+    brick_id ИСКЛЮЧИТЕЛЬНО из сохранённых привязок (по коду), проверяет
+    соответствие токенов и привязок, подставляет значения по ID.
+
+    Никакого разрешения brick_id по текстовому коду при выполнении:
+    отсутствующая привязка — ошибка, а не автоматический выбор другого
+    кирпичика.
+    """
+    actor = _require_actor_user(session, actor_telegram_user_id)
+    template = _readable_template_row(session, actor, template_id)
+    version_row = _version_row(session, template, version)
+    binding_views = _binding_views_for_version(session, version_row.id)
+    bindings_by_code = {b.code: b.brick_id for b in binding_views}
+    from template_parser import parse_template  # ленивый импорт
+
+    tokens_by_section = {
+        TEMPLATE_SECTION_HEADER: parse_template(version_row.header, section="header"),
+        TEMPLATE_SECTION_BODY: parse_template(version_row.body, section="body"),
+        TEMPLATE_SECTION_FOOTER: parse_template(version_row.footer, section="footer"),
+    }
+    brick_ids = set(bindings_by_code.values())
+    definitions = _load_brick_definitions(session, brick_ids)
+    for tokens in tokens_by_section.values():
+        _restore_bindings_on_tokens(tokens, bindings_by_code)
+    from template_compiler import render_template
+
+    return render_template(tokens_by_section, values_by_id, definitions)
+
+
+def render_template_snapshot(
+    session: Session,
+    *,
+    actor_telegram_user_id: int | None,
+    snapshot_id: int,
+    values_by_id: Mapping[int, Any],
+) -> str:
+    """
+    Компилирует сохранённый snapshot шаблона в HTML-анонс.
+
+    Загружает снимок (доступен только владельцу), разбирает сохранённый
+    текст, восстанавливает brick_id ИСКЛЮЧИТЕЛЬНО из сохранённых привязок
+    снимка (по коду), проверяет соответствие токенов и привязок, подставляет
+    значения по ID.
+
+    Никакого разрешения brick_id по текстовому коду при выполнении.
+    """
+    actor = _require_actor_user(session, actor_telegram_user_id)
+    if not _valid_positive_id(snapshot_id):
+        raise TemplateNotFoundError("Некорректный идентификатор снимка.")
+    snapshot_row = session.scalar(
+        select(TemplateSnapshot).where(
+            TemplateSnapshot.id == snapshot_id,
+            TemplateSnapshot.owner_user_id == actor.id,
+        )
+    )
+    if snapshot_row is None:
+        raise TemplateNotFoundError(
+            "Снимок не найден или принадлежит другому пользователю."
+        )
+    binding_views = _binding_views_for_snapshot(session, snapshot_row.id)
+    bindings_by_code = {b.code: b.brick_id for b in binding_views}
+    from template_parser import parse_template  # ленивый импорт
+
+    tokens_by_section = {
+        TEMPLATE_SECTION_HEADER: parse_template(snapshot_row.header, section="header"),
+        TEMPLATE_SECTION_BODY: parse_template(snapshot_row.body, section="body"),
+        TEMPLATE_SECTION_FOOTER: parse_template(snapshot_row.footer, section="footer"),
+    }
+    brick_ids = set(bindings_by_code.values())
+    definitions = _load_brick_definitions(session, brick_ids)
+    for tokens in tokens_by_section.values():
+        _restore_bindings_on_tokens(tokens, bindings_by_code)
+    from template_compiler import render_template
+
+    return render_template(tokens_by_section, values_by_id, definitions)

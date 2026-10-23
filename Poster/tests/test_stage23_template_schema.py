@@ -54,8 +54,9 @@ class TemplateSchemaTests(TemplateDatabaseTestCase):
 
     def test_migration_eight_applies_and_is_idempotent(self) -> None:
         self.assertEqual(self.migrations_applied, LATEST_VERSION)
-        self.assertEqual(LATEST_VERSION, 8)
+        self.assertEqual(LATEST_VERSION, 9)
         self.assertIn((8, "templates_versions_snapshots"), self.journal())
+        self.assertIn((9, "template_binding_codes"), self.journal())
 
         tables = set(self.engine.dialect.get_table_names(self.engine.connect()))
         self.assertTrue(

@@ -120,7 +120,7 @@ class TemplateDatabaseTestCase(unittest.TestCase):
         header: str = "Заголовок",
         body: str = "Текст [название]",
         footer: str = "Подвал",
-        brick_ids: tuple[int, ...] | None = None,
+        chosen_brick_ids: dict[str, int] | None = None,
     ) -> TemplateDetails:
         return create_personal_template(
             self.session,
@@ -129,7 +129,7 @@ class TemplateDatabaseTestCase(unittest.TestCase):
             header=header,
             body=body,
             footer=footer,
-            brick_ids=brick_ids,
+            chosen_brick_ids=chosen_brick_ids,
         )
 
     def make_personal_brick(self, owner: User, code: str) -> int:

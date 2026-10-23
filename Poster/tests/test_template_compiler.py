@@ -49,6 +49,7 @@ class _FakeBrick:
         self.scope = scope
         self.status = status
         self.title = title or f"Кирпичик {code}"
+        self.rules: dict[str, object] = {}
 
 
 class _FakeBrickStore:
@@ -183,6 +184,7 @@ class TemplateRenderTests(unittest.TestCase):
                 _FakeBrick(9, "тип", value_type="choice"),
             ]
         )
+        self.brick_store.bricks["тип"].rules = {"choices": ["Оффлайн", "Онлайн"]}
 
     def _render(self, text: str, values: dict[int, object]) -> str:
         with patch(
