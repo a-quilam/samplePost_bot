@@ -73,7 +73,7 @@ class Stage22BCompatibilityTests(unittest.TestCase):
         legacy_tables = [
             table
             for name, table in Base.metadata.tables.items()
-            if name not in {"brick_sessions"} | stage23_tables
+            if name not in {"brick_sessions", "brick_proposals"} | stage23_tables
         ]
         Base.metadata.create_all(bind=self.engine, tables=legacy_tables)
         self.Session = sessionmaker(bind=self.engine, expire_on_commit=False)
@@ -130,7 +130,7 @@ class Stage22BCompatibilityTests(unittest.TestCase):
         self.session.close()
 
         self.assertEqual(journal(self.path)[-1], (6, "bricks_registry"))
-        self.assertEqual(run_migrations(self.engine), 10)
+        self.assertEqual(run_migrations(self.engine), 11)
         copies = self.backup_paths()
         self.assertEqual(len(copies), 1, copies)
         backup = copies[0]
@@ -164,7 +164,7 @@ class Stage22BCompatibilityTests(unittest.TestCase):
         finally:
             backup_connection.close()
 
-        self.assertEqual(journal(self.path)[-1], (10, "template_sessions"))
+        self.assertEqual(journal(self.path)[-1], (11, "brick_proposals"))
         with self.Session() as session:
             stored_draft = session.get(Draft, draft_id)
             stored_state = session.get(UserState, user.id)
@@ -186,7 +186,7 @@ class Stage22BCompatibilityTests(unittest.TestCase):
             self.assertIsNotNone(session.get(Place, place.id))
 
     def test_migration_seven_is_idempotent_and_sessions_survive_restart(self) -> None:
-        self.assertEqual(run_migrations(self.engine), 10)
+        self.assertEqual(run_migrations(self.engine), 11)
         with self.engine.begin() as connection:
             connection.exec_driver_sql(
                 "INSERT INTO brick_sessions "
@@ -194,9 +194,9 @@ class Stage22BCompatibilityTests(unittest.TestCase):
                 "VALUES (?, ?, '2026-01-01 00:00:00')",
                 (9_440_002, '{"phase":"hub","page":0}'),
             )
-        self.assertEqual(run_migrations(self.engine), 10)
-        self.assertEqual(run_migrations(self.engine), 10)
-        self.assertEqual(len(journal(self.path)), 10)
+        self.assertEqual(run_migrations(self.engine), 11)
+        self.assertEqual(run_migrations(self.engine), 11)
+        self.assertEqual(len(journal(self.path)), 11)
         self.assertEqual(
             scalar(
                 self.path,

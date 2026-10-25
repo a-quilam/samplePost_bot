@@ -318,7 +318,7 @@ class PlaceSchemaTests(unittest.TestCase):
 
     # --- границы Stage 19A ---------------------------------------------------
 
-    def test_bricks_and_templates_exist_without_future_value_tables(self) -> None:
+    def test_bricks_and_templates_exist_without_draft_value_tables(self) -> None:
         from base import Base
 
         Base.metadata.create_all(bind=self.engine)
@@ -335,8 +335,10 @@ class PlaceSchemaTests(unittest.TestCase):
             }
             <= tables
         )
-        # Значения кирпичиков и предложения остаются задачами следующих этапов.
-        self.assertFalse({"draft_values", "brick_proposals"} & tables)
+        # Значения кирпичиков остаются задачей следующих этапов; предложения
+        # кирпичиков уже входят в миграцию 11 Stage 26.
+        self.assertFalse("draft_values" in tables)
+        self.assertIn("brick_proposals", tables)
         self.assertIn("photos", Draft.__table__.columns)
         self.assertFalse(
             any(

@@ -90,6 +90,7 @@ class BrickSchemaTests(BrickDatabaseTestCase):
                 (8, "templates_versions_snapshots"),
                 (9, "template_binding_codes"),
                 (10, "template_sessions"),
+                (11, "brick_proposals"),
             ],
         )
         definitions = list_system_bricks(self.session)
@@ -114,8 +115,8 @@ class BrickSchemaTests(BrickDatabaseTestCase):
             (item.id, item.code, item.title, item.created_at)
             for item in list_system_bricks(self.session)
         ]
-        self.assertEqual(run_migrations(self.engine), 10)
-        self.assertEqual(run_migrations(self.engine), 10)
+        self.assertEqual(run_migrations(self.engine), 11)
+        self.assertEqual(run_migrations(self.engine), 11)
         after = [
             (item.id, item.code, item.title, item.created_at)
             for item in list_system_bricks(self.session)
@@ -128,14 +129,14 @@ class BrickSchemaTests(BrickDatabaseTestCase):
                 ).scalar_one()
             )
         self.assertEqual(count, 9)
-        self.assertEqual(len(self.journal()), 10)
+        self.assertEqual(len(self.journal()), 11)
 
     def test_restart_does_not_overwrite_a_controlled_system_definition(self) -> None:
         with self.engine.begin() as connection:
             connection.execute(
                 text("UPDATE bricks SET title='Название (изменено)' WHERE id=1")
             )
-        self.assertEqual(run_migrations(self.engine), 10)
+        self.assertEqual(run_migrations(self.engine), 11)
         self.session.expire_all()
         changed = list_system_bricks(self.session)[0]
         self.assertEqual(changed.id, 1)
@@ -387,7 +388,7 @@ class BrickSchemaTests(BrickDatabaseTestCase):
         self.assertIn("templates", tables)
         self.assertIn("template_versions", tables)
         self.assertIn("template_snapshots", tables)
-        self.assertNotIn("brick_proposals", tables)
+        self.assertIn("brick_proposals", tables)
 
 
 if __name__ == "__main__":  # pragma: no cover
