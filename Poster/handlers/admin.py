@@ -70,7 +70,32 @@ from admin_transfer_store import (
     reject_admin_transfer,
     transfer_status_label,
 )
+from brick_proposal_store import (
+    PROPOSAL_PAGE_SIZE,
+    PROPOSAL_SCOPE_SYSTEM,
+    PROPOSAL_STATUS_APPROVED,
+    PROPOSAL_STATUS_PENDING,
+    PROPOSAL_STATUS_REJECTED,
+    PROPOSAL_STATUS_WITHDRAWN,
+    BrickProposalSnapshot,
+    ProposalActorError,
+    ProposalPermissionError,
+    approve_brick_proposal,
+    count_pending_for_place,
+    count_pending_place_proposals,
+    count_pending_system_proposals,
+    get_admin_proposal,
+    list_pending_for_place,
+    list_pending_place_proposals,
+    list_pending_system_proposals,
+    reject_brick_proposal,
+)
 from brick_state import clear_brick_session
+from brick_types import (
+    BRICK_TYPE_CHOICE,
+    BRICK_TYPE_NUMBER,
+    BRICK_TYPE_TITLES,
+)
 from database import SessionLocal
 from models import User
 from permissions import (
@@ -159,15 +184,22 @@ PHASES = {
     "transfer_confirm_known",
     "transfer_confirm_invite",
     "transfer_outgoing",
+    "proposal_global_list",
+    "proposal_places_list",
+    "proposal_card",
+    "proposal_approve_confirm",
+    "proposal_reject_confirm",
 }
 
-SUPER_ONLY_PHASES = {
+_SUPER_ONLY_PHASES = {
     "assign_search",
     "assign_results",
     "confirm_assign",
     "confirm_replace",
     "confirm_revoke",
+    "proposal_global_list",
 }
+SUPER_ONLY_PHASES = _SUPER_ONLY_PHASES
 
 
 def _h(value: object) -> str:
@@ -651,7 +683,7 @@ async def _send_user_notification(
         return True
     except Exception as e:  # noqa: BLE001 — сбой Telegram не ломает операцию
         logger.warning(
-            "Не удалось отправить уведомление о передаче пользователю %s: %s",
+            "Не удалось отправить уведомление пользователю %s: %s",
             telegram_user_id,
             e,
         )
@@ -847,10 +879,38 @@ def _places_content(
             if access_kind == "superadmin"
             else "Действующих назначений пока нет."
         )
-        keyboard = InlineKeyboardMarkup(
-            [[InlineKeyboardButton("🏠 Главное меню", callback_data="main_menu")]]
+        empty_rows: list[list[InlineKeyboardButton]] = []
+        if access_kind == "superadmin":
+            try:
+                system_pending = count_pending_system_proposals(
+                    session, telegram_user_id
+                )
+                places_pending = count_pending_place_proposals(
+                    session, telegram_user_id
+                )
+            except ProposalPermissionError:
+                system_pending = 0
+                places_pending = 0
+            empty_rows.append(
+                [
+                    InlineKeyboardButton(
+                        f"🌍 Глобальные предложения ({system_pending})",
+                        callback_data="adm_bprop_global",
+                    )
+                ]
+            )
+            empty_rows.append(
+                [
+                    InlineKeyboardButton(
+                        f"📍 Предложения по местам ({places_pending})",
+                        callback_data="adm_bprop_places",
+                    )
+                ]
+            )
+        empty_rows.append(
+            [InlineKeyboardButton("🏠 Главное меню", callback_data="main_menu")]
         )
-        return text, keyboard
+        return text, InlineKeyboardMarkup(empty_rows)
 
     text = f"{heading} — {total}\n\n{intro}\n\n"
     rows: list[list[InlineKeyboardButton]] = []
@@ -891,6 +951,29 @@ def _places_content(
         )
     if nav:
         rows.append(nav)
+    if access_kind == "superadmin":
+        try:
+            system_pending = count_pending_system_proposals(session, telegram_user_id)
+            places_pending = count_pending_place_proposals(session, telegram_user_id)
+        except ProposalPermissionError:
+            system_pending = 0
+            places_pending = 0
+        rows.append(
+            [
+                InlineKeyboardButton(
+                    f"🌍 Глобальные предложения ({system_pending})",
+                    callback_data="adm_bprop_global",
+                )
+            ]
+        )
+        rows.append(
+            [
+                InlineKeyboardButton(
+                    f"📍 Предложения по местам ({places_pending})",
+                    callback_data="adm_bprop_places",
+                )
+            ]
+        )
     rows.append([InlineKeyboardButton("🏠 Главное меню", callback_data="main_menu")])
     return text, InlineKeyboardMarkup(rows)
 
@@ -962,6 +1045,21 @@ def _place_keyboard(
             )
         ]
     )
+    if viewer_telegram_user_id is not None:
+        try:
+            pending_proposals = count_pending_for_place(
+                session, viewer_telegram_user_id, details.place_id
+            )
+        except ProposalPermissionError:
+            pending_proposals = 0
+        rows.append(
+            [
+                InlineKeyboardButton(
+                    f"🧱 Предложения кирпичиков ({pending_proposals})",
+                    callback_data=f"adm_bprop_place:{details.place_id}",
+                )
+            ]
+        )
     active = get_active_place_admin(session, details.place_id)
     if active is not None and viewer_telegram_user_id == active.user.telegram_user_id:
         rows.append(
@@ -1002,6 +1100,302 @@ def _place_keyboard(
     rows.append([InlineKeyboardButton("◀️ К списку мест", callback_data="adm_places")])
     rows.append([InlineKeyboardButton("🏠 Главное меню", callback_data="main_menu")])
     return InlineKeyboardMarkup(rows)
+
+
+_PROPOSAL_STATUS_UI = {
+    PROPOSAL_STATUS_PENDING: "⏳ Ожидает решения",
+    PROPOSAL_STATUS_APPROVED: "✅ Одобрено",
+    PROPOSAL_STATUS_REJECTED: "❌ Отклонено",
+    PROPOSAL_STATUS_WITHDRAWN: "↩️ Отозвано автором",
+}
+
+
+def _proposal_status_label(status: str) -> str:
+    return _PROPOSAL_STATUS_UI.get(status, status)
+
+
+def _proposal_settings_text(proposal: BrickProposalSnapshot) -> str:
+    rules = proposal.rules
+    if proposal.value_type == BRICK_TYPE_NUMBER:
+        parts: list[str] = []
+        if rules.get("integer"):
+            parts.append("только целые числа")
+        if "min" in rules:
+            parts.append(f"минимум {rules['min']}")
+        if "max" in rules:
+            parts.append(f"максимум {rules['max']}")
+        if "suffix" in rules:
+            parts.append(f"подпись «{rules['suffix']}»")
+        return "; ".join(parts) + "." if parts else "Без ограничений."
+    if proposal.value_type == BRICK_TYPE_CHOICE:
+        raw_choices = rules.get("choices")
+        choices = raw_choices if isinstance(raw_choices, list) else []
+        labels = ", ".join(str(item) for item in choices) or "список пуст"
+        multiple = (
+            "можно выбрать несколько" if rules.get("multiple") else "один вариант"
+        )
+        return f"{labels}; {multiple}."
+    return "Без дополнительных настроек."
+
+
+def _proposal_target_label(proposal: BrickProposalSnapshot) -> str:
+    if proposal.scope == PROPOSAL_SCOPE_SYSTEM:
+        return "вся система"
+    return f"место «{proposal.place_name or f'#{proposal.place_id}'}»"
+
+
+def _proposal_page_note(offset: int, count: int, total: int) -> str:
+    if total <= 0:
+        return ""
+    pages = max((total + PROPOSAL_PAGE_SIZE - 1) // PROPOSAL_PAGE_SIZE, 1)
+    page = offset // PROPOSAL_PAGE_SIZE + 1
+    return (
+        f"Показано {offset + 1}–{offset + count} из {total}. "
+        f"Страница {page} из {pages}."
+    )
+
+
+def _proposal_admin_list_content(
+    session: Session,
+    telegram_user_id: int,
+    state: dict,
+) -> tuple[str, InlineKeyboardMarkup]:
+    phase = state.get("phase")
+    offset = _page_value(state, "proposal_offset")
+    place_filter = state.get("proposal_place_filter")
+    if phase == "proposal_global_list":
+        heading = "🌍 Глобальные предложения"
+        intro = (
+            "Предложения новых кирпичиков для всей системы. Рассматривать "
+            "их может только суперадминистратор."
+        )
+        proposals, total = list_pending_system_proposals(
+            session,
+            telegram_user_id,
+            offset=offset,
+            limit=PROPOSAL_PAGE_SIZE,
+        )
+        if total and offset >= total:
+            offset = ((total - 1) // PROPOSAL_PAGE_SIZE) * PROPOSAL_PAGE_SIZE
+            proposals, total = list_pending_system_proposals(
+                session,
+                telegram_user_id,
+                offset=offset,
+                limit=PROPOSAL_PAGE_SIZE,
+            )
+        page_prefix = "adm_bprop_global_page"
+        back_label = "◀️ К списку мест"
+    else:
+        if isinstance(place_filter, int) and not isinstance(place_filter, bool):
+            details = get_place_details(session, place_filter)
+            if details is None:
+                state.clear()
+                state.update(_new_state())
+                raise ProposalPermissionError("Место не существует или было удалено.")
+            heading = "🧱 Предложения кирпичиков"
+            intro = (
+                f"Ожидающие предложения для места «{_h(details.canonical_name)}». "
+                "Другие места здесь не показываются."
+            )
+            proposals, total = list_pending_for_place(
+                session,
+                telegram_user_id,
+                details.place_id,
+                offset=offset,
+                limit=PROPOSAL_PAGE_SIZE,
+            )
+            if total and offset >= total:
+                offset = ((total - 1) // PROPOSAL_PAGE_SIZE) * PROPOSAL_PAGE_SIZE
+                proposals, total = list_pending_for_place(
+                    session,
+                    telegram_user_id,
+                    details.place_id,
+                    offset=offset,
+                    limit=PROPOSAL_PAGE_SIZE,
+                )
+            back_label = "◀️ К месту"
+        else:
+            heading = "📍 Предложения по местам"
+            intro = (
+                "Все ожидающие предложения для существующих мест. "
+                "Глобальные системные предложения показаны в отдельном разделе."
+            )
+            proposals, total = list_pending_place_proposals(
+                session,
+                telegram_user_id,
+                offset=offset,
+                limit=PROPOSAL_PAGE_SIZE,
+            )
+            if total and offset >= total:
+                offset = ((total - 1) // PROPOSAL_PAGE_SIZE) * PROPOSAL_PAGE_SIZE
+                proposals, total = list_pending_place_proposals(
+                    session,
+                    telegram_user_id,
+                    offset=offset,
+                    limit=PROPOSAL_PAGE_SIZE,
+                )
+            back_label = "◀️ К списку мест"
+        page_prefix = "adm_bprop_places_page"
+    state["proposal_offset"] = offset
+    text = f"{heading} — {total}\n\n{intro}"
+    if not total:
+        text += (
+            "\n\nОжидающих предложений нет. Отозванные и решённые "
+            "предложения в очередь не попадают."
+        )
+    else:
+        text += "\n\n" + _proposal_page_note(offset, len(proposals), total)
+        for index, proposal in enumerate(proposals, start=offset + 1):
+            text += (
+                f"\n{index}. <b>{_h(proposal.title)}</b> "
+                f"<code>[{_h(proposal.code)}]</code>\n"
+                f"   Автор: {_h(_short(proposal.author_label, 100))}\n"
+                f"   Область: {_h(_proposal_target_label(proposal))}\n"
+                f"   Отправлено: {_h(_date_label(proposal.created_at))}\n"
+            )
+    rows = [
+        [
+            InlineKeyboardButton(
+                _button_name(
+                    f"{index}. ",
+                    f"{proposal.title} — [{proposal.code}]",
+                ),
+                callback_data=f"adm_bprop_open:{proposal.id}",
+            )
+        ]
+        for index, proposal in enumerate(proposals, start=offset + 1)
+    ]
+    navigation: list[InlineKeyboardButton] = []
+    if offset > 0:
+        navigation.append(
+            InlineKeyboardButton(
+                "⬅️ Назад",
+                callback_data=f"{page_prefix}:{max(offset - PROPOSAL_PAGE_SIZE, 0)}",
+            )
+        )
+    if offset + len(proposals) < total:
+        navigation.append(
+            InlineKeyboardButton(
+                "Вперёд ➡️",
+                callback_data=f"{page_prefix}:{offset + PROPOSAL_PAGE_SIZE}",
+            )
+        )
+    if navigation:
+        rows.append(navigation)
+    rows.append([InlineKeyboardButton(back_label, callback_data="adm_bprop_back")])
+    rows.append([InlineKeyboardButton("🏠 Главное меню", callback_data="main_menu")])
+    return text, InlineKeyboardMarkup(rows)
+
+
+def _proposal_admin_card_content(
+    proposal: BrickProposalSnapshot,
+) -> tuple[str, InlineKeyboardMarkup]:
+    parts = [
+        "🧱 <b>Предложение кирпичика</b>",
+        "",
+        f"Название: <b>{_h(proposal.title)}</b>",
+        f"Обозначение: <code>[{_h(proposal.code)}]</code>",
+        f"Тип: {_h(BRICK_TYPE_TITLES.get(proposal.value_type, proposal.value_type))}",
+        f"Настройки: {_h(_proposal_settings_text(proposal))}",
+        f"Область: {_h(_proposal_target_label(proposal))}",
+        "",
+        f"Автор: {_h(proposal.author_label)}",
+        f"Отправлено: {_h(_date_label(proposal.created_at))}",
+        f"Статус: {_h(_proposal_status_label(proposal.status))}",
+    ]
+    if proposal.decided_at is not None:
+        parts.append(f"Решение: {_h(_date_label(proposal.decided_at))}")
+    if proposal.status == PROPOSAL_STATUS_APPROVED:
+        parts.append(
+            f"Создан отдельный кирпичик #{proposal.approved_brick_id}. "
+            "Исходный личный кирпичик автора не изменён."
+        )
+    elif proposal.status == PROPOSAL_STATUS_REJECTED:
+        if proposal.decision_note:
+            parts.append(f"Причина: {_h(proposal.decision_note)}")
+        else:
+            parts.append("Предложение отклонено без изменения личного кирпичика.")
+    elif proposal.status == PROPOSAL_STATUS_WITHDRAWN:
+        parts.append("Предложение отозвано автором. Решение уже невозможно.")
+    else:
+        parts.extend(
+            [
+                "",
+                "Снимок названия, кода, типа и настроек зафиксирован при "
+                "отправке. Правки и архивация личного кирпичика на него не "
+                "влияют. Код будет повторно проверен при одобрении.",
+            ]
+        )
+    rows: list[list[InlineKeyboardButton]] = []
+    if proposal.status == PROPOSAL_STATUS_PENDING:
+        rows.append(
+            [
+                InlineKeyboardButton(
+                    "✅ Одобрить",
+                    callback_data=f"adm_bprop_approve:{proposal.id}",
+                ),
+                InlineKeyboardButton(
+                    "❌ Отклонить",
+                    callback_data=f"adm_bprop_reject:{proposal.id}",
+                ),
+            ]
+        )
+    rows.append([InlineKeyboardButton("◀️ К очереди", callback_data="adm_bprop_back")])
+    return "\n".join(parts), InlineKeyboardMarkup(rows)
+
+
+def _proposal_approve_confirm_content(
+    proposal: BrickProposalSnapshot,
+) -> tuple[str, InlineKeyboardMarkup]:
+    text = (
+        "✅ <b>Одобрить предложение кирпичика?</b>\n\n"
+        f"Название: {_h(proposal.title)}\n"
+        f"Обозначение: <code>[{_h(proposal.code)}]</code>\n"
+        f"Область: {_h(_proposal_target_label(proposal))}\n"
+        f"Автор: {_h(proposal.author_label)}\n\n"
+        "Будет создан отдельный кирпичик в целевой области. Исходный личный "
+        "кирпичик, его владелец и существующие шаблоны не изменятся. При "
+        "подтверждении права, статус, область, тип, правила и занятость кода "
+        "проверяются ещё раз в одной транзакции. При конфликте код не будет "
+        "переименован молча."
+    )
+    return text, InlineKeyboardMarkup(
+        [
+            [
+                InlineKeyboardButton(
+                    "✅ Да, одобрить",
+                    callback_data=f"adm_bprop_approve_yes:{proposal.id}",
+                )
+            ],
+            [InlineKeyboardButton("◀️ Нет, назад", callback_data="adm_bprop_back")],
+        ]
+    )
+
+
+def _proposal_reject_confirm_content(
+    proposal: BrickProposalSnapshot,
+) -> tuple[str, InlineKeyboardMarkup]:
+    text = (
+        "❌ <b>Отклонить предложение кирпичика?</b>\n\n"
+        f"Название: {_h(proposal.title)}\n"
+        f"Обозначение: <code>[{_h(proposal.code)}]</code>\n"
+        f"Область: {_h(_proposal_target_label(proposal))}\n"
+        f"Автор: {_h(proposal.author_label)}\n\n"
+        "Предложение получит окончательный статус «отклонено». Личный "
+        "кирпичик автора и шаблоны не изменятся. Автор сможет позже "
+        "отправить новое предложение."
+    )
+    return text, InlineKeyboardMarkup(
+        [
+            [
+                InlineKeyboardButton(
+                    "❌ Да, отклонить",
+                    callback_data=f"adm_bprop_reject_yes:{proposal.id}",
+                )
+            ],
+            [InlineKeyboardButton("◀️ Нет, назад", callback_data="adm_bprop_back")],
+        ]
+    )
 
 
 def _assign_search_text(details: PlaceDetails, state: dict) -> str:
@@ -1681,6 +2075,64 @@ async def _render_phase(
                         )
                     else:
                         text, keyboard = content
+        elif phase in {"proposal_global_list", "proposal_places_list"}:
+            place_filter = state.get("proposal_place_filter")
+            if (
+                phase == "proposal_places_list"
+                and not isinstance(place_filter, int)
+                and access_kind != "superadmin"
+            ):
+                state.clear()
+                state.update(_new_state())
+                notice = notice or (
+                    "Сводная очередь предложений мест доступна только "
+                    "суперадминистратору."
+                )
+                text, keyboard = _places_content(session, state, access_kind, user_id)
+            else:
+                try:
+                    text, keyboard = _proposal_admin_list_content(
+                        session, user_id, state
+                    )
+                except ProposalPermissionError as exc:
+                    state.clear()
+                    state.update(_new_state())
+                    notice = notice or str(exc)
+                    text, keyboard = _places_content(
+                        session, state, access_kind, user_id
+                    )
+        elif phase in {
+            "proposal_card",
+            "proposal_approve_confirm",
+            "proposal_reject_confirm",
+        }:
+            try:
+                proposal_id = int(state.get("proposal_id") or 0)
+            except (TypeError, ValueError):
+                proposal_id = 0
+            proposal = (
+                get_admin_proposal(session, user_id, proposal_id)
+                if proposal_id > 0
+                else None
+            )
+            if proposal is None:
+                state.clear()
+                state.update(_new_state())
+                notice = notice or (
+                    "Предложение недоступно: оно не найдено или полномочия "
+                    "на это место больше не действуют."
+                )
+                text, keyboard = _places_content(session, state, access_kind, user_id)
+            elif phase == "proposal_card":
+                text, keyboard = _proposal_admin_card_content(proposal)
+            elif proposal.status != PROPOSAL_STATUS_PENDING:
+                state["phase"] = "proposal_card"
+                notice = notice or "Предложение уже не ожидает решения."
+                text, keyboard = _proposal_admin_card_content(proposal)
+            elif phase == "proposal_approve_confirm":
+                text, keyboard = _proposal_approve_confirm_content(proposal)
+            else:
+                text, keyboard = _proposal_reject_confirm_content(proposal)
         else:  # confirm_*
             if details is None:
                 state.clear()
@@ -3767,6 +4219,459 @@ class AdminTextHandler(MessageHandler):
         return matched
 
 
+# --- Предложения кирпичиков: очереди и решения (Stage 26) ------------------
+
+
+def _proposal_callback_id(data: str) -> int | None:
+    try:
+        value = int(data.rsplit(":", 1)[1])
+    except (IndexError, TypeError, ValueError):
+        return None
+    return value if value > 0 else None
+
+
+def _proposal_callback_offset(data: str) -> int | None:
+    try:
+        value = int(data.rsplit(":", 1)[1])
+    except (IndexError, TypeError, ValueError):
+        return None
+    return max(value, 0)
+
+
+async def handle_brick_proposals_global(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> None:
+    query = ctx.query(update)
+    if not is_superadmin(ctx.user(update).id):
+        await query.answer(DENIED_ALERT, show_alert=True)
+        return
+    state = load_admin_session(ctx.user(update).id)
+    if state is None or state.get("phase") != "places":
+        await _stale(update)
+        return
+    await query.answer()
+    state = _new_state()
+    state.update(
+        {
+            "phase": "proposal_global_list",
+            "proposal_offset": 0,
+        }
+    )
+    await _render_phase(update, context, state)
+
+
+async def handle_brick_proposals_places(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> None:
+    query = ctx.query(update)
+    if not is_superadmin(ctx.user(update).id):
+        await query.answer(DENIED_ALERT, show_alert=True)
+        return
+    state = load_admin_session(ctx.user(update).id)
+    if state is None or state.get("phase") != "places":
+        await _stale(update)
+        return
+    await query.answer()
+    state = _new_state()
+    state.update(
+        {
+            "phase": "proposal_places_list",
+            "proposal_offset": 0,
+        }
+    )
+    state.pop("proposal_place_filter", None)
+    await _render_phase(update, context, state)
+
+
+async def handle_brick_proposals_place(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> None:
+    query = ctx.query(update)
+    state = load_admin_session(ctx.user(update).id)
+    if state is None or state.get("phase") != "place":
+        await _stale(update)
+        return
+    place_id = _proposal_callback_id(str(query.data or ""))
+    state_place_id = state.get("place_id")
+    if (
+        place_id is None
+        or not isinstance(state_place_id, int)
+        or state_place_id != place_id
+    ):
+        await _stale(update)
+        return
+    session = SessionLocal()
+    try:
+        allowed = can_manage_place(session, ctx.user(update).id, place_id)
+    finally:
+        session.close()
+    if not allowed:
+        await query.answer(DENIED_ALERT, show_alert=True)
+        return
+    await query.answer()
+    state["phase"] = "proposal_places_list"
+    state["proposal_offset"] = 0
+    state["proposal_place_filter"] = place_id
+    await _render_phase(update, context, state)
+
+
+async def handle_brick_proposals_global_page(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> None:
+    query = ctx.query(update)
+    state = load_admin_session(ctx.user(update).id)
+    if state is None or state.get("phase") != "proposal_global_list":
+        await _stale(update)
+        return
+    offset = _proposal_callback_offset(str(query.data or ""))
+    if offset is None:
+        await _stale(update)
+        return
+    await query.answer()
+    state["proposal_offset"] = offset
+    await _render_phase(update, context, state)
+
+
+async def handle_brick_proposals_places_page(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> None:
+    query = ctx.query(update)
+    state = load_admin_session(ctx.user(update).id)
+    if state is None or state.get("phase") != "proposal_places_list":
+        await _stale(update)
+        return
+    offset = _proposal_callback_offset(str(query.data or ""))
+    if offset is None:
+        await _stale(update)
+        return
+    await query.answer()
+    state["proposal_offset"] = offset
+    await _render_phase(update, context, state)
+
+
+async def handle_brick_proposals_open(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> None:
+    query = ctx.query(update)
+    state = load_admin_session(ctx.user(update).id)
+    if state is None or state.get("phase") not in {
+        "proposal_global_list",
+        "proposal_places_list",
+    }:
+        await _stale(update)
+        return
+    proposal_id = _proposal_callback_id(str(query.data or ""))
+    if proposal_id is None:
+        await _stale(update)
+        return
+    session = SessionLocal()
+    try:
+        proposal = get_admin_proposal(session, ctx.user(update).id, proposal_id)
+    finally:
+        session.close()
+    if proposal is None:
+        await query.answer("Предложение недоступно.", show_alert=True)
+        await _render_phase(
+            update,
+            context,
+            state,
+            notice="Предложение не найдено или недоступно.",
+        )
+        return
+    await query.answer()
+    state["proposal_return_phase"] = state.get("phase")
+    state["proposal_id"] = proposal.id
+    state["phase"] = "proposal_card"
+    await _render_phase(update, context, state)
+
+
+async def handle_brick_proposal_approve(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> None:
+    query = ctx.query(update)
+    state = load_admin_session(ctx.user(update).id)
+    if state is None or state.get("phase") != "proposal_card":
+        await _stale(update)
+        return
+    proposal_id = _proposal_callback_id(str(query.data or ""))
+    if proposal_id is None or state.get("proposal_id") != proposal_id:
+        await _stale(update)
+        return
+    session = SessionLocal()
+    try:
+        proposal = get_admin_proposal(session, ctx.user(update).id, proposal_id)
+    finally:
+        session.close()
+    if proposal is None:
+        await query.answer(
+            "Предложение недоступно: полномочия изменились.",
+            show_alert=True,
+        )
+        await _render_phase(
+            update,
+            context,
+            state,
+            notice=(
+                "Предложение недоступно или полномочия на это место больше "
+                "не действуют."
+            ),
+        )
+        return
+    await query.answer()
+    if proposal.status != PROPOSAL_STATUS_PENDING:
+        state["phase"] = "proposal_card"
+        await _render_phase(
+            update,
+            context,
+            state,
+            notice="Предложение уже не ожидает решения.",
+        )
+        return
+    state["phase"] = "proposal_approve_confirm"
+    await _render_phase(update, context, state)
+
+
+async def handle_brick_proposal_reject(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> None:
+    query = ctx.query(update)
+    state = load_admin_session(ctx.user(update).id)
+    if state is None or state.get("phase") != "proposal_card":
+        await _stale(update)
+        return
+    proposal_id = _proposal_callback_id(str(query.data or ""))
+    if proposal_id is None or state.get("proposal_id") != proposal_id:
+        await _stale(update)
+        return
+    session = SessionLocal()
+    try:
+        proposal = get_admin_proposal(session, ctx.user(update).id, proposal_id)
+    finally:
+        session.close()
+    if proposal is None:
+        await query.answer(
+            "Предложение недоступно: полномочия изменились.",
+            show_alert=True,
+        )
+        await _render_phase(
+            update,
+            context,
+            state,
+            notice=(
+                "Предложение недоступно или полномочия на это место больше "
+                "не действуют."
+            ),
+        )
+        return
+    await query.answer()
+    if proposal.status != PROPOSAL_STATUS_PENDING:
+        state["phase"] = "proposal_card"
+        await _render_phase(
+            update,
+            context,
+            state,
+            notice="Предложение уже не ожидает решения.",
+        )
+        return
+    state["phase"] = "proposal_reject_confirm"
+    await _render_phase(update, context, state)
+
+
+async def _notify_proposal_author(
+    context: ContextTypes.DEFAULT_TYPE,
+    proposal: BrickProposalSnapshot,
+    *,
+    approved: bool,
+    brick_id: int | None = None,
+) -> bool:
+    """Best-effort уведомление после уже зафиксированного решения."""
+    if approved:
+        text = (
+            f"✅ Ваше предложение кирпичика «{_h(proposal.title)}» "
+            f"<code>[{_h(proposal.code)}]</code> одобрено.\n\n"
+            f"Область: {_h(_proposal_target_label(proposal))}.\n"
+            "Создан отдельный кирпичик; ваш исходный личный кирпичик и "
+            "шаблоны не изменены."
+        )
+        if brick_id is not None:
+            text += f"\nНовый кирпичик: #{brick_id}."
+    else:
+        text = (
+            f"❌ Ваше предложение кирпичика «{_h(proposal.title)}» "
+            f"<code>[{_h(proposal.code)}]</code> отклонено.\n\n"
+            f"Область: {_h(_proposal_target_label(proposal))}.\n"
+            "Личный кирпичик и шаблоны не изменены. Новое предложение можно "
+            "отправить позже."
+        )
+        if proposal.decision_note:
+            text += f"\nПричина: {_h(proposal.decision_note)}"
+    text += "\n\nСтатус доступен в разделе «Мои кирпичики» → «Мои предложения»."
+    return await _send_user_notification(
+        context, proposal.author_telegram_user_id, text
+    )
+
+
+async def _handle_brick_proposal_decision(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+    *,
+    approved: bool,
+) -> None:
+    query = ctx.query(update)
+    state = load_admin_session(ctx.user(update).id)
+    expected_phase = (
+        "proposal_approve_confirm" if approved else "proposal_reject_confirm"
+    )
+    if state is None or state.get("phase") != expected_phase:
+        await _stale(update)
+        return
+    proposal_id = _proposal_callback_id(str(query.data or ""))
+    if proposal_id is None or state.get("proposal_id") != proposal_id:
+        await _stale(update)
+        return
+    user_id = ctx.user(update).id
+    session = SessionLocal()
+    try:
+        _ensure_user(session, update)
+        result = (
+            approve_brick_proposal(
+                session,
+                actor_telegram_user_id=user_id,
+                proposal_id=proposal_id,
+            )
+            if approved
+            else reject_brick_proposal(
+                session,
+                actor_telegram_user_id=user_id,
+                proposal_id=proposal_id,
+            )
+        )
+    except (ProposalPermissionError, ProposalActorError, ValueError) as exc:
+        await query.answer(str(exc), show_alert=True)
+        state.clear()
+        state.update(_new_state())
+        await _render_phase(
+            update,
+            context,
+            state,
+            notice=(
+                "Полномочия изменились или предложение недоступно; решение "
+                "не принято."
+            ),
+        )
+        return
+    finally:
+        session.close()
+
+    await query.answer()
+    if result.status == "not_found":
+        state.clear()
+        state.update(_new_state())
+        await _render_phase(
+            update,
+            context,
+            state,
+            notice=result.message or "Предложение не найдено.",
+        )
+        return
+    if result.status in {"already_decided", "stale"}:
+        state["phase"] = "proposal_card"
+        await _render_phase(
+            update,
+            context,
+            state,
+            notice=result.message or "Предложение уже рассмотрено.",
+        )
+        return
+    if result.status in {"conflict", "error", "invalid"}:
+        state["phase"] = "proposal_card"
+        await _render_phase(
+            update,
+            context,
+            state,
+            notice=result.message or "Решение не принято.",
+        )
+        return
+
+    delivered = False
+    if result.proposal is not None:
+        delivered = await _notify_proposal_author(
+            context,
+            result.proposal,
+            approved=approved,
+            brick_id=result.brick.id if result.brick is not None else None,
+        )
+    state["phase"] = "proposal_card"
+    if result.proposal is not None:
+        state["proposal_id"] = result.proposal.id
+    notice = result.message or (
+        "Предложение одобрено." if approved else "Предложение отклонено."
+    )
+    if delivered:
+        notice += " Автору отправлено уведомление."
+    else:
+        notice += (
+            " Уведомление автору не доставлено; решение сохранено, статус "
+            "доступен в «Мои предложения»."
+        )
+    await _render_phase(update, context, state, notice=notice)
+
+
+async def handle_brick_proposal_approve_confirm(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> None:
+    await _handle_brick_proposal_decision(update, context, approved=True)
+
+
+async def handle_brick_proposal_reject_confirm(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> None:
+    await _handle_brick_proposal_decision(update, context, approved=False)
+
+
+async def handle_brick_proposals_back(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> None:
+    query = ctx.query(update)
+    state = load_admin_session(ctx.user(update).id)
+    if state is None or state.get("phase") not in {
+        "proposal_global_list",
+        "proposal_places_list",
+        "proposal_card",
+        "proposal_approve_confirm",
+        "proposal_reject_confirm",
+    }:
+        await _stale(update)
+        return
+    await query.answer()
+    phase = state.get("phase")
+    if phase in {"proposal_global_list", "proposal_places_list"}:
+        if isinstance(state.get("proposal_place_filter"), int) and isinstance(
+            state.get("place_id"), int
+        ):
+            state["phase"] = "place"
+        else:
+            state.clear()
+            state.update(_new_state())
+    elif phase in {"proposal_approve_confirm", "proposal_reject_confirm"}:
+        state["phase"] = "proposal_card"
+    else:
+        return_phase = state.get("proposal_return_phase")
+        if return_phase not in {
+            "proposal_global_list",
+            "proposal_places_list",
+        }:
+            return_phase = (
+                "proposal_places_list"
+                if isinstance(state.get("proposal_place_filter"), int)
+                else "proposal_global_list"
+            )
+        state.pop("proposal_id", None)
+        state.pop("proposal_return_phase", None)
+        state["phase"] = return_phase
+    await _render_phase(update, context, state)
+
+
 async def handle_admin_stale(
     update: Update, context: ContextTypes.DEFAULT_TYPE
 ) -> None:
@@ -3839,6 +4744,42 @@ def admin_handlers() -> list[BaseHandler]:
         CallbackQueryHandler(
             handle_transfer_decline, pattern=r"^adm_transfer_decline:\d+$"
         ),
+        # Предложения кирпичиков (Stage 26).
+        CallbackQueryHandler(
+            handle_brick_proposals_global, pattern=r"^adm_bprop_global$"
+        ),
+        CallbackQueryHandler(
+            handle_brick_proposals_global_page,
+            pattern=r"^adm_bprop_global_page:\d+$",
+        ),
+        CallbackQueryHandler(
+            handle_brick_proposals_places, pattern=r"^adm_bprop_places$"
+        ),
+        CallbackQueryHandler(
+            handle_brick_proposals_places_page,
+            pattern=r"^adm_bprop_places_page:\d+$",
+        ),
+        CallbackQueryHandler(
+            handle_brick_proposals_place, pattern=r"^adm_bprop_place:\d+$"
+        ),
+        CallbackQueryHandler(
+            handle_brick_proposals_open, pattern=r"^adm_bprop_open:\d+$"
+        ),
+        CallbackQueryHandler(
+            handle_brick_proposal_approve, pattern=r"^adm_bprop_approve:\d+$"
+        ),
+        CallbackQueryHandler(
+            handle_brick_proposal_reject, pattern=r"^adm_bprop_reject:\d+$"
+        ),
+        CallbackQueryHandler(
+            handle_brick_proposal_approve_confirm,
+            pattern=r"^adm_bprop_approve_yes:\d+$",
+        ),
+        CallbackQueryHandler(
+            handle_brick_proposal_reject_confirm,
+            pattern=r"^adm_bprop_reject_yes:\d+$",
+        ),
+        CallbackQueryHandler(handle_brick_proposals_back, pattern=r"^adm_bprop_back$"),
         AdminTextHandler(
             filters.TEXT & ~filters.COMMAND,
             handle_search_text,

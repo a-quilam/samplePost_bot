@@ -706,15 +706,28 @@ def check_code_availability(
         )
     )
     if scope != BRICK_SCOPE_SYSTEM and (system_reserved or system_row is not None):
-        return BrickCodeAvailability(
-            code=canonical,
-            available=False,
-            reason="system_reserved",
-            message=(
-                f"Код «{canonical}» зарезервирован системным кирпичиком "
-                "и не может быть использован в другой области."
-            ),
-        )
+        # Stage 26: личный кирпичик, чей код был одобрен как системный,
+        # остаётся доступен для редактирования. Исключение действует только
+        # для того же кирпичика и только пока его код не меняется; новый
+        # кирпичик или смена кода на системный по-прежнему запрещены.
+        unchanged_promoted_source = False
+        if not system_reserved and system_row is not None and exclude_brick_id:
+            own = session.get(Brick, exclude_brick_id)
+            if own is not None and own.code == canonical and own.scope == scope:
+                if scope == BRICK_SCOPE_PERSONAL:
+                    unchanged_promoted_source = own.owner_user_id == owner_user_id
+                elif scope == BRICK_SCOPE_PLACE:
+                    unchanged_promoted_source = own.place_id == place_id
+        if not unchanged_promoted_source:
+            return BrickCodeAvailability(
+                code=canonical,
+                available=False,
+                reason="system_reserved",
+                message=(
+                    f"Код «{canonical}» зарезервирован системным кирпичиком "
+                    "и не может быть использован в другой области."
+                ),
+            )
     if scope == BRICK_SCOPE_SYSTEM:
         statement = select(Brick.id).where(Brick.code == canonical)
         if exclude_brick_id is not None:

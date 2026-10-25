@@ -658,6 +658,155 @@ class Brick(Base):
         )
 
 
+class BrickProposal(Base):
+    """
+    Предложение нового кирпичика для места или всей системы (Stage 26).
+
+    Строка хранит неизменяемый снимок личного определения на момент отправки,
+    а не динамический указатель на `bricks`: последующие правки или архивация
+    исходного кирпичика не меняют то, что рассматривает администратор.
+
+    `status` меняется только из `pending` в одно из терминальных состояний.
+    Для `approved` обязательна ссылка на отдельный созданный кирпичик; для
+    `rejected`/`withdrawn` её быть не может. Ограничения БД и триггеры
+    миграции 11 запрещают повторное решение, удаление истории и изменение
+    снимка после отправки.
+    """
+
+    __tablename__ = "brick_proposals"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    author_user_id: Mapped[int] = mapped_column(
+        Integer,
+        ForeignKey("users.id", ondelete="RESTRICT"),
+        nullable=False,
+    )
+    scope: Mapped[str] = mapped_column(Text, nullable=False)
+    place_id: Mapped[int | None] = mapped_column(
+        Integer,
+        ForeignKey("places.id", ondelete="RESTRICT"),
+        nullable=True,
+    )
+    source_brick_id: Mapped[int] = mapped_column(
+        Integer,
+        ForeignKey("bricks.id", ondelete="RESTRICT"),
+        nullable=False,
+    )
+    title: Mapped[str] = mapped_column(Text, nullable=False)
+    code: Mapped[str] = mapped_column(Text, nullable=False)
+    value_type: Mapped[str] = mapped_column("type", Text, nullable=False)
+    source: Mapped[str] = mapped_column(Text, nullable=False)
+    rules_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+    status: Mapped[str] = mapped_column(Text, default="pending", nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime, default=utcnow, nullable=False
+    )
+    decided_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    decided_by_user_id: Mapped[int | None] = mapped_column(
+        Integer,
+        ForeignKey("users.id", ondelete="RESTRICT"),
+        nullable=True,
+    )
+    approved_brick_id: Mapped[int | None] = mapped_column(
+        Integer,
+        ForeignKey("bricks.id", ondelete="RESTRICT"),
+        nullable=True,
+    )
+    decision_note: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+    __table_args__ = (
+        CheckConstraint(
+            "scope IN ('place', 'system')",
+            name="ck_brick_proposals_scope",
+        ),
+        CheckConstraint(
+            "(scope = 'place' AND place_id IS NOT NULL) "
+            "OR (scope = 'system' AND place_id IS NULL)",
+            name="ck_brick_proposals_target",
+        ),
+        CheckConstraint(
+            "status IN ('pending', 'approved', 'rejected', 'withdrawn')",
+            name="ck_brick_proposals_status",
+        ),
+        CheckConstraint(
+            "type IN ('short_text', 'long_text', 'date', 'time', 'url', "
+            "'number', 'choice')",
+            name="ck_brick_proposals_type",
+        ),
+        CheckConstraint(
+            "source IN ('ask', 'place', 'context')",
+            name="ck_brick_proposals_source",
+        ),
+        CheckConstraint(
+            "length(code) BETWEEN 2 AND 64",
+            name="ck_brick_proposals_code_length",
+        ),
+        CheckConstraint("code = trim(code)", name="ck_brick_proposals_code_trimmed"),
+        CheckConstraint(
+            "instr(code, ' ') = 0", name="ck_brick_proposals_code_no_space"
+        ),
+        CheckConstraint(
+            "instr(code, '[') = 0 AND instr(code, ']') = 0",
+            name="ck_brick_proposals_code_no_brackets",
+        ),
+        CheckConstraint("code <> 'фото'", name="ck_brick_proposals_no_photo_code"),
+        CheckConstraint(
+            "length(trim(title)) > 0",
+            name="ck_brick_proposals_title_not_empty",
+        ),
+        CheckConstraint(
+            "rules_json IS NULL OR (json_valid(rules_json) "
+            "AND json_type(rules_json) = 'object')",
+            name="ck_brick_proposals_rules_json_object",
+        ),
+        CheckConstraint(
+            "(status = 'pending' AND decided_at IS NULL "
+            "AND decided_by_user_id IS NULL AND approved_brick_id IS NULL "
+            "AND decision_note IS NULL) "
+            "OR (status = 'approved' AND decided_at IS NOT NULL "
+            "AND decided_by_user_id IS NOT NULL "
+            "AND approved_brick_id IS NOT NULL AND decision_note IS NULL) "
+            "OR (status = 'rejected' AND decided_at IS NOT NULL "
+            "AND decided_by_user_id IS NOT NULL AND approved_brick_id IS NULL) "
+            "OR (status = 'withdrawn' AND decided_at IS NOT NULL "
+            "AND decided_by_user_id IS NOT NULL AND approved_brick_id IS NULL "
+            "AND decision_note IS NULL)",
+            name="ck_brick_proposals_decision_shape",
+        ),
+        Index(
+            "ix_brick_proposals_author_status_created",
+            "author_user_id",
+            "status",
+            "created_at",
+        ),
+        Index(
+            "ix_brick_proposals_place_status_created",
+            "place_id",
+            "status",
+            "created_at",
+        ),
+        Index(
+            "ix_brick_proposals_status_scope_created",
+            "status",
+            "scope",
+            "created_at",
+        ),
+        Index("ix_brick_proposals_source_brick", "source_brick_id"),
+        Index(
+            "ux_brick_proposals_approved_brick",
+            "approved_brick_id",
+            unique=True,
+            sqlite_where=text("approved_brick_id IS NOT NULL"),
+        ),
+    )
+
+    def __repr__(self) -> str:
+        return (
+            f"<BrickProposal(id={self.id}, scope={self.scope!r}, "
+            f"status={self.status!r}, code={self.code!r})>"
+        )
+
+
 # --- Шаблоны анонсов, версии, связи и снимки (Stage 23) ---------------------
 
 

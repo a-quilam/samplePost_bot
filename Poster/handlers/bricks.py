@@ -21,6 +21,7 @@ from __future__ import annotations
 import logging
 import re
 import unicodedata
+from datetime import datetime
 from decimal import Decimal, InvalidOperation
 from html import escape as html_escape
 
@@ -36,6 +37,22 @@ from telegram.ext import (
 )
 
 from admin_state import clear_admin_session
+from brick_proposal_store import (
+    PROPOSAL_PAGE_SIZE,
+    PROPOSAL_SCOPE_PLACE,
+    PROPOSAL_SCOPE_SYSTEM,
+    PROPOSAL_STATUS_APPROVED,
+    PROPOSAL_STATUS_PENDING,
+    PROPOSAL_STATUS_REJECTED,
+    PROPOSAL_STATUS_WITHDRAWN,
+    BrickProposalSnapshot,
+    ProposalActorError,
+    ProposalError,
+    create_brick_proposal,
+    get_own_proposal,
+    list_own_proposals,
+    withdraw_brick_proposal,
+)
 from brick_state import load_brick_session, save_brick_session
 from brick_store import (
     BrickActorError,
@@ -69,6 +86,7 @@ from brick_types import (
 from database import SessionLocal
 from models import User
 from place_state import clear_place_session
+from place_store import get_place_details, list_places
 from template_state import clear_template_session
 from user_store import get_or_create_user
 from utils import screen
@@ -121,6 +139,17 @@ _WIZARD_PHASES = frozenset(
         "edit_menu",
     }
 )
+_PROPOSAL_PHASES = frozenset(
+    {
+        "proposal_select_brick",
+        "proposal_scope",
+        "proposal_select_place",
+        "proposal_preview",
+        "proposal_list",
+        "proposal_card",
+        "proposal_withdraw_confirm",
+    }
+)
 PHASES = frozenset(
     {
         "hub",
@@ -128,6 +157,7 @@ PHASES = frozenset(
         "card",
         "archive_confirm",
         *_WIZARD_PHASES,
+        *_PROPOSAL_PHASES,
     }
 )
 
@@ -452,6 +482,10 @@ def _hub_content(session: Session, user: User, state: dict):
     rows: list[list[InlineKeyboardButton]] = [
         [InlineKeyboardButton("➕ Создать кирпичик", callback_data="bk_create")]
     ]
+    rows.append(
+        [InlineKeyboardButton("📨 Предложить кирпичик", callback_data="bp_start")]
+    )
+    rows.append([InlineKeyboardButton("📤 Мои предложения", callback_data="bp_mine")])
     if bricks:
         rows.extend(_list_keyboard(bricks, offset=offset, total=total, archive=False))
     if archived_total:
@@ -540,6 +574,462 @@ def _archive_confirm_content(brick):
             [InlineKeyboardButton("◀️ Нет, назад", callback_data="bk_back")],
         ]
     )
+
+
+_PROPOSAL_STATUS_UI = {
+    PROPOSAL_STATUS_PENDING: "⏳ Ожидает решения",
+    PROPOSAL_STATUS_APPROVED: "✅ Одобрено",
+    PROPOSAL_STATUS_REJECTED: "❌ Отклонено",
+    PROPOSAL_STATUS_WITHDRAWN: "↩️ Отозвано",
+}
+
+
+def _proposal_status_ui(status: str) -> str:
+    return _PROPOSAL_STATUS_UI.get(status, status)
+
+
+def _proposal_date(value: datetime | None) -> str:
+    if not isinstance(value, datetime):
+        return "—"
+    return value.strftime("%d.%m.%Y %H:%M")
+
+
+def _proposal_target_text(proposal: BrickProposalSnapshot) -> str:
+    if proposal.scope == PROPOSAL_SCOPE_SYSTEM:
+        return "вся система"
+    return f"место «{proposal.place_name or f'#{proposal.place_id}'}»"
+
+
+def _proposal_page_note(offset: int, count: int, total: int) -> str:
+    if total <= 0:
+        return ""
+    last = offset + count
+    pages = max((total + PROPOSAL_PAGE_SIZE - 1) // PROPOSAL_PAGE_SIZE, 1)
+    page = offset // PROPOSAL_PAGE_SIZE + 1
+    return f"Показано {offset + 1}–{last} из {total}. Страница {page} из {pages}."
+
+
+def _proposal_reset_hub(state: dict, notice: str) -> None:
+    page, archive_page = _saved_page(state)
+    state.clear()
+    state.update(_new_hub(page=page, archive_page=archive_page))
+    state["_proposal_notice"] = notice
+
+
+def _proposal_notice_after_reset(state: dict, notice: str) -> None:
+    state["_proposal_notice"] = notice
+
+
+def _proposal_brick(session: Session, user: User, state: dict):
+    try:
+        brick_id = int(state.get("proposal_source_brick_id") or 0)
+    except (TypeError, ValueError):
+        return None
+    if brick_id <= 0:
+        return None
+    return get_personal_brick(
+        session,
+        user.telegram_user_id,
+        brick_id,
+        include_archived=False,
+    )
+
+
+def _proposal_select_brick_content(session: Session, user: User, state: dict):
+    total = count_personal_bricks(session, user.telegram_user_id)
+    if total <= 0:
+        _proposal_reset_hub(
+            state,
+            "Сначала создайте личный кирпичик — затем его можно будет "
+            "предложить месту или всей системе.",
+        )
+        return None
+    offset = _page_value(state.get("proposal_page"))
+    if offset >= total:
+        offset = ((total - 1) // PROPOSAL_PAGE_SIZE) * PROPOSAL_PAGE_SIZE
+    bricks = list_personal_bricks(
+        session,
+        user.telegram_user_id,
+        limit=PROPOSAL_PAGE_SIZE,
+        offset=offset,
+    )
+    state["proposal_page"] = offset
+    text = (
+        "📨 <b>Предложить кирпичик</b>\n\n"
+        "Шаг 1 из 4. Выберите свой личный кирпичик, который хотите "
+        "предложить для места или всей системы.\n\n"
+        "Будет отправлен снимок текущих названия, кода, типа и настроек. "
+        "Исходный личный кирпичик и его владелец не изменятся.\n\n"
+        + _proposal_page_note(offset, len(bricks), total)
+    )
+    rows = [
+        [
+            InlineKeyboardButton(
+                _button_title(brick),
+                callback_data=f"bp_source:{brick.id}",
+            )
+        ]
+        for brick in bricks
+    ]
+    navigation: list[InlineKeyboardButton] = []
+    if offset > 0:
+        navigation.append(
+            InlineKeyboardButton(
+                "◀️",
+                callback_data=f"bp_page:{max(offset - PROPOSAL_PAGE_SIZE, 0)}",
+            )
+        )
+    if offset + len(bricks) < total:
+        navigation.append(
+            InlineKeyboardButton(
+                "▶️", callback_data=f"bp_page:{offset + PROPOSAL_PAGE_SIZE}"
+            )
+        )
+    if navigation:
+        rows.append(navigation)
+    rows.append([InlineKeyboardButton("◀️ Назад", callback_data="bp_back")])
+    return text, InlineKeyboardMarkup(rows)
+
+
+def _proposal_scope_content(session: Session, user: User, state: dict):
+    brick = _proposal_brick(session, user, state)
+    if brick is None:
+        _proposal_reset_hub(
+            state,
+            "Выбранный кирпичик больше недоступен. Начните предложение заново.",
+        )
+        return None
+    text = (
+        "📨 <b>Куда предложить кирпичик?</b>\n\n"
+        f"Кирпичик: <b>{_h(brick.title)}</b>\n"
+        f"Обозначение: <code>[{_h(brick.code)}]</code>\n\n"
+        "Шаг 2 из 4. Выберите область:\n"
+        "• конкретное место — рассматривает действующий администратор этого "
+        "места или суперадминистратор;\n"
+        "• вся система — рассматривает только суперадминистратор.\n\n"
+        "Новое место автоматически не создаётся."
+    )
+    return text, InlineKeyboardMarkup(
+        [
+            [
+                InlineKeyboardButton(
+                    "📍 Конкретное место", callback_data="bp_target:place"
+                )
+            ],
+            [InlineKeyboardButton("🌍 Вся система", callback_data="bp_target:system")],
+            [InlineKeyboardButton("◀️ Назад", callback_data="bp_back")],
+        ]
+    )
+
+
+def _proposal_select_place_content(session: Session, user: User, state: dict):
+    brick = _proposal_brick(session, user, state)
+    if brick is None:
+        _proposal_reset_hub(
+            state,
+            "Выбранный кирпичик больше недоступен. Начните предложение заново.",
+        )
+        return None
+    offset = _page_value(state.get("proposal_place_page"))
+    places, total = list_places(session, offset=offset, limit=PROPOSAL_PAGE_SIZE)
+    if total and offset >= total:
+        offset = ((total - 1) // PROPOSAL_PAGE_SIZE) * PROPOSAL_PAGE_SIZE
+        places, total = list_places(session, offset=offset, limit=PROPOSAL_PAGE_SIZE)
+    state["proposal_place_page"] = offset
+    text = (
+        "📨 <b>Выберите место</b>\n\n"
+        f"Кирпичик: <b>{_h(brick.title)}</b> "
+        f"<code>[{_h(brick.code)}]</code>\n\n"
+        "Шаг 3 из 4. Выберите место из существующего справочника. "
+        "Новое место здесь не создаётся."
+    )
+    rows = [
+        [
+            InlineKeyboardButton(
+                _short(place.canonical_name, 56),
+                callback_data=f"bp_place:{place.place_id}",
+            )
+        ]
+        for place in places
+    ]
+    if not places:
+        text += (
+            "\n\nВ справочнике пока нет мест. Вернитесь назад и выберите "
+            "всю систему."
+        )
+    if total:
+        text += "\n\n" + _proposal_page_note(offset, len(places), total)
+    navigation: list[InlineKeyboardButton] = []
+    if offset > 0:
+        navigation.append(
+            InlineKeyboardButton(
+                "◀️",
+                callback_data=(f"bp_ppage:{max(offset - PROPOSAL_PAGE_SIZE, 0)}"),
+            )
+        )
+    if offset + len(places) < total:
+        navigation.append(
+            InlineKeyboardButton(
+                "▶️", callback_data=f"bp_ppage:{offset + PROPOSAL_PAGE_SIZE}"
+            )
+        )
+    if navigation:
+        rows.append(navigation)
+    rows.append([InlineKeyboardButton("◀️ Назад", callback_data="bp_back")])
+    return text, InlineKeyboardMarkup(rows)
+
+
+def _proposal_preview_content(session: Session, user: User, state: dict):
+    brick = _proposal_brick(session, user, state)
+    if brick is None:
+        _proposal_reset_hub(
+            state,
+            "Выбранный кирпичик больше недоступен. Снимок не отправлен.",
+        )
+        return None
+    scope = state.get("proposal_scope")
+    place_id: int | None = None
+    if scope == PROPOSAL_SCOPE_PLACE:
+        try:
+            place_id = int(state.get("proposal_place_id") or 0)
+        except (TypeError, ValueError):
+            place_id = 0
+        details = get_place_details(session, place_id) if place_id > 0 else None
+        if details is None:
+            state["phase"] = "proposal_select_place"
+            _proposal_notice_after_reset(
+                state, "Место не найдено в справочнике. Выберите другое."
+            )
+            return _proposal_select_place_content(session, user, state)
+        target = f"место «{_h(details.canonical_name)}»"
+    elif scope == PROPOSAL_SCOPE_SYSTEM:
+        place_id = None
+        target = "вся система"
+    else:
+        state["phase"] = "proposal_scope"
+        _proposal_notice_after_reset(
+            state, "Область предложения не выбрана. Выберите её заново."
+        )
+        return _proposal_scope_content(session, user, state)
+
+    availability = check_code_availability(
+        session,
+        brick.code,
+        scope=scope,
+        place_id=place_id,
+        owner_user_id=None,
+        exclude_brick_id=brick.id,
+    )
+    availability_text = "✅ Код в целевой области свободен."
+    if not availability.available:
+        availability_text = (
+            "⚠️ <b>Отправить сейчас нельзя:</b> "
+            f"{_h(availability.message or 'код уже занят в целевой области')}.\n"
+            "Код не будет изменён автоматически. Исправьте код в личном "
+            "кирпичике или выберите другую область."
+        )
+    text = (
+        "📨 <b>Проверьте предложение</b>\n\n"
+        f"Название: <b>{_h(brick.title)}</b>\n"
+        f"Обозначение: <code>[{_h(brick.code)}]</code>\n"
+        f"Тип: {_h(_type_title(brick.value_type))}\n"
+        f"Настройки: {_h(_settings_text(brick.value_type, brick.rules))}\n"
+        f"Область: {target}\n\n"
+        f"{availability_text}\n\n"
+        "Шаг 4 из 4. После отправки будет сохранён неизменяемый снимок. "
+        "Последующие правки или архивация личного кирпичика не изменят "
+        "ожидающее предложение. Исходный кирпичик не копируется и не "
+        "перепривязывается."
+    )
+    rows: list[list[InlineKeyboardButton]] = []
+    if availability.available:
+        rows.append(
+            [InlineKeyboardButton("📨 Отправить предложение", callback_data="bp_send")]
+        )
+    rows.append([InlineKeyboardButton("◀️ Назад", callback_data="bp_back")])
+    return text, InlineKeyboardMarkup(rows)
+
+
+def _proposal_list_content(session: Session, user: User, state: dict):
+    offset = _page_value(state.get("proposal_page"))
+    proposals, total = list_own_proposals(
+        session,
+        user.telegram_user_id,
+        offset=offset,
+        limit=PROPOSAL_PAGE_SIZE,
+    )
+    if total and offset >= total:
+        offset = ((total - 1) // PROPOSAL_PAGE_SIZE) * PROPOSAL_PAGE_SIZE
+        proposals, total = list_own_proposals(
+            session,
+            user.telegram_user_id,
+            offset=offset,
+            limit=PROPOSAL_PAGE_SIZE,
+        )
+    state["proposal_page"] = offset
+    text = (
+        "📤 <b>Мои предложения</b>\n\n"
+        "Здесь хранится история ваших предложений. Ожидающие предложения "
+        "не имеют срока действия: их можно отозвать в любой момент, пока "
+        "администратор не принял решение."
+    )
+    if not total:
+        text += (
+            "\n\nВы ещё не отправляли предложений. Откройте «🧱 Мои кирпичики» "
+            "и нажмите «Предложить кирпичик»."
+        )
+    else:
+        text += "\n\n" + _proposal_page_note(offset, len(proposals), total)
+    rows = [
+        [
+            InlineKeyboardButton(
+                _short(
+                    f"{_proposal_status_ui(proposal.status)} · "
+                    f"{proposal.title} — [{proposal.code}]",
+                    60,
+                ),
+                callback_data=f"bp_open:{proposal.id}",
+            )
+        ]
+        for proposal in proposals
+    ]
+    navigation: list[InlineKeyboardButton] = []
+    if offset > 0:
+        navigation.append(
+            InlineKeyboardButton(
+                "◀️",
+                callback_data=f"bp_mpage:{max(offset - PROPOSAL_PAGE_SIZE, 0)}",
+            )
+        )
+    if offset + len(proposals) < total:
+        navigation.append(
+            InlineKeyboardButton(
+                "▶️", callback_data=f"bp_mpage:{offset + PROPOSAL_PAGE_SIZE}"
+            )
+        )
+    if navigation:
+        rows.append(navigation)
+    rows.append([InlineKeyboardButton("◀️ Назад", callback_data="bp_back")])
+    return text, InlineKeyboardMarkup(rows)
+
+
+def _proposal_card_content(proposal: BrickProposalSnapshot):
+    parts = [
+        f"📨 <b>{_h(proposal.title)}</b>",
+        "",
+        f"Обозначение: <code>[{_h(proposal.code)}]</code>",
+        f"Тип: {_h(_type_title(proposal.value_type))}",
+        f"Настройки: {_h(_settings_text(proposal.value_type, proposal.rules))}",
+        f"Область: {_h(_proposal_target_text(proposal))}",
+        f"Отправлено: {_proposal_date(proposal.created_at)}",
+        f"Статус: {_proposal_status_ui(proposal.status)}",
+    ]
+    if proposal.decided_at is not None:
+        parts.append(f"Решение: {_proposal_date(proposal.decided_at)}")
+    if proposal.status == PROPOSAL_STATUS_APPROVED:
+        parts.append(
+            "Создан отдельный кирпичик в целевой области. Исходный личный "
+            "кирпичик не изменён."
+        )
+    elif proposal.status == PROPOSAL_STATUS_REJECTED:
+        if proposal.decision_note:
+            parts.append(f"Причина: {_h(proposal.decision_note)}")
+        else:
+            parts.append("Предложение отклонено без изменения личного кирпичика.")
+    elif proposal.status == PROPOSAL_STATUS_WITHDRAWN:
+        parts.append("Предложение отозвано вами и больше не ожидает решения.")
+    else:
+        parts.append(
+            "Предложение ожидает решения. Срок действия не ограничен; "
+            "пока решение не принято, его можно отозвать."
+        )
+    parts.extend(
+        [
+            "",
+            "Предложение хранит снимок на момент отправки. Ваши последующие "
+            "правки личного кирпичика его не меняют.",
+        ]
+    )
+    rows: list[list[InlineKeyboardButton]] = []
+    if proposal.status == PROPOSAL_STATUS_PENDING:
+        rows.append(
+            [
+                InlineKeyboardButton(
+                    "🗑 Отозвать предложение",
+                    callback_data="bp_withdraw",
+                )
+            ]
+        )
+    rows.append([InlineKeyboardButton("◀️ Назад", callback_data="bp_back")])
+    return "\n".join(parts), InlineKeyboardMarkup(rows)
+
+
+def _proposal_withdraw_confirm_content(proposal: BrickProposalSnapshot):
+    text = (
+        "🗑 <b>Отозвать предложение?</b>\n\n"
+        f"Название: {_h(proposal.title)}\n"
+        f"Обозначение: <code>[{_h(proposal.code)}]</code>\n"
+        f"Область: {_h(_proposal_target_text(proposal))}\n\n"
+        "После отзыва администратор больше не сможет его одобрить. Личный "
+        "кирпичик останется у вас без изменений. Новое предложение можно "
+        "будет отправить позже."
+    )
+    return text, InlineKeyboardMarkup(
+        [
+            [InlineKeyboardButton("✅ Да, отозвать", callback_data="bp_withdraw_yes")],
+            [InlineKeyboardButton("◀️ Нет, назад", callback_data="bp_back")],
+        ]
+    )
+
+
+def _proposal_content(
+    session: Session, user: User, state: dict
+) -> tuple[str, InlineKeyboardMarkup] | None:
+    phase = state.get("phase")
+    if phase == "proposal_select_brick":
+        return _proposal_select_brick_content(session, user, state)
+    if phase == "proposal_scope":
+        return _proposal_scope_content(session, user, state)
+    if phase == "proposal_select_place":
+        return _proposal_select_place_content(session, user, state)
+    if phase == "proposal_preview":
+        return _proposal_preview_content(session, user, state)
+    if phase == "proposal_list":
+        return _proposal_list_content(session, user, state)
+    if phase == "proposal_card":
+        proposal = get_own_proposal(
+            session,
+            user.telegram_user_id,
+            int(state.get("proposal_id") or 0),
+        )
+        if proposal is None:
+            state["phase"] = "proposal_list"
+            _proposal_notice_after_reset(
+                state, "Предложение не найдено или больше вам не доступно."
+            )
+            return _proposal_list_content(session, user, state)
+        return _proposal_card_content(proposal)
+    if phase == "proposal_withdraw_confirm":
+        proposal = get_own_proposal(
+            session,
+            user.telegram_user_id,
+            int(state.get("proposal_id") or 0),
+        )
+        if proposal is None:
+            state["phase"] = "proposal_list"
+            _proposal_notice_after_reset(
+                state, "Предложение не найдено или больше вам не доступно."
+            )
+            return _proposal_list_content(session, user, state)
+        if proposal.status != PROPOSAL_STATUS_PENDING:
+            state["phase"] = "proposal_card"
+            _proposal_notice_after_reset(
+                state,
+                "Предложение уже не ожидает решения; отзыв невозможен.",
+            )
+            return _proposal_card_content(proposal)
+        return _proposal_withdraw_confirm_content(proposal)
+    return None
 
 
 def _edit_menu_content(state: dict):
@@ -938,8 +1428,17 @@ async def _render_phase(
             keyboard = InlineKeyboardMarkup(
                 [[InlineKeyboardButton("◀️ Назад", callback_data="bk_back")]]
             )
+        elif phase in _PROPOSAL_PHASES:
+            content = _proposal_content(session, user, state)
+            if content is None:
+                text, keyboard = _hub_content(session, user, state)
+            else:
+                text, keyboard = content
         else:  # preview
             text, keyboard = _preview_content(state)
+        generated_notice = state.pop("_proposal_notice", None)
+        if generated_notice:
+            notice = notice or generated_notice
     finally:
         session.close()
 
@@ -1089,6 +1588,405 @@ async def handle_open(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     state["revision"] = brick.revision
     state["origin"] = "archive" if brick.status == BRICK_STATUS_ARCHIVED else "hub"
     await _render_phase(update, context, state)
+
+
+# --- Предложения кирпичиков (Stage 26) -------------------------------------
+
+
+def _proposal_parse_id(data: str) -> int | None:
+    try:
+        value = int(data.split(":", 1)[1])
+    except (IndexError, TypeError, ValueError):
+        return None
+    return value if value > 0 else None
+
+
+def _proposal_parse_offset(data: str) -> int | None:
+    try:
+        value = int(data.split(":", 1)[1])
+    except (IndexError, TypeError, ValueError):
+        return None
+    return max(value, 0)
+
+
+def _proposal_new_state(state: dict, phase: str) -> None:
+    page, archive_page = _saved_page(state)
+    state.clear()
+    state.update(
+        {
+            "phase": phase,
+            "page": page,
+            "archive_page": archive_page,
+            "proposal_page": 0,
+        }
+    )
+
+
+async def handle_proposal_start(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> None:
+    state = load_brick_session(ctx.user(update).id)
+    if state is None or state.get("phase") != "hub":
+        await _stale(update)
+        return
+    await ctx.query(update).answer()
+    session = SessionLocal()
+    try:
+        user = _ensure_user(session, update)
+        total = count_personal_bricks(session, user.telegram_user_id)
+    finally:
+        session.close()
+    if total <= 0:
+        await _render_phase(
+            update,
+            context,
+            state,
+            notice=(
+                "Сначала создайте личный кирпичик — затем его можно будет "
+                "предложить месту или всей системе."
+            ),
+        )
+        return
+    _proposal_new_state(state, "proposal_select_brick")
+    await _render_phase(update, context, state, drop_input=True)
+
+
+async def handle_proposal_mine(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> None:
+    state = load_brick_session(ctx.user(update).id)
+    if state is None or state.get("phase") != "hub":
+        await _stale(update)
+        return
+    await ctx.query(update).answer()
+    _proposal_new_state(state, "proposal_list")
+    await _render_phase(update, context, state, drop_input=True)
+
+
+async def handle_proposal_source(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> None:
+    state = load_brick_session(ctx.user(update).id)
+    if state is None or state.get("phase") != "proposal_select_brick":
+        await _stale(update)
+        return
+    query = ctx.query(update)
+    await query.answer()
+    brick_id = _proposal_parse_id(query.data or "")
+    if brick_id is None:
+        await _stale(update)
+        return
+    session = SessionLocal()
+    try:
+        user = _ensure_user(session, update)
+        brick = get_personal_brick(
+            session,
+            user.telegram_user_id,
+            brick_id,
+            include_archived=False,
+        )
+    finally:
+        session.close()
+    if brick is None:
+        await _render_phase(
+            update,
+            context,
+            state,
+            notice=(
+                "Кирпичик не найден или уже в архиве. Выберите другой "
+                "активный кирпичик."
+            ),
+        )
+        return
+    state["proposal_source_brick_id"] = brick.id
+    state.pop("proposal_scope", None)
+    state.pop("proposal_place_id", None)
+    state["proposal_place_page"] = 0
+    state["phase"] = "proposal_scope"
+    await _render_phase(update, context, state)
+
+
+async def handle_proposal_target(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> None:
+    state = load_brick_session(ctx.user(update).id)
+    if state is None or state.get("phase") != "proposal_scope":
+        await _stale(update)
+        return
+    query = ctx.query(update)
+    await query.answer()
+    data = query.data or ""
+    target = data.split(":", 1)[1] if ":" in data else ""
+    if target == "place":
+        state["proposal_scope"] = PROPOSAL_SCOPE_PLACE
+        state["proposal_place_id"] = None
+        state["proposal_place_page"] = 0
+        state["phase"] = "proposal_select_place"
+    elif target == "system":
+        state["proposal_scope"] = PROPOSAL_SCOPE_SYSTEM
+        state["proposal_place_id"] = None
+        state["phase"] = "proposal_preview"
+    else:
+        await _stale(update)
+        return
+    await _render_phase(update, context, state)
+
+
+async def handle_proposal_place(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> None:
+    state = load_brick_session(ctx.user(update).id)
+    if state is None or state.get("phase") != "proposal_select_place":
+        await _stale(update)
+        return
+    query = ctx.query(update)
+    await query.answer()
+    place_id = _proposal_parse_id(query.data or "")
+    if place_id is None:
+        await _stale(update)
+        return
+    session = SessionLocal()
+    try:
+        details = get_place_details(session, place_id)
+    finally:
+        session.close()
+    if details is None:
+        await _render_phase(
+            update,
+            context,
+            state,
+            notice="Место не найдено в справочнике. Выберите другое.",
+        )
+        return
+    state["proposal_scope"] = PROPOSAL_SCOPE_PLACE
+    state["proposal_place_id"] = details.place_id
+    state["phase"] = "proposal_preview"
+    await _render_phase(update, context, state)
+
+
+async def handle_proposal_page(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> None:
+    state = load_brick_session(ctx.user(update).id)
+    if state is None or state.get("phase") not in {
+        "proposal_select_brick",
+        "proposal_select_place",
+        "proposal_list",
+    }:
+        await _stale(update)
+        return
+    query = ctx.query(update)
+    await query.answer()
+    offset = _proposal_parse_offset(query.data or "")
+    if offset is None:
+        await _stale(update)
+        return
+    phase = state.get("phase")
+    if phase == "proposal_select_brick":
+        state["proposal_page"] = offset
+    elif phase == "proposal_select_place":
+        state["proposal_place_page"] = offset
+    else:
+        state["proposal_page"] = offset
+    await _render_phase(update, context, state)
+
+
+async def handle_proposal_send(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> None:
+    state = load_brick_session(ctx.user(update).id)
+    if state is None or state.get("phase") != "proposal_preview":
+        await _stale(update)
+        return
+    await ctx.query(update).answer()
+    source_brick_id = state.get("proposal_source_brick_id")
+    scope = state.get("proposal_scope")
+    place_id = state.get("proposal_place_id")
+    if (
+        not isinstance(source_brick_id, int)
+        or isinstance(source_brick_id, bool)
+        or scope not in {PROPOSAL_SCOPE_PLACE, PROPOSAL_SCOPE_SYSTEM}
+    ):
+        await _render_phase(
+            update,
+            context,
+            state,
+            notice="Данные предложения устарели. Выберите кирпичик заново.",
+        )
+        return
+    session = SessionLocal()
+    try:
+        user = _ensure_user(session, update)
+        snapshot = create_brick_proposal(
+            session,
+            actor_telegram_user_id=user.telegram_user_id,
+            source_brick_id=source_brick_id,
+            scope=scope,
+            place_id=place_id if isinstance(place_id, int) else None,
+        )
+    except (ProposalError, ProposalActorError) as exc:
+        await _render_phase(
+            update,
+            context,
+            state,
+            notice=str(exc),
+        )
+        return
+    finally:
+        session.close()
+    _proposal_new_state(state, "proposal_card")
+    state["proposal_id"] = snapshot.id
+    await _render_phase(
+        update,
+        context,
+        state,
+        notice=(
+            "Предложение отправлено на рассмотрение. Снимок сохранён; "
+            "исходный кирпичик не изменён."
+        ),
+    )
+
+
+async def handle_proposal_open_own(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> None:
+    state = load_brick_session(ctx.user(update).id)
+    if state is None or state.get("phase") != "proposal_list":
+        await _stale(update)
+        return
+    query = ctx.query(update)
+    await query.answer()
+    proposal_id = _proposal_parse_id(query.data or "")
+    if proposal_id is None:
+        await _stale(update)
+        return
+    session = SessionLocal()
+    try:
+        user = _ensure_user(session, update)
+        proposal = get_own_proposal(session, user.telegram_user_id, proposal_id)
+    finally:
+        session.close()
+    if proposal is None:
+        await _render_phase(
+            update,
+            context,
+            state,
+            notice="Предложение не найдено или больше вам не доступно.",
+        )
+        return
+    state["proposal_id"] = proposal.id
+    state["phase"] = "proposal_card"
+    await _render_phase(update, context, state)
+
+
+async def handle_proposal_withdraw(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> None:
+    state = load_brick_session(ctx.user(update).id)
+    if state is None or state.get("phase") != "proposal_card":
+        await _stale(update)
+        return
+    await ctx.query(update).answer()
+    state["phase"] = "proposal_withdraw_confirm"
+    await _render_phase(update, context, state)
+
+
+async def handle_proposal_withdraw_confirm(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> None:
+    state = load_brick_session(ctx.user(update).id)
+    if state is None or state.get("phase") != "proposal_withdraw_confirm":
+        await _stale(update)
+        return
+    await ctx.query(update).answer()
+    try:
+        proposal_id = int(state.get("proposal_id") or 0)
+    except (TypeError, ValueError):
+        proposal_id = 0
+    if proposal_id <= 0:
+        await _stale(update)
+        return
+    session = SessionLocal()
+    try:
+        user = _ensure_user(session, update)
+        result = withdraw_brick_proposal(
+            session,
+            actor_telegram_user_id=user.telegram_user_id,
+            proposal_id=proposal_id,
+        )
+    except ProposalActorError as exc:
+        await _render_phase(update, context, state, notice=str(exc))
+        return
+    finally:
+        session.close()
+    if result.status == "not_found":
+        state["phase"] = "proposal_list"
+        await _render_phase(
+            update,
+            context,
+            state,
+            notice=result.message or "Предложение не найдено.",
+        )
+        return
+    if result.status == "error":
+        await _render_phase(
+            update,
+            context,
+            state,
+            notice=result.message or "Не удалось отозвать предложение.",
+        )
+        return
+    state["phase"] = "proposal_card"
+    if result.proposal is not None:
+        state["proposal_id"] = result.proposal.id
+    await _render_phase(
+        update,
+        context,
+        state,
+        notice=result.message or "Статус предложения обновлён.",
+    )
+
+
+async def handle_proposal_back(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> None:
+    state = load_brick_session(ctx.user(update).id)
+    if state is None or state.get("phase") not in _PROPOSAL_PHASES:
+        await _stale(update)
+        return
+    await ctx.query(update).answer()
+    phase = state.get("phase")
+    page, archive_page = _saved_page(state)
+    if phase in {"proposal_select_brick", "proposal_list"}:
+        state.clear()
+        state.update(_new_hub(page=page, archive_page=archive_page))
+    elif phase == "proposal_scope":
+        state["phase"] = "proposal_select_brick"
+        state.pop("proposal_scope", None)
+        state.pop("proposal_place_id", None)
+    elif phase == "proposal_select_place":
+        state["phase"] = "proposal_scope"
+    elif phase == "proposal_preview":
+        if state.get("proposal_scope") == PROPOSAL_SCOPE_PLACE:
+            state["phase"] = "proposal_select_place"
+        else:
+            state["phase"] = "proposal_scope"
+    elif phase == "proposal_card":
+        state.pop("proposal_id", None)
+        state["phase"] = "proposal_list"
+    elif phase == "proposal_withdraw_confirm":
+        state["phase"] = "proposal_card"
+    else:
+        await _stale(update)
+        return
+    await _render_phase(update, context, state)
+
+
+async def handle_proposal_stale(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> None:
+    """Устаревшая кнопка bp_*: отвечает, но ничего не меняет."""
+    await _stale(update)
 
 
 # --- Навигация назад и отмена ----------------------------------------------
@@ -2094,6 +2992,25 @@ def bricks_handlers() -> list[BaseHandler]:
         CallbackQueryHandler(handle_archive, pattern=r"^bk_archive$"),
         CallbackQueryHandler(handle_archive_confirm, pattern=r"^bk_archive_confirm$"),
         CallbackQueryHandler(handle_restore, pattern=r"^bk_restore$"),
+        CallbackQueryHandler(handle_proposal_start, pattern=r"^bp_start$"),
+        CallbackQueryHandler(handle_proposal_mine, pattern=r"^bp_mine$"),
+        CallbackQueryHandler(handle_proposal_source, pattern=r"^bp_source:\d+$"),
+        CallbackQueryHandler(
+            handle_proposal_target, pattern=r"^bp_target:(?:place|system)$"
+        ),
+        CallbackQueryHandler(handle_proposal_place, pattern=r"^bp_place:\d+$"),
+        CallbackQueryHandler(
+            handle_proposal_page,
+            pattern=r"^bp_(?:page|ppage|mpage):\d+$",
+        ),
+        CallbackQueryHandler(handle_proposal_send, pattern=r"^bp_send$"),
+        CallbackQueryHandler(handle_proposal_open_own, pattern=r"^bp_open:\d+$"),
+        CallbackQueryHandler(handle_proposal_withdraw, pattern=r"^bp_withdraw$"),
+        CallbackQueryHandler(
+            handle_proposal_withdraw_confirm, pattern=r"^bp_withdraw_yes$"
+        ),
+        CallbackQueryHandler(handle_proposal_back, pattern=r"^bp_back$"),
+        CallbackQueryHandler(handle_proposal_stale, pattern=r"^bp_"),
         BrickTextHandler(
             filters.TEXT & ~filters.COMMAND,
             handle_brick_text,

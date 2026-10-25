@@ -29,7 +29,21 @@ logger = logging.getLogger(__name__)
 
 # Фазы, в которых сценарий ждёт пользовательский текст. Остальные фазы —
 # экранные: текст вне их не должен попадать в конструктор.
-_BROWSE_PHASES = frozenset({"hub", "archive", "card", "archive_confirm"})
+_BROWSE_PHASES = frozenset(
+    {
+        "hub",
+        "archive",
+        "card",
+        "archive_confirm",
+        "proposal_select_brick",
+        "proposal_scope",
+        "proposal_select_place",
+        "proposal_preview",
+        "proposal_list",
+        "proposal_card",
+        "proposal_withdraw_confirm",
+    }
+)
 
 
 def load_brick_session(telegram_user_id: int) -> dict | None:

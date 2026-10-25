@@ -1091,6 +1091,314 @@ MIGRATION_10_TEMPLATE_SESSIONS = Migration(
     ),
 )
 
+# --- Версия 11: предложения новых кирпичиков (Stage 26) ---------------------
+
+
+MIGRATION_11_BRICK_PROPOSALS = Migration(
+    version=11,
+    name="brick_proposals",
+    statements=(
+        # Снимок определения на момент отправки. `source_brick_id` — именно
+        # исходный личный кирпичик, а не будущая созданная копия. Срок
+        # действия отсутствует: pending живёт, пока автор или администратор
+        # явно не закроет предложение.
+        """
+        CREATE TABLE brick_proposals (
+            id INTEGER NOT NULL PRIMARY KEY,
+            author_user_id INTEGER NOT NULL,
+            scope TEXT NOT NULL,
+            place_id INTEGER,
+            source_brick_id INTEGER NOT NULL,
+            title TEXT NOT NULL,
+            code TEXT NOT NULL,
+            type TEXT NOT NULL,
+            source TEXT NOT NULL,
+            rules_json TEXT,
+            status TEXT NOT NULL DEFAULT 'pending',
+            created_at DATETIME NOT NULL,
+            decided_at DATETIME,
+            decided_by_user_id INTEGER,
+            approved_brick_id INTEGER,
+            decision_note TEXT,
+            CONSTRAINT ck_brick_proposals_scope
+                CHECK (scope IN ('place', 'system')),
+            CONSTRAINT ck_brick_proposals_target
+                CHECK (
+                    (scope = 'place' AND place_id IS NOT NULL)
+                    OR (scope = 'system' AND place_id IS NULL)
+                ),
+            CONSTRAINT ck_brick_proposals_status
+                CHECK (status IN ('pending', 'approved', 'rejected', 'withdrawn')),
+            CONSTRAINT ck_brick_proposals_type
+                CHECK (type IN (
+                    'short_text', 'long_text', 'date', 'time', 'url',
+                    'number', 'choice'
+                )),
+            CONSTRAINT ck_brick_proposals_source
+                CHECK (source IN ('ask', 'place', 'context')),
+            CONSTRAINT ck_brick_proposals_code_length
+                CHECK (length(code) BETWEEN 2 AND 64),
+            CONSTRAINT ck_brick_proposals_code_trimmed
+                CHECK (code = trim(code)),
+            CONSTRAINT ck_brick_proposals_code_no_space
+                CHECK (instr(code, ' ') = 0),
+            CONSTRAINT ck_brick_proposals_code_no_brackets
+                CHECK (instr(code, '[') = 0 AND instr(code, ']') = 0),
+            CONSTRAINT ck_brick_proposals_no_photo_code
+                CHECK (code <> 'фото'),
+            CONSTRAINT ck_brick_proposals_title_not_empty
+                CHECK (length(trim(title)) > 0),
+            CONSTRAINT ck_brick_proposals_rules_json_object
+                CHECK (
+                    rules_json IS NULL
+                    OR (json_valid(rules_json)
+                        AND json_type(rules_json) = 'object')
+                ),
+            CONSTRAINT ck_brick_proposals_decision_shape
+                CHECK (
+                    (status = 'pending'
+                        AND decided_at IS NULL
+                        AND decided_by_user_id IS NULL
+                        AND approved_brick_id IS NULL
+                        AND decision_note IS NULL)
+                    OR (status = 'approved'
+                        AND decided_at IS NOT NULL
+                        AND decided_by_user_id IS NOT NULL
+                        AND approved_brick_id IS NOT NULL
+                        AND decision_note IS NULL)
+                    OR (status = 'rejected'
+                        AND decided_at IS NOT NULL
+                        AND decided_by_user_id IS NOT NULL
+                        AND approved_brick_id IS NULL)
+                    OR (status = 'withdrawn'
+                        AND decided_at IS NOT NULL
+                        AND decided_by_user_id IS NOT NULL
+                        AND approved_brick_id IS NULL
+                        AND decision_note IS NULL)
+                ),
+            CONSTRAINT fk_brick_proposals_author
+                FOREIGN KEY (author_user_id) REFERENCES users (id)
+                ON DELETE RESTRICT,
+            CONSTRAINT fk_brick_proposals_place
+                FOREIGN KEY (place_id) REFERENCES places (id)
+                ON DELETE RESTRICT,
+            CONSTRAINT fk_brick_proposals_source_brick
+                FOREIGN KEY (source_brick_id) REFERENCES bricks (id)
+                ON DELETE RESTRICT,
+            CONSTRAINT fk_brick_proposals_decided_by
+                FOREIGN KEY (decided_by_user_id) REFERENCES users (id)
+                ON DELETE RESTRICT,
+            CONSTRAINT fk_brick_proposals_approved_brick
+                FOREIGN KEY (approved_brick_id) REFERENCES bricks (id)
+                ON DELETE RESTRICT
+        )
+        """,
+        """
+        CREATE INDEX ix_brick_proposals_author_status_created
+            ON brick_proposals (author_user_id, status, created_at)
+        """,
+        """
+        CREATE INDEX ix_brick_proposals_place_status_created
+            ON brick_proposals (place_id, status, created_at)
+        """,
+        """
+        CREATE INDEX ix_brick_proposals_status_scope_created
+            ON brick_proposals (status, scope, created_at)
+        """,
+        """
+        CREATE INDEX ix_brick_proposals_source_brick
+            ON brick_proposals (source_brick_id)
+        """,
+        # Один одобренный кирпичик не может быть результатом двух предложений.
+        """
+        CREATE UNIQUE INDEX ux_brick_proposals_approved_brick
+            ON brick_proposals (approved_brick_id)
+            WHERE approved_brick_id IS NOT NULL
+        """,
+        # Снимок — не указатель: исходное определение можно редактировать или
+        # архивировать, но уже отправленное предложение не переписывается.
+        """
+        CREATE TRIGGER trg_brick_proposals_snapshot_immutable
+        BEFORE UPDATE OF
+            author_user_id, scope, place_id, source_brick_id, title, code,
+            type, source, rules_json, created_at
+        ON brick_proposals
+        FOR EACH ROW
+        WHEN NEW.author_user_id IS NOT OLD.author_user_id
+            OR NEW.scope IS NOT OLD.scope
+            OR NEW.place_id IS NOT OLD.place_id
+            OR NEW.source_brick_id IS NOT OLD.source_brick_id
+            OR NEW.title IS NOT OLD.title
+            OR NEW.code IS NOT OLD.code
+            OR NEW.type IS NOT OLD.type
+            OR NEW.source IS NOT OLD.source
+            OR NEW.rules_json IS NOT OLD.rules_json
+            OR NEW.created_at IS NOT OLD.created_at
+        BEGIN
+            SELECT RAISE(ABORT, 'brick proposal snapshot is immutable');
+        END
+        """,
+        # Решение принимается ровно один раз: pending → approved/rejected/
+        # withdrawn. Повторный callback не может изменить терминальный статус.
+        """
+        CREATE TRIGGER trg_brick_proposals_single_transition
+        BEFORE UPDATE OF status ON brick_proposals
+        FOR EACH ROW
+        WHEN OLD.status <> 'pending'
+            OR NEW.status NOT IN ('approved', 'rejected', 'withdrawn')
+        BEGIN
+            SELECT RAISE(ABORT, 'brick proposal decision is final');
+        END
+        """,
+        # После решения поля аудита и ссылка на созданный кирпичик неизменяемы.
+        """
+        CREATE TRIGGER trg_brick_proposals_decision_immutable
+        BEFORE UPDATE ON brick_proposals
+        FOR EACH ROW
+        WHEN OLD.status <> 'pending'
+            AND (
+                NEW.status IS NOT OLD.status
+                OR NEW.decided_at IS NOT OLD.decided_at
+                OR NEW.decided_by_user_id IS NOT OLD.decided_by_user_id
+                OR NEW.approved_brick_id IS NOT OLD.approved_brick_id
+                OR NEW.decision_note IS NOT OLD.decision_note
+            )
+        BEGIN
+            SELECT RAISE(ABORT, 'brick proposal decision is immutable');
+        END
+        """,
+        # История предложений не удаляется физически; терминальные строки
+        # остаются для аудита и отображения автору.
+        """
+        CREATE TRIGGER trg_brick_proposals_no_delete
+        BEFORE DELETE ON brick_proposals
+        FOR EACH ROW
+        BEGIN
+            SELECT RAISE(ABORT, 'brick proposal history cannot be deleted');
+        END
+        """,
+        # Источник — действующий личный кирпичик именно этого автора. После
+        # отправки его можно архивировать/редактировать: триггер проверяет
+        # только INSERT, а снимок уже зафиксирован.
+        """
+        CREATE TRIGGER trg_brick_proposals_source_owner
+        BEFORE INSERT ON brick_proposals
+        FOR EACH ROW
+        WHEN NOT EXISTS (
+            SELECT 1 FROM bricks b
+            WHERE b.id = NEW.source_brick_id
+              AND b.scope = 'personal'
+              AND b.owner_user_id = NEW.author_user_id
+              AND b.status = 'active'
+        )
+        BEGIN
+            SELECT RAISE(ABORT, 'brick proposal source must be an active personal brick');
+        END
+        """,
+        # Одобрение обязано ссылаться на реально созданный отдельный кирпичик
+        # той же области/места и того же снимка. Исходный личный кирпичик
+        # одобрить вместо копии нельзя.
+        """
+        CREATE TRIGGER trg_brick_proposals_approval_link
+        BEFORE UPDATE OF status, approved_brick_id ON brick_proposals
+        FOR EACH ROW
+        WHEN NEW.status = 'approved' AND NOT EXISTS (
+            SELECT 1 FROM bricks b
+            WHERE b.id = NEW.approved_brick_id
+              AND b.id <> OLD.source_brick_id
+              AND b.status = 'active'
+              AND b.scope = NEW.scope
+              AND b.place_id IS NEW.place_id
+              AND b.owner_user_id IS NULL
+              AND b.code = NEW.code
+              AND b.title = NEW.title
+              AND b.type = NEW.type
+              AND b.source = NEW.source
+              AND b.rules_json IS NEW.rules_json
+        )
+        BEGIN
+            SELECT RAISE(ABORT, 'approved brick does not match proposal');
+        END
+        """,
+        # Узкое исключение для продвижения личного кода в системный.
+        #
+        # Общее правило Stage 22A («системный и несистемный код не
+        # сосуществуют») остаётся: прямой INSERT системного кирпичика с кодом
+        # личного по-прежнему запрещён. Исключение действует только в момент
+        # одобрения глобального предложения: существует ровно один несистемный
+        # носитель кода — исходный личный кирпичик, и pending-снимок полностью
+        # совпадает с вставляемым системным кирпичиком. Так требование «не
+        # менять исходный личный кирпичик» не нарушается, а код становится
+        # системным для всех будущих определений.
+        "DROP TRIGGER trg_bricks_reserve_codes_insert",
+        """
+        CREATE TRIGGER trg_bricks_reserve_codes_insert
+        BEFORE INSERT ON bricks
+        FOR EACH ROW
+        WHEN EXISTS (
+            SELECT 1 FROM bricks b
+            WHERE b.code = NEW.code
+              AND (
+                  (NEW.scope = 'system' AND b.scope <> 'system')
+                  OR (NEW.scope <> 'system' AND b.scope = 'system')
+              )
+        )
+        AND NOT (
+            NEW.scope = 'system'
+            AND EXISTS (
+                SELECT 1
+                FROM brick_proposals p
+                JOIN bricks src ON src.id = p.source_brick_id
+                WHERE p.scope = 'system'
+                  AND p.status = 'pending'
+                  AND p.code = NEW.code
+                  AND p.title = NEW.title
+                  AND p.type = NEW.type
+                  AND p.source = NEW.source
+                  AND p.rules_json IS NEW.rules_json
+                  AND src.code = NEW.code
+                  AND (
+                      SELECT count(*) FROM bricks b2
+                      WHERE b2.code = NEW.code AND b2.scope <> 'system'
+                  ) = 1
+            )
+        )
+        BEGIN
+            SELECT RAISE(ABORT, 'system brick code is reserved');
+        END
+        """,
+        # Продвинутый личный кирпичик сохраняет свой код, поэтому обычное
+        # редактирование названия/настроек не должно упираться в системный
+        # дубль. Разрешаем UPDATE только при неизменных коде и области
+        # несистемного кирпичика; смена кода на системный по-прежнему
+        # запрещена.
+        "DROP TRIGGER trg_bricks_reserve_codes_update",
+        """
+        CREATE TRIGGER trg_bricks_reserve_codes_update
+        BEFORE UPDATE OF code, scope ON bricks
+        FOR EACH ROW
+        WHEN EXISTS (
+            SELECT 1 FROM bricks b
+            WHERE b.id <> OLD.id
+              AND b.code = NEW.code
+              AND (
+                  (NEW.scope = 'system' AND b.scope <> 'system')
+                  OR (NEW.scope <> 'system' AND b.scope = 'system')
+              )
+        )
+        AND NOT (
+            NEW.scope = OLD.scope
+            AND NEW.scope <> 'system'
+            AND NEW.code = OLD.code
+        )
+        BEGIN
+            SELECT RAISE(ABORT, 'system brick code is reserved');
+        END
+        """,
+    ),
+)
+
+
 DEFAULT_MIGRATIONS: tuple[Migration, ...] = (
     MIGRATION_1_USERS_PLACES,
     MIGRATION_2_PLACE_CONTACTS_UI,
@@ -1102,6 +1410,7 @@ DEFAULT_MIGRATIONS: tuple[Migration, ...] = (
     MIGRATION_8_TEMPLATES,
     MIGRATION_9_BINDING_CODES,
     MIGRATION_10_TEMPLATE_SESSIONS,
+    MIGRATION_11_BRICK_PROPOSALS,
 )
 
 LATEST_VERSION = DEFAULT_MIGRATIONS[-1].version if DEFAULT_MIGRATIONS else 0
