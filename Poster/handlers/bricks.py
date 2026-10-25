@@ -69,6 +69,7 @@ from brick_types import (
 from database import SessionLocal
 from models import User
 from place_state import clear_place_session
+from template_state import clear_template_session
 from user_store import get_or_create_user
 from utils import screen
 from utils import tg_context as ctx
@@ -966,6 +967,7 @@ async def open_bricks(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     user_id = ctx.user(update).id
     clear_place_session(user_id)
     clear_admin_session(user_id)
+    clear_template_session(user_id)
     state = load_brick_session(user_id)
     if not isinstance(state, dict) or state.get("phase") not in PHASES:
         state = _new_hub()

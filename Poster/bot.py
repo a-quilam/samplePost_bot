@@ -21,6 +21,7 @@ from handlers.drafts import drafts_handlers
 from handlers.main_menu import main_menu_handlers
 from handlers.places import places_handlers
 from handlers.post_creation import post_creation_handlers
+from handlers.templates import templates_handlers
 from handlers.user_tracking import track_user
 from log_config import setup_logging
 from utils import tg_context as ctx
@@ -79,6 +80,10 @@ def build_application() -> Application:
     # Личные кирпичики: после мастера/«Мест»/кабинета, но до глобального
     # обработчика текста главного меню. У него собственный префикс bk_.
     for handler in bricks_handlers():
+        application.add_handler(handler)
+
+    # Редактор шаблонов: после кирпичиков, но до главного меню. Префикс tp_.
+    for handler in templates_handlers():
         application.add_handler(handler)
 
     # Обработчики главного меню

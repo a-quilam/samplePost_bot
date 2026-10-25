@@ -31,6 +31,7 @@ from database import SessionLocal
 from handlers.drafts import view_drafts
 from permissions import can_access_admin_panel, is_superadmin
 from place_state import clear_place_session, has_place_session
+from template_state import clear_template_session, has_template_session
 from utils import screen
 from utils import tg_context as ctx
 
@@ -50,6 +51,7 @@ def main_menu_keyboard(*, show_admin: bool = False) -> InlineKeyboardMarkup:
         [InlineKeyboardButton("✏️ Создать пост", callback_data="create_post")],
         [InlineKeyboardButton("📍 Места", callback_data="places")],
         [InlineKeyboardButton("🧱 Мои кирпичики", callback_data="bricks")],
+        [InlineKeyboardButton("📄 Мои шаблоны", callback_data="templates")],
     ]
     if show_admin:
         rows.append([InlineKeyboardButton("🛡 Админка", callback_data="admin_panel")])
@@ -102,6 +104,7 @@ async def render_main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     clear_place_session(user_id)
     clear_admin_session(user_id)
     clear_brick_session(user_id)
+    clear_template_session(user_id)
     if screen.screen_ref(user_data) is None:
         screen.hydrate_screen_ref(user_data, user_id)
     chat_id = ctx.chat(update).id
@@ -153,8 +156,12 @@ def help_text() -> str:
         "— «🧱 Мои кирпичики» — создавать личные типизированные поля для "
         "будущих шаблонов, менять их, убирать в архив и восстанавливать. "
         "В посты они пока не вставляются;\n"
+        "— «📄 Мои шаблоны» — создавать личные шаблоны, редактировать шапку, "
+        "тело и подвал обычным сообщением, смотреть предпросмотр и доступные "
+        "кирпичики, сбрасывать содержимое к встроенному стандарту. "
+        "В мастер поста шаблоны пока не вставляются;\n"
         "— при выходе из создания (/cancel, /start, /drafts, /places, "
-        "/bricks, /admin) незавершённый "
+        "/bricks, /templates, /admin) незавершённый "
         "пост автоматически сохраняется в черновиках — вернуться к нему можно "
         "через «📂 Черновики» → «✏️ Редактировать черновик».\n\n"
         "Команды:\n"
@@ -162,6 +169,7 @@ def help_text() -> str:
         "/create_post — создать новый пост\n"
         "/places — справочник мест\n"
         "/bricks — мои кирпичики\n"
+        "/templates — мои шаблоны\n"
         "/admin — кабинет, если у вас есть права администратора\n"
         "/drafts — список ваших черновиков\n"
         "/cancel — отменить текущий диалог\n"
@@ -176,6 +184,7 @@ async def render_help(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     clear_place_session(ctx.user(update).id)
     clear_admin_session(ctx.user(update).id)
     clear_brick_session(ctx.user(update).id)
+    clear_template_session(ctx.user(update).id)
     keyboard = InlineKeyboardMarkup(
         [[InlineKeyboardButton("◀️ Главное меню", callback_data="main_menu")]]
     )
@@ -219,12 +228,15 @@ async def cancel_without_dialog(
     place_active = has_place_session(user_id)
     admin_active = has_admin_session(user_id)
     brick_active = has_brick_draft(user_id)
+    template_active = has_template_session(user_id)
     if place_active:
         clear_place_session(user_id)
     if admin_active:
         clear_admin_session(user_id)
     if brick_active:
         clear_brick_session(user_id)
+    if template_active:
+        clear_template_session(user_id)
     user_data = ctx.data(context)
     if screen.screen_ref(user_data) is None:
         screen.hydrate_screen_ref(user_data, user_id)
@@ -234,9 +246,11 @@ async def cancel_without_dialog(
         text = "Административный сценарий отменён."
     elif brick_active:
         text = "Создание или изменение кирпичика отменено. Данные не изменены."
+    elif template_active:
+        text = "Сценарий шаблонов отменён. Данные шаблонов не изменены."
     else:
         text = "Сейчас нет активного создания поста."
-    cancelled = place_active or admin_active or brick_active
+    cancelled = place_active or admin_active or brick_active or template_active
     await screen.render_screen(
         context,
         user_data,

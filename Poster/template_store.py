@@ -1323,38 +1323,47 @@ def update_template_footer(
     )
 
 
-def reset_standard_template(
+def _reset_to_builtin(
     session: Session,
     *,
     actor_telegram_user_id: int | None,
     template_id: int,
     expected_revision: int,
-    confirm: bool = False,
+    confirm: bool,
+    expected_kind: str,
+    not_found_message: str,
+    forbidden_message: str,
+    confirmation_message: str,
 ) -> TemplateMutationResult:
     """
-    Подтверждённый сброс стандарта места к встроенному стандарту.
+    Общий подтверждённый сброс личного или стандартного шаблона.
 
-    Создаёт новую версию (если содержимое или привязки отличаются), сохраняя
-    всю историю. Существующие снимки не меняются. Автоматического сброса при
-    старте/миграции нет: требуется `confirm=True` и актуальная revision.
+    Проверки прав различаются только для стандарта (админ места/суперадмин);
+    владелец личного шаблона проверяется напрямую. Дальше логика одинакова:
+    revision, явное подтверждение, разбор встроенного стандарта, новая версия
+    без изменения истории и снимков.
     """
     actor = _require_actor_user(session, actor_telegram_user_id)
     row = _load_template_row(session, template_id)
-    if row is None or row.kind != TEMPLATE_KIND_STANDARD:
-        return _mutation("not_found", None, "Стандартный шаблон не найден.")
-    if not _can_edit_template(session, actor, row):
+    if row is None or row.kind != expected_kind:
+        return _mutation("not_found", None, not_found_message)
+    if expected_kind == TEMPLATE_KIND_PERSONAL:
+        if row.owner_user_id != actor.id:
+            return _mutation(
+                "forbidden",
+                _template_details(session, row),
+                forbidden_message,
+            )
+    elif not _can_edit_template(session, actor, row):
         return _mutation(
             "forbidden",
             _template_details(session, row),
-            "Сбрасывать стандартный шаблон может только администратор места "
-            "или суперадминистратор.",
+            forbidden_message,
         )
     if not _valid_positive_id(expected_revision):
         raise TemplateError("expected_revision должен быть положительным числом.")
     if not confirm:
-        raise TemplateConfirmationRequired(
-            "Сброс стандартного шаблона требует явного подтверждения."
-        )
+        raise TemplateConfirmationRequired(confirmation_message)
     if row.revision != expected_revision:
         return _mutation(
             "stale",
@@ -1413,6 +1422,65 @@ def reset_standard_template(
         footer=BUILTIN_TEMPLATE.footer,
         bindings=binding_pairs,
         builtin_version=BUILTIN_TEMPLATE_VERSION,
+    )
+
+
+def reset_standard_template(
+    session: Session,
+    *,
+    actor_telegram_user_id: int | None,
+    template_id: int,
+    expected_revision: int,
+    confirm: bool = False,
+) -> TemplateMutationResult:
+    """
+    Подтверждённый сброс стандарта места к встроенному стандарту.
+
+    Создаёт новую версию (если содержимое или привязки отличаются), сохраняя
+    всю историю. Существующие снимки не меняются. Автоматического сброса при
+    старте/миграции нет: требуется `confirm=True` и актуальная revision.
+    """
+    return _reset_to_builtin(
+        session,
+        actor_telegram_user_id=actor_telegram_user_id,
+        template_id=template_id,
+        expected_revision=expected_revision,
+        confirm=confirm,
+        expected_kind=TEMPLATE_KIND_STANDARD,
+        not_found_message="Стандартный шаблон не найден.",
+        forbidden_message=(
+            "Сбрасывать стандартный шаблон может только администратор места "
+            "или суперадминистратор."
+        ),
+        confirmation_message="Сброс стандартного шаблона требует явного подтверждения.",
+    )
+
+
+def reset_personal_template(
+    session: Session,
+    *,
+    actor_telegram_user_id: int | None,
+    template_id: int,
+    expected_revision: int,
+    confirm: bool = False,
+) -> TemplateMutationResult:
+    """
+    Подтверждённый сброс личного шаблона к встроенному стандарту.
+
+    Логика повторяет `reset_standard_template`, но проверка прав владельческая:
+    только владелец личного шаблона может его сбрасывать. Системные кирпичики
+    в привязках встроенного стандарта общедоступны, поэтому place_id не нужен.
+    """
+    return _reset_to_builtin(
+        session,
+        actor_telegram_user_id=actor_telegram_user_id,
+        template_id=template_id,
+        expected_revision=expected_revision,
+        confirm=confirm,
+        expected_kind=TEMPLATE_KIND_PERSONAL,
+        not_found_message="Личный шаблон не найден.",
+        forbidden_message="Сбрасывать личный шаблон может только его владелец.",
+        confirmation_message="Сброс личного шаблона требует явного подтверждения.",
     )
 
 

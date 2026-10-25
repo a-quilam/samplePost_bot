@@ -1073,6 +1073,24 @@ MIGRATION_9_BINDING_CODES = Migration(
     ),
 )
 
+# --- Версия 10: интерфейсное состояние редактора шаблонов (Stage 25) -------
+
+MIGRATION_10_TEMPLATE_SESSIONS = Migration(
+    version=10,
+    name="template_sessions",
+    statements=(
+        """
+        CREATE TABLE template_sessions (
+            telegram_user_id INTEGER NOT NULL PRIMARY KEY,
+            payload TEXT NOT NULL CHECK (
+                json_valid(payload) AND json_type(payload) = 'object'
+            ),
+            updated_at DATETIME NOT NULL
+        )
+        """,
+    ),
+)
+
 DEFAULT_MIGRATIONS: tuple[Migration, ...] = (
     MIGRATION_1_USERS_PLACES,
     MIGRATION_2_PLACE_CONTACTS_UI,
@@ -1083,6 +1101,7 @@ DEFAULT_MIGRATIONS: tuple[Migration, ...] = (
     MIGRATION_7_BRICK_MANAGEMENT,
     MIGRATION_8_TEMPLATES,
     MIGRATION_9_BINDING_CODES,
+    MIGRATION_10_TEMPLATE_SESSIONS,
 )
 
 LATEST_VERSION = DEFAULT_MIGRATIONS[-1].version if DEFAULT_MIGRATIONS else 0

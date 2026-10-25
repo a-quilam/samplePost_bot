@@ -499,6 +499,28 @@ class BrickSession(Base):
         return f"<BrickSession(telegram_user_id={self.telegram_user_id})>"
 
 
+class TemplateSession(Base):
+    """
+    Состояние Telegram-редактора шаблонов (Stage 25).
+
+    Хранится отдельно от WIP-поста, «Мест», админки и кирпичиков:
+    незавершённое редактирование секции не должно перехватывать текст
+    другого сценария. Payload ограничен UI-фазой, ID шаблона, редактируемой
+    секцией, исходной revision и черновым текстом. Ключ — Telegram user ID.
+    """
+
+    __tablename__ = "template_sessions"
+
+    telegram_user_id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    payload: Mapped[str] = mapped_column(Text, nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime, default=utcnow, onupdate=utcnow, nullable=False
+    )
+
+    def __repr__(self) -> str:
+        return f"<TemplateSession(telegram_user_id={self.telegram_user_id})>"
+
+
 class Brick(Base):
     """
     Определение типизированного поля, а не его значение в анонсе.

@@ -53,6 +53,7 @@ from place_store import (
     search_places,
     validate_place_name,
 )
+from template_state import clear_template_session
 from user_store import get_or_create_user
 from utils import screen
 from utils import tg_context as ctx
@@ -844,6 +845,7 @@ async def open_places(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     # административный ввод или конструктор не должен перехватывать текст.
     clear_admin_session(ctx.user(update).id)
     clear_brick_session(ctx.user(update).id)
+    clear_template_session(ctx.user(update).id)
     state = load_place_session(ctx.user(update).id)
     if not isinstance(state, dict) or state.get("phase") not in PHASES:
         state = _new_hub()

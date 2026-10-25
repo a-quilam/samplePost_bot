@@ -24,6 +24,7 @@ from brick_state import clear_brick_session
 from database import SessionLocal
 from models import Draft
 from place_state import clear_place_session
+from template_state import clear_template_session
 from utils import screen
 from utils import tg_context as ctx
 
@@ -200,6 +201,7 @@ async def view_drafts(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     clear_place_session(ctx.user(update).id)
     clear_admin_session(ctx.user(update).id)
     clear_brick_session(ctx.user(update).id)
+    clear_template_session(ctx.user(update).id)
     await _render_drafts_screen(update, context)
     await screen.drop_user_input(update, context)
 

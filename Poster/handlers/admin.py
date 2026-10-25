@@ -119,6 +119,7 @@ from place_store import (
     normalize_place_name,
     validate_place_name,
 )
+from template_state import clear_template_session
 from user_store import get_or_create_user
 from utils import screen
 from utils import tg_context as ctx
@@ -953,6 +954,14 @@ def _place_keyboard(
             )
         ]
     )
+    rows.append(
+        [
+            InlineKeyboardButton(
+                "📄 Стандартный шаблон",
+                callback_data=f"tp_std:{details.place_id}",
+            )
+        ]
+    )
     active = get_active_place_admin(session, details.place_id)
     if active is not None and viewer_telegram_user_id == active.user.telegram_user_id:
         rows.append(
@@ -1746,6 +1755,7 @@ async def open_admin(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         await query.answer()
     clear_place_session(user_id)
     clear_brick_session(user_id)
+    clear_template_session(user_id)
     state = load_admin_session(user_id)
     if not isinstance(state, dict) or state.get("phase") not in PHASES:
         state = _new_state()

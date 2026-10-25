@@ -39,6 +39,7 @@ from models import (
     photos_to_json,
 )
 from place_state import clear_place_session
+from template_state import clear_template_session
 from utils import calendar_view, screen
 from utils import tg_context as ctx
 from utils.formatter import format_text
@@ -463,6 +464,7 @@ async def start_post_creation(
     clear_place_session(ctx.user(update).id)
     clear_admin_session(ctx.user(update).id)
     clear_brick_session(ctx.user(update).id)
+    clear_template_session(ctx.user(update).id)
     logger.info("Начало создания поста.")
     await _save_wip_before_exit(update, context)
     user_data = ctx.data(context)
@@ -492,6 +494,7 @@ async def restore_wip(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int
     clear_place_session(ctx.user(update).id)
     clear_admin_session(ctx.user(update).id)
     clear_brick_session(ctx.user(update).id)
+    clear_template_session(ctx.user(update).id)
     user_data = ctx.data(context)
     user_id = ctx.user(update).id
     payload = screen.load_payload(user_id)
@@ -541,6 +544,7 @@ async def start_edit_draft(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     clear_place_session(ctx.user(update).id)
     clear_admin_session(ctx.user(update).id)
     clear_brick_session(ctx.user(update).id)
+    clear_template_session(ctx.user(update).id)
 
     try:
         draft_id = int((query.data or "")[len("editdraft_") :])
@@ -2515,6 +2519,7 @@ async def cancel_creation(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     clear_place_session(ctx.user(update).id)
     clear_admin_session(ctx.user(update).id)
     clear_brick_session(ctx.user(update).id)
+    clear_template_session(ctx.user(update).id)
     user_data = ctx.data(context)
     if screen.screen_ref(user_data) is None:
         screen.hydrate_screen_ref(user_data, ctx.user(update).id)
@@ -2603,6 +2608,27 @@ async def admin_during_creation(
     await _save_wip_before_exit(update, context)
     clear_place_session(ctx.user(update).id)
     await open_admin(update, context)
+    return ConversationHandler.END
+
+
+async def templates_during_creation(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> int:
+    """
+    Переход в «Мои шаблоны» ВНУТРИ диалога поста.
+
+    WIP сохраняется, диалог завершается, а состояние места/админки/
+    кирпичиков очищается. Иначе следующий текст мог бы уйти в поле поста,
+    а редактор шаблона — перехватить его.
+    """
+    from handlers.templates import open_templates
+
+    await _save_wip_before_exit(update, context)
+    user_id = ctx.user(update).id
+    clear_place_session(user_id)
+    clear_admin_session(user_id)
+    clear_brick_session(user_id)
+    await open_templates(update, context)
     return ConversationHandler.END
 
 
@@ -2750,6 +2776,7 @@ def post_creation_handlers() -> list[BaseHandler]:
                 CommandHandler("drafts", view_drafts_and_exit),
                 CommandHandler("places", places_during_creation),
                 CommandHandler("bricks", bricks_during_creation),
+                CommandHandler("templates", templates_during_creation),
                 CommandHandler("admin", admin_during_creation),
                 # Кнопки главного меню, нажатые во время диалога: WIP
                 # сохраняется, диалог завершается — иначе состояние оставалось
@@ -2760,6 +2787,7 @@ def post_creation_handlers() -> list[BaseHandler]:
                 CallbackQueryHandler(help_during_creation, pattern=r"^help$"),
                 CallbackQueryHandler(places_during_creation, pattern=r"^places$"),
                 CallbackQueryHandler(bricks_during_creation, pattern=r"^bricks$"),
+                CallbackQueryHandler(templates_during_creation, pattern=r"^templates$"),
                 CallbackQueryHandler(admin_during_creation, pattern=r"^admin_panel$"),
                 # Повторное «Продолжить пост» при уже активном диалоге: без
                 # этого fallback'а кнопка проваливалась бы в stale-хендлер
