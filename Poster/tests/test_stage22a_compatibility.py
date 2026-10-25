@@ -88,6 +88,7 @@ class Stage22ACompatibilityTests(unittest.TestCase):
             "template_version_bricks",
             "template_snapshots",
             "template_snapshot_bricks",
+            "template_sessions",
         }
         legacy_tables = [
             table
@@ -199,7 +200,7 @@ class Stage22ACompatibilityTests(unittest.TestCase):
                 (5, "admin_transfers"),
             ],
         )
-        self.assertEqual(run_migrations(self.engine), 9)
+        self.assertEqual(run_migrations(self.engine), 10)
 
         copies = self.backup_paths()
         self.assertEqual(len(copies), 1, copies)
@@ -240,7 +241,7 @@ class Stage22ACompatibilityTests(unittest.TestCase):
         finally:
             connection.close()
 
-        self.assertEqual(journal(self.path)[-1], (9, "template_binding_codes"))
+        self.assertEqual(journal(self.path)[-1], (10, "template_sessions"))
         with self.Session() as session:
             stored_draft = session.get(Draft, 7)
             stored_state = session.get(UserState, user.telegram_user_id)
@@ -287,7 +288,7 @@ class Stage22ACompatibilityTests(unittest.TestCase):
         assignment = self.make_admin(place.id, admin.id)
         self.session.close()
 
-        self.assertEqual(run_migrations(self.engine), 9)
+        self.assertEqual(run_migrations(self.engine), 10)
         with self.Session() as session:
             self.assertTrue(is_place_admin(session, admin.telegram_user_id, place.id))
             self.assertTrue(can_manage_place(session, admin.telegram_user_id, place.id))
@@ -336,7 +337,7 @@ class Stage22ACompatibilityTests(unittest.TestCase):
         transfer_id = created.transfer.transfer_id
         self.session.close()
 
-        self.assertEqual(run_migrations(self.engine), 9)
+        self.assertEqual(run_migrations(self.engine), 10)
         with self.Session() as session:
             pending = get_transfer_view(session, transfer_id)
             self.assertIsNotNone(pending)

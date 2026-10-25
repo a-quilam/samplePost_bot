@@ -12,6 +12,7 @@ Stage 24: сквозные интеграционные тесты на врем
 from __future__ import annotations
 
 import unittest
+from datetime import date, timedelta
 
 from sqlalchemy import text
 
@@ -114,13 +115,14 @@ class Stage24IntegrationTests(TemplateDatabaseTestCase):
 
         # 8. Загрузка snapshot (версии 1) из новой сессии SQLite.
         self.session.expire_all()
+        event_date = (date.today() + timedelta(days=1)).strftime("%d.%m.%Y")
         stored = render_template_snapshot(
             self.session,
             actor_telegram_user_id=OWNER_TG,
             snapshot_id=v1_snapshot.snapshot_id,
             values_by_id={
                 1: "Клуб «Гнездо»",
-                2: "24.10.2026",
+                2: event_date,
                 3: "19:00",
                 5: "Гнездо",
                 7: "https://t.me/nest",
@@ -130,7 +132,7 @@ class Stage24IntegrationTests(TemplateDatabaseTestCase):
         )
         # 9. Компиляция snapshot в готовый HTML со ссылкой.
         self.assertIn("Клуб «Гнездо»", stored)
-        self.assertIn("24.10.2026", stored)
+        self.assertIn(event_date, stored)
         self.assertIn("Гнездо", stored)
         self.assertIn("Стёпа в клетке", stored)
         self.assertIn("@nest", stored)
@@ -385,7 +387,7 @@ class Stage24IntegrationTests(TemplateDatabaseTestCase):
             template_id=created.template_id,
             values_by_id={
                 1: "Встреча",
-                date_id: "15.06.2027",
+                date_id: (date.today() + timedelta(days=200)).strftime("%d.%m.%Y"),
                 time_id: "14:30",
                 url_id: "https://example.com/event",
                 long_id: "Подробное\nописание",
@@ -395,7 +397,7 @@ class Stage24IntegrationTests(TemplateDatabaseTestCase):
             },
         )
         self.assertIn("Встреча", html)
-        self.assertIn("15.06.2027", html)
+        self.assertIn((date.today() + timedelta(days=200)).strftime("%d.%m.%Y"), html)
         self.assertIn("14:30", html)
         self.assertIn("https://example.com/event", html)
         self.assertIn("Подробное\nописание", html)

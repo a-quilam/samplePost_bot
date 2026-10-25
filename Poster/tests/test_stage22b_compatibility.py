@@ -68,6 +68,7 @@ class Stage22BCompatibilityTests(unittest.TestCase):
             "template_version_bricks",
             "template_snapshots",
             "template_snapshot_bricks",
+            "template_sessions",
         }
         legacy_tables = [
             table
@@ -129,7 +130,7 @@ class Stage22BCompatibilityTests(unittest.TestCase):
         self.session.close()
 
         self.assertEqual(journal(self.path)[-1], (6, "bricks_registry"))
-        self.assertEqual(run_migrations(self.engine), 9)
+        self.assertEqual(run_migrations(self.engine), 10)
         copies = self.backup_paths()
         self.assertEqual(len(copies), 1, copies)
         backup = copies[0]
@@ -163,7 +164,7 @@ class Stage22BCompatibilityTests(unittest.TestCase):
         finally:
             backup_connection.close()
 
-        self.assertEqual(journal(self.path)[-1], (9, "template_binding_codes"))
+        self.assertEqual(journal(self.path)[-1], (10, "template_sessions"))
         with self.Session() as session:
             stored_draft = session.get(Draft, draft_id)
             stored_state = session.get(UserState, user.id)
@@ -185,7 +186,7 @@ class Stage22BCompatibilityTests(unittest.TestCase):
             self.assertIsNotNone(session.get(Place, place.id))
 
     def test_migration_seven_is_idempotent_and_sessions_survive_restart(self) -> None:
-        self.assertEqual(run_migrations(self.engine), 9)
+        self.assertEqual(run_migrations(self.engine), 10)
         with self.engine.begin() as connection:
             connection.exec_driver_sql(
                 "INSERT INTO brick_sessions "
@@ -193,9 +194,9 @@ class Stage22BCompatibilityTests(unittest.TestCase):
                 "VALUES (?, ?, '2026-01-01 00:00:00')",
                 (9_440_002, '{"phase":"hub","page":0}'),
             )
-        self.assertEqual(run_migrations(self.engine), 9)
-        self.assertEqual(run_migrations(self.engine), 9)
-        self.assertEqual(len(journal(self.path)), 9)
+        self.assertEqual(run_migrations(self.engine), 10)
+        self.assertEqual(run_migrations(self.engine), 10)
+        self.assertEqual(len(journal(self.path)), 10)
         self.assertEqual(
             scalar(
                 self.path,

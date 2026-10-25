@@ -51,8 +51,10 @@ try:
     import handlers.main_menu as main_menu_module
     import handlers.places as places_module
     import handlers.post_creation as post_creation_module
+    import handlers.templates as templates_module
     import handlers.user_tracking as user_tracking_module
     import place_state as place_state_module
+    import template_state as template_state_module
     import utils.parsers as parsers_module
     import utils.screen as screen_module
     from base import Base
@@ -460,6 +462,8 @@ class Harness:
             user_tracking_module.SessionLocal,
             bricks_module.SessionLocal,
             brick_state_module.SessionLocal,
+            template_state_module.SessionLocal,
+            templates_module.SessionLocal,
         )
         post_creation_module.SessionLocal = self.session_factory
         drafts_module.SessionLocal = self.session_factory
@@ -472,6 +476,8 @@ class Harness:
         user_tracking_module.SessionLocal = self.session_factory
         bricks_module.SessionLocal = self.session_factory
         brick_state_module.SessionLocal = self.session_factory
+        template_state_module.SessionLocal = self.session_factory
+        templates_module.SessionLocal = self.session_factory
 
         # Уведомления об ошибках троттлятся по (chat_id, time.monotonic) —
         # без сброса тесты «повторно заметили бы» чужие уведомления
@@ -531,6 +537,8 @@ class Harness:
         user_tracking_module.SessionLocal = self._orig_session_local[8]
         bricks_module.SessionLocal = self._orig_session_local[9]
         brick_state_module.SessionLocal = self._orig_session_local[10]
+        template_state_module.SessionLocal = self._orig_session_local[11]
+        templates_module.SessionLocal = self._orig_session_local[12]
         errors_module._last_error_notice.clear()
         errors_module._last_error_notice.update(self._orig_error_notice)
         self.engine.dispose()

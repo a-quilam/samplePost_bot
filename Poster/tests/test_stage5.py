@@ -512,6 +512,7 @@ class MainMenuKeyboardTests(unittest.TestCase):
                 "✏️ Создать пост",
                 "📍 Места",
                 "🧱 Мои кирпичики",
+                "📄 Мои шаблоны",
                 "📂 Черновики",
                 "❔ Помощь",
             ],
@@ -520,7 +521,8 @@ class MainMenuKeyboardTests(unittest.TestCase):
             button.callback_data for row in keyboard.inline_keyboard for button in row
         ]
         self.assertEqual(
-            callbacks, ["create_post", "places", "bricks", "drafts", "help"]
+            callbacks,
+            ["create_post", "places", "bricks", "templates", "drafts", "help"],
         )
 
     def test_help_lists_commands(self):
