@@ -490,7 +490,9 @@ class InviteFlowTests(unittest.TestCase):
         self.assertIsNotNone(match, text)
         assert match is not None
         payload = match.group(1)
-        token = payload.rsplit("_", 1)[1]
+        # Токен urlsafe может сам содержать «_», поэтому отделяем его от
+        # префикса `tf_<id>_` только по первым двум разделителям.
+        token = payload.split("_", 2)[2]
 
         row = pending_transfer(h, place_id)
         assert row is not None
