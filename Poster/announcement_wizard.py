@@ -96,6 +96,10 @@ class AnnouncementConflictError(AnnouncementError):
     """Конфликт ревизии, идемпотентности или одновременной записи."""
 
 
+class AnnouncementPublicationError(AnnouncementError):
+    """Публикация уже начата/завершена или её состояние не позволяет шаг."""
+
+
 class AnnouncementStageError(AnnouncementError):
     """Действие недопустимо на текущем этапе мастера."""
 

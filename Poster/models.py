@@ -1159,6 +1159,21 @@ class AnnouncementDraft(Base):
         Integer, nullable=False, default=1, server_default=text("1")
     )
     idempotency_key: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # Фотографии анонса — отдельная коллекция вложений, а не кирпичики
+    # и не часть текста. JSON-список file_id; NULL/пусто = фото нет.
+    photos: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # Замороженный payload публикации. Заполняется один раз при начале
+    # отправки: последующее изменение значений/шаблона/фото не должно
+    # менять уже частично отправленный пост.
+    publication_status: Mapped[str | None] = mapped_column(Text, nullable=True)
+    publication_text: Mapped[str | None] = mapped_column(Text, nullable=True)
+    publication_photos: Mapped[str | None] = mapped_column(Text, nullable=True)
+    publication_progress: Mapped[str | None] = mapped_column(Text, nullable=True)
+    publication_error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    publication_started_at: Mapped[datetime | None] = mapped_column(
+        DateTime, nullable=True
+    )
+    published_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime, default=utcnow, nullable=False
     )
@@ -1171,6 +1186,25 @@ class AnnouncementDraft(Base):
             "stage IN ('place', 'template', 'questions', 'extras', "
             "'preview', 'completed')",
             name="ck_announcement_drafts_stage",
+        ),
+        CheckConstraint(
+            "publication_status IS NULL OR publication_status IN "
+            "('sending', 'partial', 'failed', 'sent')",
+            name="ck_announcement_drafts_publication_status",
+        ),
+        CheckConstraint(
+            "photos IS NULL OR (json_valid(photos) " "AND json_type(photos) = 'array')",
+            name="ck_announcement_drafts_photos",
+        ),
+        CheckConstraint(
+            "publication_photos IS NULL OR (json_valid(publication_photos) "
+            "AND json_type(publication_photos) = 'array')",
+            name="ck_announcement_drafts_publication_photos",
+        ),
+        CheckConstraint(
+            "publication_progress IS NULL OR (json_valid(publication_progress) "
+            "AND json_type(publication_progress) = 'object')",
+            name="ck_announcement_drafts_publication_progress",
         ),
         CheckConstraint("revision >= 1", name="ck_announcement_drafts_revision"),
         CheckConstraint(

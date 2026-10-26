@@ -20,7 +20,7 @@
 from __future__ import annotations
 
 import json
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import date, datetime
 from typing import Any
@@ -40,6 +40,7 @@ from announcement_wizard import (
     AnnouncementConflictError,
     AnnouncementError,
     AnnouncementNotFoundError,
+    AnnouncementPublicationError,
     AnnouncementSnapshotError,
     AnnouncementStageError,
     AnnouncementTemplateSnapshot,
@@ -93,6 +94,22 @@ from template_types import (
 
 _UNSET = object()
 
+# Разумный предел коллекции: защищает сообщение/БД от бесконечного набора.
+# Отправка при этом всё равно режется на медиагруппы по лимиту Telegram.
+MAX_ANNOUNCEMENT_PHOTOS = 100
+
+PUBLICATION_STATUS_SENDING = "sending"
+PUBLICATION_STATUS_PARTIAL = "partial"
+PUBLICATION_STATUS_FAILED = "failed"
+PUBLICATION_STATUS_SENT = "sent"
+PUBLICATION_STATUSES = (
+    PUBLICATION_STATUS_SENDING,
+    PUBLICATION_STATUS_PARTIAL,
+    PUBLICATION_STATUS_FAILED,
+    PUBLICATION_STATUS_SENT,
+)
+PUBLICATION_FROZEN_STATUSES = PUBLICATION_STATUSES
+
 
 @dataclass(frozen=True)
 class AnnouncementValueDetails:
@@ -142,6 +159,16 @@ class AnnouncementDraftDetails:
     revision: int
     values: tuple[AnnouncementValueDetails, ...] = field(default_factory=tuple)
     extras: tuple[AnnouncementExtraDetails, ...] = field(default_factory=tuple)
+    # Отдельная коллекция вложений анонса. Фото не являются кирпичиками
+    # и не участвуют в шаблонном тексте.
+    photos: tuple[str, ...] = field(default_factory=tuple)
+    publication_status: str | None = None
+    publication_text: str | None = None
+    publication_photos: tuple[str, ...] = field(default_factory=tuple)
+    publication_progress: Mapping[str, Any] = field(default_factory=dict)
+    publication_error: str | None = None
+    publication_started_at: datetime | None = None
+    published_at: datetime | None = None
     created_at: datetime = field(default_factory=utcnow)
     updated_at: datetime = field(default_factory=utcnow)
 
@@ -153,6 +180,62 @@ class AnnouncementDraftDetails:
     @property
     def value_map(self) -> dict[int, AnnouncementValueDetails]:
         return {value.brick_id: value for value in self.values}
+
+    @property
+    def publication_locked(self) -> bool:
+        """После начала отправки текст/фото/значения уже нельзя менять."""
+        return self.publication_status is not None
+
+    @property
+    def publication_sent(self) -> bool:
+        return self.publication_status == PUBLICATION_STATUS_SENT
+
+    @property
+    def publication_step(self) -> int:
+        value = self.publication_progress.get("step")
+        if isinstance(value, bool) or not isinstance(value, int):
+            return 0
+        return max(0, value)
+
+    @property
+    def publication_total(self) -> int:
+        value = self.publication_progress.get("total")
+        if isinstance(value, bool) or not isinstance(value, int):
+            return 0
+        return max(0, value)
+
+    @property
+    def publication_can_reset(self) -> bool:
+        """Вернуться к правке можно только до первой операции отправки."""
+        return (
+            self.publication_status == PUBLICATION_STATUS_FAILED
+            and self.publication_step == 0
+            and not self.publication_progress.get("ids")
+        )
+
+
+@dataclass(frozen=True)
+class AnnouncementPublication:
+    """Замороженный payload одной публикации и текущий прогресс."""
+
+    draft: AnnouncementDraftDetails
+    text: str
+    photos: tuple[str, ...]
+    progress: Mapping[str, Any]
+
+    @property
+    def step(self) -> int:
+        value = self.progress.get("step")
+        if isinstance(value, bool) or not isinstance(value, int):
+            return 0
+        return max(0, value)
+
+    @property
+    def total(self) -> int:
+        value = self.progress.get("total")
+        if isinstance(value, bool) or not isinstance(value, int):
+            return 0
+        return max(0, value)
 
 
 @dataclass(frozen=True)
@@ -237,6 +320,85 @@ def _optional_text(value: str | None) -> str | None:
         return None
     cleaned = value.strip()
     return cleaned or None
+
+
+def _photo_ids_from_json(raw: str | None, *, field_name: str) -> tuple[str, ...]:
+    """Читает JSON-список file_id; битое значение — явная ошибка, не «нет фото»."""
+    if not raw:
+        return ()
+    try:
+        parsed = json.loads(raw)
+    except (TypeError, ValueError) as exc:
+        raise AnnouncementSnapshotError(
+            f"Поле {field_name} содержит битый JSON."
+        ) from exc
+    if not isinstance(parsed, list) or any(
+        not isinstance(item, str) or not item.strip() for item in parsed
+    ):
+        raise AnnouncementSnapshotError(
+            f"Поле {field_name} должно быть JSON-списком непустых file_id."
+        )
+    # Защитная дедупликация на чтении: повторный Update не должен
+    # превращаться в повторное вложение даже при старых/ручных данных.
+    seen: set[str] = set()
+    result: list[str] = []
+    for item in parsed:
+        file_id = item.strip()
+        if file_id not in seen:
+            seen.add(file_id)
+            result.append(file_id)
+    return tuple(result)
+
+
+def _photo_ids_to_json(photos: Sequence[object]) -> str | None:
+    values: list[str] = []
+    seen: set[str] = set()
+    for item in photos or ():
+        file_id = _validated_photo_id(item)
+        if file_id not in seen:
+            seen.add(file_id)
+            values.append(file_id)
+    return json.dumps(values, ensure_ascii=False) if values else None
+
+
+def _validated_photo_id(value: object) -> str:
+    if not isinstance(value, str):
+        raise AnnouncementValueError("file_id фотографии должен быть строкой.")
+    file_id = value.strip()
+    if not file_id or len(file_id) > 4096:
+        raise AnnouncementValueError("Некорректный file_id фотографии.")
+    return file_id
+
+
+def _publication_progress_from_json(raw: str | None) -> Mapping[str, Any]:
+    if not raw:
+        return {}
+    try:
+        parsed = json.loads(raw)
+    except (TypeError, ValueError) as exc:
+        raise AnnouncementSnapshotError(
+            "Прогресс публикации содержит битый JSON."
+        ) from exc
+    if not isinstance(parsed, dict):
+        raise AnnouncementSnapshotError("Прогресс публикации должен быть объектом.")
+    return parsed
+
+
+def _publication_progress_to_json(progress: Mapping[str, Any]) -> str:
+    return json.dumps(dict(progress), ensure_ascii=False, sort_keys=True)
+
+
+def _ensure_content_editable(row: AnnouncementDraft) -> None:
+    """После первого шага публикации содержимое анонса заморожено."""
+    if row.publication_status is not None:
+        if row.publication_status == PUBLICATION_STATUS_SENT:
+            raise AnnouncementPublicationError(
+                "Анонс уже опубликован; повторная публикация не выполняется."
+            )
+        raise AnnouncementPublicationError(
+            "Публикация уже начата: изменить текст, значения или фотографии "
+            "нельзя. Продолжите отправку или завершите её по статусу."
+        )
 
 
 def _require_actor(session: Session, telegram_user_id: int | None) -> User:
@@ -449,6 +611,12 @@ def _draft_details(
             select(AnnouncementExtra).where(AnnouncementExtra.draft_id == row.id)
         ).all()
     )
+    publication_status = row.publication_status
+    if (
+        publication_status is not None
+        and publication_status not in PUBLICATION_STATUSES
+    ):
+        raise AnnouncementSnapshotError("Неизвестный статус публикации анонса.")
     return AnnouncementDraftDetails(
         draft_id=row.id,
         author_user_id=row.author_user_id,
@@ -464,6 +632,16 @@ def _draft_details(
         revision=row.revision,
         values=tuple(_decode_value(value) for value in value_rows),
         extras=_extra_details(session, extra_rows),
+        photos=_photo_ids_from_json(row.photos, field_name="photos"),
+        publication_status=publication_status,
+        publication_text=row.publication_text,
+        publication_photos=_photo_ids_from_json(
+            row.publication_photos, field_name="publication_photos"
+        ),
+        publication_progress=_publication_progress_from_json(row.publication_progress),
+        publication_error=row.publication_error,
+        publication_started_at=row.publication_started_at,
+        published_at=row.published_at,
         created_at=row.created_at,
         updated_at=row.updated_at,
     )
@@ -891,6 +1069,7 @@ def save_announcement_value(
         raise AnnouncementBrickError("Некорректный идентификатор кирпичика.")
     assert isinstance(brick_id, int)
     row = _load_owned_draft(session, actor, draft_id)
+    _ensure_content_editable(row)
     revision = _expected_revision(row, expected_revision)
     snapshot = _draft_snapshot(session, actor, row)
     if snapshot is None:
@@ -939,6 +1118,7 @@ def clear_announcement_value(
         raise AnnouncementBrickError("Некорректный идентификатор кирпичика.")
     assert isinstance(brick_id, int)
     row = _load_owned_draft(session, actor, draft_id)
+    _ensure_content_editable(row)
     revision = _expected_revision(row, expected_revision)
     existing = session.scalar(
         select(AnnouncementValue).where(
@@ -998,6 +1178,7 @@ def add_announcement_extra(
     assert isinstance(brick_id, int)
     checked_section, checked_position = _validate_section_position(section, position)
     row = _load_owned_draft(session, actor, draft_id)
+    _ensure_content_editable(row)
     revision = _expected_revision(row, expected_revision)
     snapshot = _draft_snapshot(session, actor, row)
     if snapshot is None:
@@ -1081,6 +1262,7 @@ def move_announcement_extra(
         raise AnnouncementNotFoundError("Дополнительный кирпичик не найден.")
     assert isinstance(extra_id, int)
     row = _load_owned_draft(session, actor, draft_id)
+    _ensure_content_editable(row)
     revision = _expected_revision(row, expected_revision)
     extra = session.scalar(
         select(AnnouncementExtra).where(
@@ -1122,6 +1304,7 @@ def remove_announcement_extra(
         raise AnnouncementNotFoundError("Дополнительный кирпичик не найден.")
     assert isinstance(extra_id, int)
     row = _load_owned_draft(session, actor, draft_id)
+    _ensure_content_editable(row)
     revision = _expected_revision(row, expected_revision)
     extra = session.scalar(
         select(AnnouncementExtra).where(
@@ -1170,6 +1353,7 @@ def set_announcement_stage(
         raise AnnouncementStageError("Сначала выберите шаблон анонса.")
     if row.stage == str(stage):
         return _draft_details(session, actor, row)
+    _ensure_content_editable(row)
     try:
         _cas_update_draft(
             session,
@@ -1182,6 +1366,426 @@ def set_announcement_stage(
         session.rollback()
         raise
     return _details_by_id(session, actor, row.id)
+
+
+# --- Фотографии анонса ------------------------------------------------------
+
+
+def add_announcement_photo(
+    session: Session,
+    *,
+    actor_telegram_user_id: int | None,
+    draft_id: int,
+    file_id: object,
+    expected_revision: int | None = None,
+) -> AnnouncementDraftDetails:
+    """
+    Добавляет file_id в отдельную коллекцию фото анонса.
+
+    Повторная обработка того же Update/фото идемпотентна: одинаковый
+    file_id не создаёт дубль и не меняет revision. После начала публикации
+    коллекция заморожена.
+    """
+    actor = _require_actor(session, actor_telegram_user_id)
+    row = _load_owned_draft(session, actor, draft_id)
+    _ensure_content_editable(row)
+    revision = _expected_revision(row, expected_revision)
+    checked = _validated_photo_id(file_id)
+    current = list(_photo_ids_from_json(row.photos, field_name="photos"))
+    if checked in current:
+        return _draft_details(session, actor, row)
+    if len(current) >= MAX_ANNOUNCEMENT_PHOTOS:
+        raise AnnouncementValueError(
+            f"К анонсу можно добавить не более {MAX_ANNOUNCEMENT_PHOTOS} фотографий."
+        )
+    current.append(checked)
+    try:
+        _cas_update_draft(
+            session,
+            draft_id=row.id,
+            revision=revision,
+            fields={"photos": _photo_ids_to_json(current)},
+        )
+        _commit(session)
+    except Exception:
+        session.rollback()
+        raise
+    return _details_by_id(session, actor, row.id)
+
+
+def remove_announcement_photo(
+    session: Session,
+    *,
+    actor_telegram_user_id: int | None,
+    draft_id: int,
+    index: int,
+    expected_revision: int | None = None,
+) -> AnnouncementDraftDetails:
+    """Удаляет фото по 0-based индексу; остальные не сдвигаются в file_id."""
+    actor = _require_actor(session, actor_telegram_user_id)
+    if isinstance(index, bool) or not isinstance(index, int) or index < 0:
+        raise AnnouncementValueError("Некорректный номер фотографии.")
+    row = _load_owned_draft(session, actor, draft_id)
+    _ensure_content_editable(row)
+    revision = _expected_revision(row, expected_revision)
+    current = list(_photo_ids_from_json(row.photos, field_name="photos"))
+    if index >= len(current):
+        raise AnnouncementValueError("Фотография уже удалена или не найдена.")
+    current.pop(index)
+    try:
+        _cas_update_draft(
+            session,
+            draft_id=row.id,
+            revision=revision,
+            fields={"photos": _photo_ids_to_json(current)},
+        )
+        _commit(session)
+    except Exception:
+        session.rollback()
+        raise
+    return _details_by_id(session, actor, row.id)
+
+
+def clear_announcement_photos(
+    session: Session,
+    *,
+    actor_telegram_user_id: int | None,
+    draft_id: int,
+    expected_revision: int | None = None,
+) -> AnnouncementDraftDetails:
+    """Удаляет всю коллекцию фото; текст и кирпичики не меняются."""
+    actor = _require_actor(session, actor_telegram_user_id)
+    row = _load_owned_draft(session, actor, draft_id)
+    _ensure_content_editable(row)
+    revision = _expected_revision(row, expected_revision)
+    current = _photo_ids_from_json(row.photos, field_name="photos")
+    if not current:
+        return _draft_details(session, actor, row)
+    try:
+        _cas_update_draft(
+            session,
+            draft_id=row.id,
+            revision=revision,
+            fields={"photos": None},
+        )
+        _commit(session)
+    except Exception:
+        session.rollback()
+        raise
+    return _details_by_id(session, actor, row.id)
+
+
+# --- Публикация -------------------------------------------------------------
+
+
+def _publication_from_row(
+    session: Session,
+    actor: User,
+    row: AnnouncementDraft,
+) -> AnnouncementPublication:
+    # После CAS/commit объект в identity map может быть старым (тесты и
+    # рабочие сессии используют expire_on_commit=False). Перечитываем строку
+    # с populate_existing, иначе статус `sending` выглядит как «не начат».
+    row = _load_owned_draft(session, actor, row.id)
+    details = _draft_details(session, actor, row)
+    if details.publication_status is None:
+        raise AnnouncementPublicationError("Публикация ещё не начата.")
+    if not details.publication_text:
+        raise AnnouncementSnapshotError(
+            "У начатой публикации отсутствует замороженный текст."
+        )
+    return AnnouncementPublication(
+        draft=details,
+        text=details.publication_text,
+        photos=details.publication_photos,
+        progress=dict(details.publication_progress),
+    )
+
+
+def begin_announcement_publication(
+    session: Session,
+    *,
+    actor_telegram_user_id: int | None,
+    draft_id: int,
+    expected_revision: int | None = None,
+    today: date | None = None,
+) -> AnnouncementPublication:
+    """
+    Замораживает готовый текст и фото и переводит анонс в `sending`.
+
+    Проверка готовности и компиляция Stage 24 выполняются ДО начала
+    отправки. Повторный вызов при уже начатой публикации не пересобирает
+    payload, а возвращает ошибку: продолжение — отдельная явная операция.
+    """
+    actor = _require_actor(session, actor_telegram_user_id)
+    row = _load_owned_draft(session, actor, draft_id)
+    revision = _expected_revision(row, expected_revision)
+    if row.publication_status is not None:
+        raise AnnouncementPublicationError(
+            "Публикация уже начата или завершена; payload не пересобирается."
+        )
+    if row.stage != WizardStage.PREVIEW.value:
+        raise AnnouncementStageError("Сначала завершите обзор анонса.")
+    preview = build_announcement_preview(
+        session,
+        actor_telegram_user_id=actor.telegram_user_id,
+        draft_id=row.id,
+        today=today,
+    )
+    if not preview.ready:
+        reason = preview.issues[0] if preview.issues else "анонс не готов"
+        raise AnnouncementStageError(f"Анонс не готов к публикации: {reason}")
+    now = utcnow()
+    photos = preview.draft.photos
+    try:
+        _cas_update_draft(
+            session,
+            draft_id=row.id,
+            revision=revision,
+            fields={
+                "publication_status": PUBLICATION_STATUS_SENDING,
+                "publication_text": preview.html,
+                "publication_photos": json.dumps(list(photos), ensure_ascii=False),
+                "publication_progress": None,
+                "publication_error": None,
+                "publication_started_at": now,
+                "published_at": None,
+            },
+        )
+        _commit(session)
+    except Exception:
+        session.rollback()
+        raise
+    return _publication_from_row(session, actor, row)
+
+
+def resume_announcement_publication(
+    session: Session,
+    *,
+    actor_telegram_user_id: int | None,
+    draft_id: int,
+    expected_revision: int | None = None,
+) -> AnnouncementPublication:
+    """
+    Продолжает только замороженный payload; значения/фото не пересобираются.
+
+    Новый revision закрывает повторное нажатие той же кнопки. Уже
+    подтверждённые операции берутся из progress и повторно не отправляются.
+    """
+    actor = _require_actor(session, actor_telegram_user_id)
+    row = _load_owned_draft(session, actor, draft_id)
+    revision = _expected_revision(row, expected_revision)
+    if row.publication_status == PUBLICATION_STATUS_SENT:
+        raise AnnouncementPublicationError("Анонс уже опубликован.")
+    if row.publication_status is None:
+        raise AnnouncementPublicationError("Публикация ещё не начата.")
+    if row.publication_status not in PUBLICATION_FROZEN_STATUSES:
+        raise AnnouncementPublicationError("Неизвестный статус публикации.")
+    if not row.publication_text or row.publication_photos is None:
+        raise AnnouncementSnapshotError("Замороженный payload публикации повреждён.")
+    try:
+        _cas_update_draft(
+            session,
+            draft_id=row.id,
+            revision=revision,
+            fields={
+                "publication_status": PUBLICATION_STATUS_SENDING,
+                "publication_error": None,
+            },
+        )
+        _commit(session)
+    except Exception:
+        session.rollback()
+        raise
+    return _publication_from_row(session, actor, row)
+
+
+def record_announcement_publication_progress(
+    session: Session,
+    *,
+    actor_telegram_user_id: int | None,
+    draft_id: int,
+    progress: Mapping[str, object],
+) -> AnnouncementDraftDetails:
+    """
+    Сохраняет подтверждённый прогресс отправки в SQLite.
+
+    Progress пишется после каждой подтверждённой Telegram-операции. Ошибка
+    записи не «додумывается»: вызывающий отправку останавливается, чтобы
+    не продолжать вслепую.
+    """
+    actor = _require_actor(session, actor_telegram_user_id)
+    row = _load_owned_draft(session, actor, draft_id)
+    if row.publication_status != PUBLICATION_STATUS_SENDING:
+        raise AnnouncementPublicationError(
+            "Прогресс можно записывать только во время отправки."
+        )
+    normalized = _validated_publication_progress(progress)
+    try:
+        _cas_update_draft(
+            session,
+            draft_id=row.id,
+            revision=row.revision,
+            fields={"publication_progress": _publication_progress_to_json(normalized)},
+        )
+        _commit(session)
+    except Exception:
+        session.rollback()
+        raise
+    return _details_by_id(session, actor, row.id)
+
+
+def mark_announcement_publication_failed(
+    session: Session,
+    *,
+    actor_telegram_user_id: int | None,
+    draft_id: int,
+    error: str,
+) -> AnnouncementDraftDetails:
+    """Фиксирует честный статус: частичная отправка или полный отказ."""
+    actor = _require_actor(session, actor_telegram_user_id)
+    row = _load_owned_draft(session, actor, draft_id)
+    if row.publication_status == PUBLICATION_STATUS_SENT:
+        return _draft_details(session, actor, row)
+    if row.publication_status is None:
+        raise AnnouncementPublicationError("Публикация ещё не начата.")
+    progress = _publication_progress_from_json(row.publication_progress)
+    step = progress.get("step")
+    step = step if isinstance(step, int) and not isinstance(step, bool) else 0
+    status = PUBLICATION_STATUS_PARTIAL if step > 0 else PUBLICATION_STATUS_FAILED
+    message = " ".join(str(error or "").split())[:1000]
+    if not message:
+        message = "Telegram не подтвердил отправку."
+    try:
+        _cas_update_draft(
+            session,
+            draft_id=row.id,
+            revision=row.revision,
+            fields={
+                "publication_status": status,
+                "publication_error": message,
+            },
+        )
+        _commit(session)
+    except Exception:
+        session.rollback()
+        raise
+    return _details_by_id(session, actor, row.id)
+
+
+def mark_announcement_publication_sent(
+    session: Session,
+    *,
+    actor_telegram_user_id: int | None,
+    draft_id: int,
+) -> AnnouncementDraftDetails:
+    """Переводит анонс в `sent` только после успешного ответа Telegram."""
+    actor = _require_actor(session, actor_telegram_user_id)
+    row = _load_owned_draft(session, actor, draft_id)
+    if row.publication_status == PUBLICATION_STATUS_SENT:
+        return _draft_details(session, actor, row)
+    if row.publication_status != PUBLICATION_STATUS_SENDING:
+        raise AnnouncementPublicationError(
+            "Успех можно зафиксировать только после текущей отправки; "
+            "сначала продолжите замороженный payload."
+        )
+    try:
+        _cas_update_draft(
+            session,
+            draft_id=row.id,
+            revision=row.revision,
+            fields={
+                "publication_status": PUBLICATION_STATUS_SENT,
+                "publication_error": None,
+                "published_at": utcnow(),
+                "stage": WizardStage.COMPLETED.value,
+            },
+        )
+        _commit(session)
+    except Exception:
+        session.rollback()
+        raise
+    return _details_by_id(session, actor, row.id)
+
+
+def reset_failed_announcement_publication(
+    session: Session,
+    *,
+    actor_telegram_user_id: int | None,
+    draft_id: int,
+    expected_revision: int | None = None,
+) -> AnnouncementDraftDetails:
+    """
+    Возвращает к правке только публикацию, не отправившую ни одной операции.
+
+    После частичного успеха сброс запрещён: иначе повторная отправка могла
+    бы создать дубли уже доставленных сообщений.
+    """
+    actor = _require_actor(session, actor_telegram_user_id)
+    row = _load_owned_draft(session, actor, draft_id)
+    revision = _expected_revision(row, expected_revision)
+    if row.publication_status != PUBLICATION_STATUS_FAILED:
+        raise AnnouncementPublicationError(
+            "Вернуться к правке можно только после полного отказа отправки."
+        )
+    progress = _publication_progress_from_json(row.publication_progress)
+    step = progress.get("step")
+    ids = progress.get("ids")
+    if (isinstance(step, int) and not isinstance(step, bool) and step > 0) or (
+        isinstance(ids, list) and ids
+    ):
+        raise AnnouncementPublicationError(
+            "Часть сообщений уже отправлена: сброс создал бы дубли."
+        )
+    try:
+        _cas_update_draft(
+            session,
+            draft_id=row.id,
+            revision=revision,
+            fields={
+                "publication_status": None,
+                "publication_text": None,
+                "publication_photos": None,
+                "publication_progress": None,
+                "publication_error": None,
+                "publication_started_at": None,
+                "published_at": None,
+            },
+        )
+        _commit(session)
+    except Exception:
+        session.rollback()
+        raise
+    return _details_by_id(session, actor, row.id)
+
+
+def _validated_publication_progress(
+    progress: Mapping[str, object],
+) -> dict[str, object]:
+    if not isinstance(progress, Mapping):
+        raise AnnouncementValueError("Прогресс публикации должен быть объектом.")
+    fingerprint = progress.get("fingerprint")
+    step = progress.get("step")
+    ids = progress.get("ids")
+    total = progress.get("total")
+    if not isinstance(fingerprint, str) or not fingerprint:
+        raise AnnouncementValueError("В прогрессе публикации нет отпечатка.")
+    if isinstance(step, bool) or not isinstance(step, int) or step < 0:
+        raise AnnouncementValueError("В прогрессе публикации некорректный шаг.")
+    if isinstance(total, bool) or not isinstance(total, int) or total < 0:
+        raise AnnouncementValueError("В прогрессе публикации нет общего числа.")
+    if step > total:
+        raise AnnouncementValueError("Шаг публикации больше общего числа операций.")
+    if not isinstance(ids, list) or any(
+        isinstance(item, bool) or not isinstance(item, int) for item in ids
+    ):
+        raise AnnouncementValueError("В прогрессе публикации некорректные message_id.")
+    return {
+        "fingerprint": fingerprint,
+        "step": step,
+        "ids": list(ids),
+        "total": total,
+    }
 
 
 # --- Чтение и восстановление ------------------------------------------------

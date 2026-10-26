@@ -1633,6 +1633,205 @@ MIGRATION_12_ANNOUNCEMENT_WIZARD = Migration(
 )
 
 
+# --- Версия 13: фото и публикация нового мастера (Stage 27C) ----------------
+
+
+MIGRATION_13_ANNOUNCEMENT_PUBLICATION = Migration(
+    version=13,
+    name="announcement_photos_publication",
+    statements=(
+        # Фотографии — отдельная коллекция вложений анонса, а не кирпичики
+        # и не часть HTML-текста. NULL/[] означают «фотографий нет».
+        "ALTER TABLE announcement_drafts ADD COLUMN photos TEXT",
+        # Замороженный payload публикации. Пока статус не начат, все поля
+        # NULL. После начала отправки текст/фото больше не пересобираются.
+        "ALTER TABLE announcement_drafts ADD COLUMN publication_status TEXT",
+        "ALTER TABLE announcement_drafts ADD COLUMN publication_text TEXT",
+        "ALTER TABLE announcement_drafts ADD COLUMN publication_photos TEXT",
+        "ALTER TABLE announcement_drafts ADD COLUMN publication_progress TEXT",
+        "ALTER TABLE announcement_drafts ADD COLUMN publication_error TEXT",
+        "ALTER TABLE announcement_drafts ADD COLUMN publication_started_at DATETIME",
+        "ALTER TABLE announcement_drafts ADD COLUMN published_at DATETIME",
+        """
+        CREATE INDEX ix_announcement_drafts_publication_status
+            ON announcement_drafts (publication_status)
+        """,
+        # JSON-проверки для фото/прогресса: ALTER TABLE в SQLite не умеет
+        # добавлять CHECK, поэтому те же ограничения держат триггеры.
+        """
+        CREATE TRIGGER trg_announcement_drafts_media_json_insert
+        BEFORE INSERT ON announcement_drafts
+        FOR EACH ROW
+        WHEN (NEW.photos IS NOT NULL AND (
+                json_valid(NEW.photos) = 0
+                OR CASE WHEN json_valid(NEW.photos) = 1
+                        THEN json_type(NEW.photos) END <> 'array'
+            ))
+            OR (NEW.publication_photos IS NOT NULL AND (
+                json_valid(NEW.publication_photos) = 0
+                OR CASE WHEN json_valid(NEW.publication_photos) = 1
+                        THEN json_type(NEW.publication_photos) END <> 'array'
+            ))
+            OR (NEW.publication_progress IS NOT NULL AND (
+                json_valid(NEW.publication_progress) = 0
+                OR CASE WHEN json_valid(NEW.publication_progress) = 1
+                        THEN json_type(NEW.publication_progress) END <> 'object'
+            ))
+        BEGIN
+            SELECT RAISE(ABORT, 'announcement media must be valid JSON');
+        END
+        """,
+        """
+        CREATE TRIGGER trg_announcement_drafts_media_json_update
+        BEFORE UPDATE OF photos, publication_photos, publication_progress
+        ON announcement_drafts
+        FOR EACH ROW
+        WHEN (NEW.photos IS NOT NULL AND (
+                json_valid(NEW.photos) = 0
+                OR CASE WHEN json_valid(NEW.photos) = 1
+                        THEN json_type(NEW.photos) END <> 'array'
+            ))
+            OR (NEW.publication_photos IS NOT NULL AND (
+                json_valid(NEW.publication_photos) = 0
+                OR CASE WHEN json_valid(NEW.publication_photos) = 1
+                        THEN json_type(NEW.publication_photos) END <> 'array'
+            ))
+            OR (NEW.publication_progress IS NOT NULL AND (
+                json_valid(NEW.publication_progress) = 0
+                OR CASE WHEN json_valid(NEW.publication_progress) = 1
+                        THEN json_type(NEW.publication_progress) END <> 'object'
+            ))
+        BEGIN
+            SELECT RAISE(ABORT, 'announcement media must be valid JSON');
+        END
+        """,
+        """
+        CREATE TRIGGER trg_announcement_drafts_publication_status_insert
+        BEFORE INSERT ON announcement_drafts
+        FOR EACH ROW
+        WHEN NEW.publication_status IS NOT NULL
+            AND NEW.publication_status NOT IN
+                ('sending', 'partial', 'failed', 'sent')
+        BEGIN
+            SELECT RAISE(ABORT, 'unknown announcement publication status');
+        END
+        """,
+        """
+        CREATE TRIGGER trg_announcement_drafts_publication_status_update
+        BEFORE UPDATE OF publication_status ON announcement_drafts
+        FOR EACH ROW
+        WHEN NEW.publication_status IS NOT NULL
+            AND NEW.publication_status NOT IN
+                ('sending', 'partial', 'failed', 'sent')
+        BEGIN
+            SELECT RAISE(ABORT, 'unknown announcement publication status');
+        END
+        """,
+        # Форма публикационных полей: начатая публикация всегда имеет
+        # замороженный текст и список фото; успешная — время подтверждения.
+        # Сброс к редактированию разрешён только в полностью пустое состояние.
+        """
+        CREATE TRIGGER trg_announcement_drafts_publication_shape_insert
+        BEFORE INSERT ON announcement_drafts
+        FOR EACH ROW
+        WHEN (
+            NEW.publication_status IS NULL
+            AND (
+                NEW.publication_text IS NOT NULL
+                OR NEW.publication_photos IS NOT NULL
+                OR NEW.publication_progress IS NOT NULL
+                OR NEW.publication_error IS NOT NULL
+                OR NEW.publication_started_at IS NOT NULL
+                OR NEW.published_at IS NOT NULL
+            )
+        ) OR (
+            NEW.publication_status IS NOT NULL
+            AND (
+                NEW.publication_text IS NULL
+                OR length(trim(NEW.publication_text)) = 0
+                OR NEW.publication_photos IS NULL
+                OR NEW.publication_started_at IS NULL
+                OR (
+                    NEW.publication_status IN ('sending', 'partial', 'failed')
+                    AND NEW.published_at IS NOT NULL
+                )
+                OR (
+                    NEW.publication_status = 'sent'
+                    AND NEW.published_at IS NULL
+                )
+            )
+        )
+        BEGIN
+            SELECT RAISE(ABORT, 'invalid announcement publication shape');
+        END
+        """,
+        """
+        CREATE TRIGGER trg_announcement_drafts_publication_shape
+        BEFORE UPDATE OF
+            publication_status, publication_text, publication_photos,
+            publication_progress, publication_error,
+            publication_started_at, published_at
+        ON announcement_drafts
+        FOR EACH ROW
+        WHEN (
+            NEW.publication_status IS NULL
+            AND (
+                NEW.publication_text IS NOT NULL
+                OR NEW.publication_photos IS NOT NULL
+                OR NEW.publication_progress IS NOT NULL
+                OR NEW.publication_error IS NOT NULL
+                OR NEW.publication_started_at IS NOT NULL
+                OR NEW.published_at IS NOT NULL
+            )
+        ) OR (
+            NEW.publication_status IS NOT NULL
+            AND (
+                NEW.publication_text IS NULL
+                OR length(trim(NEW.publication_text)) = 0
+                OR NEW.publication_photos IS NULL
+                OR NEW.publication_started_at IS NULL
+                OR (
+                    NEW.publication_status IN ('sending', 'partial', 'failed')
+                    AND NEW.published_at IS NOT NULL
+                )
+                OR (
+                    NEW.publication_status = 'sent'
+                    AND NEW.published_at IS NULL
+                )
+            )
+        )
+        BEGIN
+            SELECT RAISE(ABORT, 'invalid announcement publication shape');
+        END
+        """,
+        # Подтверждённо отправленный анонс нельзя вернуть в отправку или
+        # подменить его payload: повторная публикация не создаёт дубль.
+        """
+        CREATE TRIGGER trg_announcement_drafts_published_immutable
+        BEFORE UPDATE OF
+            publication_status, publication_text, publication_photos,
+            publication_progress, publication_error,
+            publication_started_at, published_at
+        ON announcement_drafts
+        FOR EACH ROW
+        WHEN OLD.publication_status = 'sent'
+            AND (
+                NEW.publication_status IS NOT OLD.publication_status
+                OR NEW.publication_text IS NOT OLD.publication_text
+                OR NEW.publication_photos IS NOT OLD.publication_photos
+                OR NEW.publication_progress IS NOT OLD.publication_progress
+                OR NEW.publication_error IS NOT OLD.publication_error
+                OR NEW.publication_started_at IS NOT OLD.publication_started_at
+                OR NEW.published_at IS NOT OLD.published_at
+            )
+        BEGIN
+            SELECT RAISE(ABORT, 'announcement is already published');
+        END
+        """,
+    ),
+)
+
+
 DEFAULT_MIGRATIONS: tuple[Migration, ...] = (
     MIGRATION_1_USERS_PLACES,
     MIGRATION_2_PLACE_CONTACTS_UI,
@@ -1646,6 +1845,7 @@ DEFAULT_MIGRATIONS: tuple[Migration, ...] = (
     MIGRATION_10_TEMPLATE_SESSIONS,
     MIGRATION_11_BRICK_PROPOSALS,
     MIGRATION_12_ANNOUNCEMENT_WIZARD,
+    MIGRATION_13_ANNOUNCEMENT_PUBLICATION,
 )
 
 LATEST_VERSION = DEFAULT_MIGRATIONS[-1].version if DEFAULT_MIGRATIONS else 0
