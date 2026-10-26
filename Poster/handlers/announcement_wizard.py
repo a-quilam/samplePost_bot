@@ -378,12 +378,6 @@ async def _expired(update: Update) -> int:
     return ConversationHandler.END
 
 
-def _home_keyboard() -> InlineKeyboardMarkup:
-    from handlers.main_menu import main_menu_keyboard
-
-    return main_menu_keyboard()
-
-
 def _main_menu_keyboard() -> InlineKeyboardMarkup:
     from handlers.main_menu import main_menu_keyboard
 
@@ -987,10 +981,6 @@ async def _confirm_place(
     state["phase"] = "confirmed"
     await _answer(update, "Место подтверждено.")
     return await _render_template_screen(update, context, details)
-
-
-def _stage_label(details) -> str:
-    return STAGE_LABELS.get(str(details.stage), "черновик")
 
 
 def _template_description(details) -> str:
@@ -2005,11 +1995,13 @@ def _calendar_context(
 def _calendar_title(field: AnnouncementFieldState) -> str:
     value = _field_value_text(field)
     lines = [
-        f"📅 {field.title}",
+        # Заголовок кирпичика задаёт человек (автор/админ места) и попадает
+        # в экран с parse_mode=HTML — экранируем, как в вопросах (_question_text).
+        f"📅 {_h(field.title)}",
         "Выберите дату кнопками. Дату также можно отправить текстом.",
     ]
     if value:
-        lines.append(f"Текущее значение: {value}")
+        lines.append(f"Текущее значение: {_h(value)}")
     hint = _date_rules_hint(dict(field.rules))
     if hint:
         lines.append(f"Ограничения: {hint}.")
@@ -2580,7 +2572,9 @@ async def _render_extra_sections(
         return await _render_available_bricks(
             update, context, details, page=ui.get("extras_page", 0)
         )
-    text = f"➕ {brick.title}\n\n" "Выберите секцию анонса: шапка, тело или подвал."
+    # Заголовок кирпичика задаёт человеком и уходит в parse_mode=HTML
+    # экран — экранируем (аудит: неэкранированный HTML ломал экран).
+    text = f"➕ {_h(brick.title)}\n\n" "Выберите секцию анонса: шапка, тело или подвал."
     body = f"{notice}\n\n{text}" if notice else text
     rows = [
         [
@@ -2668,13 +2662,15 @@ async def _render_extra_position(
 
 def _extra_value_text(extra, field: AnnouncementFieldState) -> str:
     lines = [
-        f"➕ {field.title}",
+        # Заголовок кирпичика задаёт человеком и уходит в parse_mode=HTML
+        # экран — экранируем (аудит: неэкранированный HTML ломал экран).
+        f"➕ {_h(field.title)}",
         f"Секция: {SECTION_LABELS.get(extra.section, extra.section)}; "
         f"положение: {POSITION_LABELS.get(extra.position, extra.position)}.",
         _type_hint(field),
     ]
     if field.status == FIELD_STATUS_VALID:
-        lines.append(f"Текущее значение: {_field_value_text(field)}")
+        lines.append(f"Текущее значение: {_h(_field_value_text(field))}")
     elif field.status == FIELD_STATUS_SKIPPED:
         lines.append("Сейчас значение пропущено.")
     else:
