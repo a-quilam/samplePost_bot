@@ -3,182 +3,768 @@ description: "Главный менеджер команды Poster: план э
 mode: primary
 model: routerai/deepseek/deepseek-v4.1-flash-1017
 color: "#4c8dff"
-steps: 50
+steps: 120
 permissions:
-  # --- Делегирование: только четыре агента команды ---
+
+  # --- Делегирование и вопросы ---
   - action: subagent
-    resource: "*"
+    resource: '*'
     effect: deny
   - action: subagent
-    resource: "poster-architect"
+    resource: 'poster-architect'
     effect: allow
   - action: subagent
-    resource: "poster-developer"
+    resource: 'poster-developer'
     effect: allow
   - action: subagent
-    resource: "poster-tester"
+    resource: 'poster-tester'
     effect: allow
   - action: subagent
-    resource: "poster-reviewer"
+    resource: 'poster-reviewer'
     effect: allow
 
-  # --- Редактирование: только документ состояния команды ---
+  # --- Правки файлов ---
   - action: edit
-    resource: "*"
+    resource: '*'
     effect: deny
   - action: edit
-    resource: "Poster/docs/agent_team/*"
+    resource: 'Poster/docs/agent_team/*'
+    effect: allow
+  - action: edit
+    resource: '*.env'
+    effect: deny
+  - action: edit
+    resource: '*.env.*'
+    effect: deny
+  - action: edit
+    resource: '*.env.example'
+    effect: allow
+  - action: edit
+    resource: '*.db'
+    effect: deny
+  - action: edit
+    resource: '*.db-*'
+    effect: deny
+  - action: edit
+    resource: '*secrets*'
+    effect: deny
+  - action: edit
+    resource: '*.key'
+    effect: deny
+  - action: edit
+    resource: '*.pem'
+    effect: deny
+  - action: edit
+    resource: 'AGENTS.md'
+    effect: deny
+  - action: edit
+    resource: 'opencode.jsonc'
+    effect: deny
+  - action: edit
+    resource: '.opencode/*'
+    effect: deny
+
+  # --- Чтение и поиск: без подтверждений ---
+  - action: read
+    resource: '*'
+    effect: allow
+  - action: glob
+    resource: '*'
+    effect: allow
+  - action: grep
+    resource: '*'
     effect: allow
 
-  # --- Секреты и приватные ключи ---
+  # --- Секреты, ключи, базы: запрет после общего allow ---
   - action: read
-    resource: "*.env"
+    resource: '*.env'
     effect: deny
   - action: read
-    resource: "*.env.*"
+    resource: '*.env.*'
     effect: deny
   - action: read
-    resource: "*.env.example"
+    resource: '*.env.example'
     effect: allow
   - action: read
-    resource: "*secrets*"
+    resource: '*secrets*'
     effect: deny
   - action: read
-    resource: "*.key"
+    resource: '*.key'
     effect: deny
   - action: read
-    resource: "*.pem"
+    resource: '*.pem'
     effect: deny
-  - action: shell
-    resource: "*.env*"
+  - action: read
+    resource: '*.p12'
     effect: deny
-  - action: shell
-    resource: "*secrets*"
+  - action: read
+    resource: '*id_rsa*'
+    effect: deny
+  - action: read
+    resource: '*id_ed25519*'
+    effect: deny
+  - action: read
+    resource: '*.db'
+    effect: deny
+  - action: read
+    resource: '*.db-*'
     effect: deny
 
-  # --- Внешние каталоги: только рабочая директория проекта ---
+  # --- Внешние каталоги ---
   - action: external_directory
-    resource: "*"
+    resource: '*'
     effect: deny
 
-  # --- Shell: по умолчанию спрашиваем, инспекция и интеграция разрешены ---
+  # --- Shell: по умолчанию спрашиваем; чтение разрешено ---
   - action: shell
-    resource: "*"
+    resource: '*'
     effect: ask
+
+  # --- Git: только просмотр состояния и истории ---
   - action: shell
-    resource: "git status *"
+    resource: 'git status*'
     effect: allow
   - action: shell
-    resource: "git diff *"
+    resource: 'git diff*'
     effect: allow
   - action: shell
-    resource: "git log *"
+    resource: 'git log*'
     effect: allow
   - action: shell
-    resource: "git show *"
+    resource: 'git show*'
     effect: allow
   - action: shell
-    resource: "git branch *"
+    resource: 'git show-ref*'
     effect: allow
   - action: shell
-    resource: "git ls-files *"
+    resource: 'git shortlog*'
     effect: allow
   - action: shell
-    resource: "ls *"
+    resource: 'git whatchanged*'
     effect: allow
   - action: shell
-    resource: "grep *"
+    resource: 'git describe*'
     effect: allow
   - action: shell
-    resource: "rg *"
+    resource: 'git rev-parse*'
     effect: allow
   - action: shell
-    resource: "make check*"
+    resource: 'git rev-list*'
     effect: allow
   - action: shell
-    resource: "make lint*"
+    resource: 'git merge-base*'
     effect: allow
   - action: shell
-    resource: "make types*"
+    resource: 'git name-rev*'
     effect: allow
   - action: shell
-    resource: "make test*"
+    resource: 'git ls-files*'
     effect: allow
   - action: shell
-    resource: ".venv/bin/python -m unittest *"
+    resource: 'git ls-tree*'
     effect: allow
   - action: shell
-    resource: "git add *"
+    resource: 'git cat-file*'
     effect: allow
   - action: shell
-    resource: "git commit*"
+    resource: 'git blame*'
     effect: allow
   - action: shell
-    resource: "rm *"
+    resource: 'git grep*'
+    effect: allow
+  - action: shell
+    resource: 'git count-objects*'
+    effect: allow
+  - action: shell
+    resource: 'git check-ignore*'
+    effect: allow
+  - action: shell
+    resource: 'git var*'
+    effect: allow
+  - action: shell
+    resource: 'git branch'
+    effect: allow
+  - action: shell
+    resource: 'git branch -a*'
+    effect: allow
+  - action: shell
+    resource: 'git branch -r*'
+    effect: allow
+  - action: shell
+    resource: 'git branch -v*'
+    effect: allow
+  - action: shell
+    resource: 'git branch --list*'
+    effect: allow
+  - action: shell
+    resource: 'git branch --show-current*'
+    effect: allow
+  - action: shell
+    resource: 'git tag'
+    effect: allow
+  - action: shell
+    resource: 'git tag -l*'
+    effect: allow
+  - action: shell
+    resource: 'git tag --list*'
+    effect: allow
+  - action: shell
+    resource: 'git remote'
+    effect: allow
+  - action: shell
+    resource: 'git remote -v*'
+    effect: allow
+  - action: shell
+    resource: 'git remote show*'
+    effect: allow
+  - action: shell
+    resource: 'git config --get*'
+    effect: allow
+  - action: shell
+    resource: 'git config --list*'
+    effect: allow
+  - action: shell
+    resource: 'git config -l*'
+    effect: allow
+  - action: shell
+    resource: 'git stash list*'
+    effect: allow
+  - action: shell
+    resource: 'git reflog'
+    effect: allow
+  - action: shell
+    resource: 'git reflog show*'
+    effect: allow
+  - action: shell
+    resource: 'git worktree list*'
+    effect: allow
+
+  # --- Файлы: только чтение и поиск ---
+  - action: shell
+    resource: 'ls *'
+    effect: allow
+  - action: shell
+    resource: 'cat *'
+    effect: allow
+  - action: shell
+    resource: 'head *'
+    effect: allow
+  - action: shell
+    resource: 'tail *'
+    effect: allow
+  - action: shell
+    resource: 'wc *'
+    effect: allow
+  - action: shell
+    resource: 'grep *'
+    effect: allow
+  - action: shell
+    resource: 'find *'
+    effect: allow
+  - action: shell
+    resource: 'tree *'
+    effect: allow
+  - action: shell
+    resource: 'stat *'
+    effect: allow
+  - action: shell
+    resource: 'file *'
+    effect: allow
+  - action: shell
+    resource: 'du *'
+    effect: allow
+  - action: shell
+    resource: 'df *'
+    effect: allow
+  - action: shell
+    resource: 'pwd'
+    effect: allow
+  - action: shell
+    resource: 'realpath *'
+    effect: allow
+  - action: shell
+    resource: 'readlink *'
+    effect: allow
+  - action: shell
+    resource: 'basename *'
+    effect: allow
+  - action: shell
+    resource: 'dirname *'
+    effect: allow
+  - action: shell
+    resource: 'sort *'
+    effect: allow
+  - action: shell
+    resource: 'uniq *'
+    effect: allow
+  - action: shell
+    resource: 'cut *'
+    effect: allow
+  - action: shell
+    resource: 'tr *'
+    effect: allow
+  - action: shell
+    resource: 'nl *'
+    effect: allow
+  - action: shell
+    resource: 'column *'
+    effect: allow
+  - action: shell
+    resource: 'jq *'
+    effect: allow
+  - action: shell
+    resource: 'diff *'
+    effect: allow
+  - action: shell
+    resource: 'cmp *'
+    effect: allow
+  - action: shell
+    resource: 'md5 *'
+    effect: allow
+  - action: shell
+    resource: 'shasum *'
+    effect: allow
+  - action: shell
+    resource: 'sha256sum *'
+    effect: allow
+  - action: shell
+    resource: 'sed -n *'
+    effect: allow
+  - action: shell
+    resource: 'sed --quiet *'
+    effect: allow
+  - action: shell
+    resource: 'date'
+    effect: allow
+  - action: shell
+    resource: 'date *'
+    effect: allow
+  - action: shell
+    resource: 'which *'
+    effect: allow
+  - action: shell
+    resource: 'command -v *'
+    effect: allow
+
+  # --- Безопасные автоматические проверки ---
+  - action: shell
+    resource: 'git add *'
+    effect: allow
+  - action: shell
+    resource: 'git commit*'
+    effect: allow
+  - action: shell
+    resource: 'git push *'
     effect: ask
+
+  # --- Запись, конвейеры, интерпретаторы: всегда запрещены ---
   - action: shell
-    resource: "git push *"
-    effect: ask
-  # менеджер не редактирует файлы через shell
-  - action: shell
-    resource: "sed -i*"
+    resource: 'echo *'
     effect: deny
   - action: shell
-    resource: "tee *"
+    resource: 'echo'
     effect: deny
   - action: shell
-    resource: "patch *"
+    resource: 'printf *'
     effect: deny
   - action: shell
-    resource: "mv *"
+    resource: 'printf'
     effect: deny
   - action: shell
-    resource: "cp *"
+    resource: '* > *'
     effect: deny
   - action: shell
-    resource: "git push --force*"
+    resource: '* >*'
     effect: deny
   - action: shell
-    resource: "git push -f*"
+    resource: '*>*'
     effect: deny
   - action: shell
-    resource: "git push --force-with-lease*"
+    resource: '* >> *'
     effect: deny
   - action: shell
-    resource: "git reset --hard*"
+    resource: '*>>*'
     effect: deny
   - action: shell
-    resource: "git clean -f*"
+    resource: '*|*'
     effect: deny
   - action: shell
-    resource: "sudo *"
+    resource: '*||*'
     effect: deny
   - action: shell
-    resource: "rm -rf *"
+    resource: '*;*'
     effect: deny
   - action: shell
-    resource: "rm -fr *"
+    resource: '*&&*'
     effect: deny
   - action: shell
-    resource: "sqlite3 *post_bot.db*"
+    resource: '*$(*'
     effect: deny
   - action: shell
-    resource: "make run*"
+    resource: '*`*'
     effect: deny
   - action: shell
-    resource: "python bot.py*"
+    resource: '*<<*'
     effect: deny
   - action: shell
-    resource: "python3 bot.py*"
+    resource: 'touch *'
     effect: deny
   - action: shell
-    resource: "*botctl.sh start*"
+    resource: 'mkdir *'
     effect: deny
   - action: shell
-    resource: "*botctl.sh stop*"
+    resource: 'mv *'
     effect: deny
   - action: shell
-    resource: "*botctl.sh restart*"
+    resource: 'cp *'
+    effect: deny
+  - action: shell
+    resource: 'ln *'
+    effect: deny
+  - action: shell
+    resource: 'dd *'
+    effect: deny
+  - action: shell
+    resource: 'truncate *'
+    effect: deny
+  - action: shell
+    resource: 'tee *'
+    effect: deny
+  - action: shell
+    resource: 'chmod *'
+    effect: deny
+  - action: shell
+    resource: 'chown *'
+    effect: deny
+  - action: shell
+    resource: 'install *'
+    effect: deny
+  - action: shell
+    resource: 'sed -i*'
+    effect: deny
+  - action: shell
+    resource: 'perl -i*'
+    effect: deny
+  - action: shell
+    resource: 'patch *'
+    effect: deny
+  - action: shell
+    resource: 'rm *'
+    effect: deny
+  - action: shell
+    resource: 'rmdir *'
+    effect: deny
+  - action: shell
+    resource: 'unlink *'
+    effect: deny
+  - action: shell
+    resource: 'sort -o*'
+    effect: deny
+  - action: shell
+    resource: 'sort --output*'
+    effect: deny
+  - action: shell
+    resource: 'find * -delete*'
+    effect: deny
+  - action: shell
+    resource: 'find * -exec*'
+    effect: deny
+  - action: shell
+    resource: 'find * -ok*'
+    effect: deny
+  - action: shell
+    resource: 'find * -fprint*'
+    effect: deny
+  - action: shell
+    resource: 'tail -f*'
+    effect: deny
+  - action: shell
+    resource: 'git * --output*'
+    effect: deny
+  - action: shell
+    resource: 'git * --ext-diff*'
+    effect: deny
+  - action: shell
+    resource: 'sh *'
+    effect: deny
+  - action: shell
+    resource: 'bash *'
+    effect: deny
+  - action: shell
+    resource: 'zsh *'
+    effect: deny
+  - action: shell
+    resource: 'dash *'
+    effect: deny
+  - action: shell
+    resource: 'ksh *'
+    effect: deny
+  - action: shell
+    resource: 'fish *'
+    effect: deny
+  - action: shell
+    resource: 'python *'
+    effect: deny
+  - action: shell
+    resource: 'python3 *'
+    effect: deny
+  - action: shell
+    resource: 'perl *'
+    effect: deny
+  - action: shell
+    resource: 'ruby *'
+    effect: deny
+  - action: shell
+    resource: 'node *'
+    effect: deny
+  - action: shell
+    resource: 'npx *'
+    effect: deny
+  - action: shell
+    resource: 'deno *'
+    effect: deny
+  - action: shell
+    resource: 'osascript *'
+    effect: deny
+  - action: shell
+    resource: 'open *'
+    effect: deny
+  - action: shell
+    resource: 'git -c*'
+    effect: deny
+  - action: shell
+    resource: 'git --exec-path*'
+    effect: deny
+  - action: shell
+    resource: 'python -c*'
+    effect: deny
+  - action: shell
+    resource: 'python3 -c*'
+    effect: deny
+  - action: shell
+    resource: '*python* -c *'
+    effect: deny
+  - action: shell
+    resource: 'node -e*'
+    effect: deny
+  - action: shell
+    resource: 'node *'
+    effect: deny
+  - action: shell
+    resource: 'perl -e*'
+    effect: deny
+  - action: shell
+    resource: 'ruby -e*'
+    effect: deny
+  - action: shell
+    resource: 'bash -c*'
+    effect: deny
+  - action: shell
+    resource: 'sh -c*'
+    effect: deny
+  - action: shell
+    resource: 'zsh -c*'
+    effect: deny
+  - action: shell
+    resource: 'eval *'
+    effect: deny
+  - action: shell
+    resource: 'source *'
+    effect: deny
+  - action: shell
+    resource: 'xargs *'
+    effect: deny
+  - action: shell
+    resource: 'env *'
+    effect: deny
+  - action: shell
+    resource: 'sudo *'
+    effect: deny
+  - action: shell
+    resource: 'su *'
+    effect: deny
+  - action: shell
+    resource: 'kill *'
+    effect: deny
+  - action: shell
+    resource: 'killall *'
+    effect: deny
+  - action: shell
+    resource: 'launchctl *'
+    effect: deny
+  - action: shell
+    resource: 'sqlite3 *'
+    effect: deny
+  - action: shell
+    resource: '*.db*'
+    effect: deny
+  - action: shell
+    resource: '*.sqlite*'
+    effect: deny
+  - action: shell
+    resource: '*post_bot.db*'
+    effect: deny
+  - action: shell
+    resource: 'responsible_persons.db*'
+    effect: deny
+  - action: shell
+    resource: 'strings *'
+    effect: deny
+  - action: shell
+    resource: 'xxd *'
+    effect: deny
+  - action: shell
+    resource: 'od *'
+    effect: deny
+  - action: shell
+    resource: 'hexdump *'
+    effect: deny
+  - action: shell
+    resource: 'base64 *'
+    effect: deny
+  - action: shell
+    resource: 'gzip *'
+    effect: deny
+  - action: shell
+    resource: 'gunzip *'
+    effect: deny
+  - action: shell
+    resource: 'git reset*'
+    effect: deny
+  - action: shell
+    resource: 'git clean*'
+    effect: deny
+  - action: shell
+    resource: 'git checkout*'
+    effect: deny
+  - action: shell
+    resource: 'git restore*'
+    effect: deny
+  - action: shell
+    resource: 'git switch*'
+    effect: deny
+  - action: shell
+    resource: 'git rebase*'
+    effect: deny
+  - action: shell
+    resource: 'git merge*'
+    effect: deny
+  - action: shell
+    resource: 'git cherry-pick*'
+    effect: deny
+  - action: shell
+    resource: 'git revert*'
+    effect: deny
+  - action: shell
+    resource: 'git branch -d*'
+    effect: deny
+  - action: shell
+    resource: 'git branch -D*'
+    effect: deny
+  - action: shell
+    resource: 'git branch -m*'
+    effect: deny
+  - action: shell
+    resource: 'git branch -M*'
+    effect: deny
+  - action: shell
+    resource: 'git branch --delete*'
+    effect: deny
+  - action: shell
+    resource: 'git tag -d*'
+    effect: deny
+  - action: shell
+    resource: 'git tag -a*'
+    effect: deny
+  - action: shell
+    resource: 'git stash push*'
+    effect: deny
+  - action: shell
+    resource: 'git stash pop*'
+    effect: deny
+  - action: shell
+    resource: 'git stash drop*'
+    effect: deny
+  - action: shell
+    resource: 'git stash clear*'
+    effect: deny
+  - action: shell
+    resource: 'git worktree add*'
+    effect: deny
+  - action: shell
+    resource: 'git worktree remove*'
+    effect: deny
+  - action: shell
+    resource: 'git worktree prune*'
+    effect: deny
+  - action: shell
+    resource: 'git push --force*'
+    effect: deny
+  - action: shell
+    resource: 'git push -f*'
+    effect: deny
+  - action: shell
+    resource: 'git push --force-with-lease*'
+    effect: deny
+  - action: shell
+    resource: 'git push --mirror*'
+    effect: deny
+  - action: shell
+    resource: 'git push --delete*'
+    effect: deny
+  - action: shell
+    resource: 'git push *:*'
+    effect: deny
+  - action: shell
+    resource: 'make run*'
+    effect: deny
+  - action: shell
+    resource: 'python bot.py*'
+    effect: deny
+  - action: shell
+    resource: 'python3 bot.py*'
+    effect: deny
+  - action: shell
+    resource: '.venv/bin/python bot.py*'
+    effect: deny
+  - action: shell
+    resource: '*botctl.sh start*'
+    effect: deny
+  - action: shell
+    resource: '*botctl.sh stop*'
+    effect: deny
+  - action: shell
+    resource: '*botctl.sh restart*'
+    effect: deny
+  - action: shell
+    resource: 'docker *'
+    effect: deny
+  - action: shell
+    resource: 'curl *'
+    effect: deny
+  - action: shell
+    resource: 'wget *'
+    effect: deny
+  - action: shell
+    resource: 'ssh *'
+    effect: deny
+  - action: shell
+    resource: 'scp *'
+    effect: deny
+  - action: shell
+    resource: 'brew *'
+    effect: deny
+  - action: shell
+    resource: 'pip install*'
+    effect: deny
+  - action: shell
+    resource: '.venv/bin/pip install*'
+    effect: deny
+  - action: shell
+    resource: '*.env*'
+    effect: deny
+  - action: shell
+    resource: '*secrets*'
     effect: deny
 ---
 
@@ -273,3 +859,24 @@ permissions:
 4. Замечания ревизора и как закрыты.
 5. Открытые вопросы и риски.
 6. Нужен ли push/коммит и что осталось за владельцем.
+
+## Автономная работа
+
+- Исследуй репозиторий штатными инструментами `read`, `glob`, `grep` — они
+  разрешены без подтверждений. Не дублируй их через `shell`.
+- Для shell — один простой вызов на одну команду: `git status`, `git diff`,
+  `git log`, `git show`, `ls`, `cat`, `head`, `tail`, `wc`, `grep`, `find`,
+  `sed -n`. Каждый вызов проверяется отдельно и подтверждения не требует.
+- Не используй конвейеры, перенаправления, `&&`, `;`, `$(...)`, обратные
+  кавычки, `echo`, heredoc и интерпретаторы (`python -c`, `bash -c`, `sh`):
+  они запрещены правилами, а не только текстом промпта.
+- Не собирай длинную цепочку команд «за раз»: отдельные простые вызовы
+  не требуют подтверждения цепочки и не падают целиком.
+- `rg` (ripgrep) в системе не установлен — используй `grep -rn`.
+  Не читай базы (`*.db`, `*.db-wal`) и не выводи их через shell.
+- В `find`/`ls` не заходи в `Poster/.venv`, `__pycache__` и `logs`:
+  исключай их, иначе вывод раздувается на тысячи строк.
+- Если действие требует подтверждения (`ask`), а диалог недоступен, считай
+  это отказом и выбери безопасную альтернативу. Не обходи правила.
+- Подтверждения нужны только для записи, удаления, push и выхода за
+  рабочую директорию. О чтении и поиске владельца не спрашивай.
