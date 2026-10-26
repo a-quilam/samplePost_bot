@@ -91,6 +91,7 @@ class FullCreationFlowTests(unittest.TestCase):
         self.assertEqual(
             [(text, data) for text, data in h.screen_buttons()],
             [
+                ("📝 Новый мастер", "aw_start"),
                 ("✏️ Создать пост", "create_post"),
                 ("📍 Места", "places"),
                 ("🧱 Мои кирпичики", "bricks"),

@@ -15,6 +15,7 @@ from config import TELEGRAM_BOT_TOKEN
 from database import init_db
 from errors import error_handler
 from handlers.admin import admin_handlers
+from handlers.announcement_wizard import announcement_wizard_handlers
 from handlers.bricks import bricks_handlers
 from handlers.callbacks import callbacks_handlers
 from handlers.drafts import drafts_handlers
@@ -62,7 +63,14 @@ def build_application() -> Application:
     # выполняется до сценариев, не отвечает в чат и не меняет порядок групп 0.
     application.add_handler(TypeHandler(Update, track_user), group=-1)
 
-    # Обработчики создания поста (ConversationHandler) — первыми
+    # Адаптивный мастер анонсов Stage 27B — первым: у него собственные
+    # entry-точка aw_start и команда /new_wizard. Явный вход завершает
+    # посторонние диалоги, но не удаляет их сохранённые черновики.
+    for handler in announcement_wizard_handlers():
+        application.add_handler(handler)
+
+    # Прежний девятишаговый мастер остаётся без изменений и регистрируется
+    # после нового. Его callback create_post не пересекается с aw_*.
     for handler in post_creation_handlers():
         application.add_handler(handler)
 

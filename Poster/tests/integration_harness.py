@@ -46,6 +46,7 @@ try:
     import brick_state as brick_state_module
     import errors as errors_module
     import handlers.admin as admin_module
+    import handlers.announcement_wizard as announcement_wizard_module
     import handlers.bricks as bricks_module
     import handlers.drafts as drafts_module
     import handlers.main_menu as main_menu_module
@@ -464,6 +465,7 @@ class Harness:
             brick_state_module.SessionLocal,
             template_state_module.SessionLocal,
             templates_module.SessionLocal,
+            announcement_wizard_module.SessionLocal,
         )
         post_creation_module.SessionLocal = self.session_factory
         drafts_module.SessionLocal = self.session_factory
@@ -478,6 +480,7 @@ class Harness:
         brick_state_module.SessionLocal = self.session_factory
         template_state_module.SessionLocal = self.session_factory
         templates_module.SessionLocal = self.session_factory
+        announcement_wizard_module.SessionLocal = self.session_factory
 
         # Уведомления об ошибках троттлятся по (chat_id, time.monotonic) —
         # без сброса тесты «повторно заметили бы» чужие уведомления
@@ -539,6 +542,7 @@ class Harness:
         brick_state_module.SessionLocal = self._orig_session_local[10]
         template_state_module.SessionLocal = self._orig_session_local[11]
         templates_module.SessionLocal = self._orig_session_local[12]
+        announcement_wizard_module.SessionLocal = self._orig_session_local[13]
         errors_module._last_error_notice.clear()
         errors_module._last_error_notice.update(self._orig_error_notice)
         self.engine.dispose()
@@ -616,18 +620,38 @@ class Harness:
     # —— состояние диалога и данные ——
 
     def conversation(self) -> Any:
+        """Прежний мастер поста (без имени) — совместимость тестов Stage 9+."""
+        for handler in self.app.handlers[0]:
+            if isinstance(handler, ConversationHandler) and not getattr(
+                handler, "name", None
+            ):
+                return handler
         return next(
             h for h in self.app.handlers[0] if isinstance(h, ConversationHandler)
         )
 
+    def named_conversation(self, name: str) -> Any:
+        return next(
+            h
+            for h in self.app.handlers[0]
+            if isinstance(h, ConversationHandler) and getattr(h, "name", None) == name
+        )
+
     def dialog_state(
-        self, *, chat_id: int | None = None, user_id: int | None = None
+        self,
+        *,
+        chat_id: int | None = None,
+        user_id: int | None = None,
+        name: str | None = None,
     ) -> Any:
         key = (
             chat_id if chat_id is not None else self.chat_id,
             user_id if user_id is not None else self.user_id,
         )
-        return self.conversation()._conversations.get(key)
+        handler = (
+            self.named_conversation(name) if name is not None else self.conversation()
+        )
+        return handler._conversations.get(key)
 
     def user_data(self, *, user_id: int | None = None) -> dict:
         return self.app.user_data.get(

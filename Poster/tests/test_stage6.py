@@ -93,6 +93,16 @@ except Exception as e:  # noqa: BLE001 — причина попадает в с
     HANDLERS_IMPORT_ERROR = str(e)
 
 
+def _old_conversation(application):
+    """Прежний девятишаговый диалог: он не имеет имени (Stage 27B — именованный)."""
+    return next(
+        handler
+        for handler in application.handlers[0]
+        if isinstance(handler, ConversationHandler)
+        and getattr(handler, "name", None) is None
+    )
+
+
 class RecordingBot:
     """Заглушка бота: записывает все вызовы отправки (или падает).
 
@@ -933,9 +943,7 @@ class StalePreviewActionTests(_InMemoryDbMixin, unittest.TestCase):
 
     def test_stale_buttons_routed_to_hint_handler(self):
         application = bot_module.build_application()
-        conv = next(
-            h for h in application.handlers[0] if isinstance(h, ConversationHandler)
-        )
+        conv = _old_conversation(application)
         for data in ("edit_post", "finish", "save_draft"):
             with self.subTest(data=data):
                 handler = resolve_dialog_handler(
@@ -973,10 +981,7 @@ class CommandDuringCreationTests(_InMemoryDbMixin, unittest.TestCase):
 
     @staticmethod
     def _conversation():
-        application = bot_module.build_application()
-        return next(
-            h for h in application.handlers[0] if isinstance(h, ConversationHandler)
-        )
+        return _old_conversation(bot_module.build_application())
 
     def test_start_during_creation_saves_and_exits(self):
         user_data = {"current_step": 2, "title": "Начатый пост"}
@@ -1060,7 +1065,7 @@ class OutsideDialogTests(_InMemoryDbMixin, unittest.TestCase):
     def _group():
         application = bot_module.build_application()
         group = application.handlers[0]
-        conv = next(h for h in group if isinstance(h, ConversationHandler))
+        conv = _old_conversation(application)
         return group, conv
 
     @staticmethod
@@ -1168,9 +1173,7 @@ class StaleDialogButtonTests(unittest.TestCase):
     def test_stale_handler_registered_right_after_conversation(self):
         application = bot_module.build_application()
         group = application.handlers[0]
-        conv_index = next(
-            i for i, h in enumerate(group) if isinstance(h, ConversationHandler)
-        )
+        conv_index = group.index(_old_conversation(application))
         stale_index = next(
             i
             for i, h in enumerate(group)
@@ -1191,9 +1194,7 @@ class StaleDialogButtonTests(unittest.TestCase):
 
     def test_active_dialog_claims_its_buttons_before_stale(self):
         application = bot_module.build_application()
-        conv = next(
-            h for h in application.handlers[0] if isinstance(h, ConversationHandler)
-        )
+        conv = _old_conversation(application)
         for state, data, handler_name in (
             (POST_CREATION, "skip", "handle_callback_query"),
             (POST_CREATION, "finish", "handle_callback_query"),
@@ -1219,9 +1220,7 @@ class MainMenuDuringCreationTests(_InMemoryDbMixin, unittest.TestCase):
 
     def test_fallback_routed_and_ends_with_wip_saved(self):
         application = bot_module.build_application()
-        conv = next(
-            h for h in application.handlers[0] if isinstance(h, ConversationHandler)
-        )
+        conv = _old_conversation(application)
         for state in (POST_CREATION, EDIT_FIELD):
             with self.subTest(state=state):
                 handler = resolve_dialog_handler(
@@ -1260,9 +1259,7 @@ class MainMenuDuringCreationTests(_InMemoryDbMixin, unittest.TestCase):
         # Вне диалога fallback не работает — кнопку обслуживает глобальный
         # хендлер, как и раньше (единичность проверяет HandlerRoutingTests)
         application = bot_module.build_application()
-        conv = next(
-            h for h in application.handlers[0] if isinstance(h, ConversationHandler)
-        )
+        conv = _old_conversation(application)
         self.assertFalse(conv.check_update(make_callback_route_update("main_menu")))
 
 
@@ -1499,7 +1496,7 @@ class HandlerRoutingTests(unittest.TestCase):
     @staticmethod
     def _parts(application):
         group = application.handlers[0]
-        conv = next(h for h in group if isinstance(h, ConversationHandler))
+        conv = _old_conversation(application)
         others = [
             h for h in group if isinstance(h, CallbackQueryHandler) and h is not conv
         ]

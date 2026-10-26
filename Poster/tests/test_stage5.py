@@ -509,6 +509,7 @@ class MainMenuKeyboardTests(unittest.TestCase):
         self.assertEqual(
             texts,
             [
+                "📝 Новый мастер",
                 "✏️ Создать пост",
                 "📍 Места",
                 "🧱 Мои кирпичики",
@@ -522,7 +523,15 @@ class MainMenuKeyboardTests(unittest.TestCase):
         ]
         self.assertEqual(
             callbacks,
-            ["create_post", "places", "bricks", "templates", "drafts", "help"],
+            [
+                "aw_start",
+                "create_post",
+                "places",
+                "bricks",
+                "templates",
+                "drafts",
+                "help",
+            ],
         )
 
     def test_help_lists_commands(self):
@@ -743,9 +752,12 @@ class HandlerOrderTests(unittest.TestCase):
         application = bot_module.build_application()
         handlers = application.handlers[0]
 
-        conv_index = next(
-            i for i, h in enumerate(handlers) if isinstance(h, ConversationHandler)
+        old_conversation = next(
+            h
+            for h in handlers
+            if isinstance(h, ConversationHandler) and getattr(h, "name", None) is None
         )
+        conv_index = handlers.index(old_conversation)
         start_index = next(
             i
             for i, h in enumerate(handlers)
@@ -761,7 +773,9 @@ class HandlerOrderTests(unittest.TestCase):
 
         application = bot_module.build_application()
         conversation = next(
-            h for h in application.handlers[0] if isinstance(h, ConversationHandler)
+            h
+            for h in application.handlers[0]
+            if isinstance(h, ConversationHandler) and getattr(h, "name", None) is None
         )
 
         update = Update(

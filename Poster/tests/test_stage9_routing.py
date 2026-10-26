@@ -313,13 +313,35 @@ class RegistrationOrderTests(unittest.TestCase):
     def _application():
         return bot_module.build_application()
 
-    def test_conversation_first_stale_second_unknown_last(self):
-        group = self._application().handlers[0]
+    @staticmethod
+    def _old_conversation(application):
+        group = application.handlers[0]
+        return next(
+            handler
+            for handler in group
+            if isinstance(handler, ConversationHandler)
+            and getattr(handler, "name", None) is None
+        )
+
+    def test_new_then_old_conversations_then_stale_then_unknown(self):
+        application = self._application()
+        group = application.handlers[0]
         self.assertIsInstance(group[0], ConversationHandler)
+        self.assertIsNotNone(
+            getattr(group[0], "name", None),
+            "новый мастер Stage 27B регистрируется первым и имеет имя",
+        )
         self.assertEqual(
             getattr(group[1].callback, "__name__", ""),
+            "outside_wizard_callback",
+            "callback нового мастера вне диалога идёт сразу после него",
+        )
+        old_index = group.index(self._old_conversation(application))
+        self.assertIsInstance(group[old_index], ConversationHandler)
+        self.assertEqual(
+            getattr(group[old_index + 1].callback, "__name__", ""),
             "stale_dialog_action",
-            "устаревшие кнопки обязаны идти сразу после диалога",
+            "устаревшие кнопки старого диалога обязаны идти сразу после него",
         )
         self.assertEqual(
             getattr(group[-1].callback, "__name__", ""),
@@ -329,7 +351,7 @@ class RegistrationOrderTests(unittest.TestCase):
 
     def test_conversation_configuration(self):
         application = self._application()
-        conv = application.handlers[0][0]
+        conv = self._old_conversation(application)
         self.assertTrue(conv.allow_reentry, "перезапуск диалога должен работать")
         self.assertFalse(conv.persistent, "persistence в Stage 9 не внедряется")
         # Пять entry-точек: команда, inline-кнопка меню, reply-текст,
@@ -343,7 +365,7 @@ class RegistrationOrderTests(unittest.TestCase):
         self.assertTrue(application.error_handlers, "error_handler обязателен")
 
     def test_states_hold_text_and_callbacks_in_both_states(self):
-        conv = self._application().handlers[0][0]
+        conv = self._old_conversation(self._application())
         for state in (POST_CREATION, EDIT_FIELD):
             names = [getattr(h.callback, "__name__", "") for h in conv.states[state]]
             with self.subTest(state=state):
