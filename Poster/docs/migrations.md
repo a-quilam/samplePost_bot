@@ -1,14 +1,14 @@
-# Миграции схемы SQLite: Stage 19A, 19B, 20A, 20B, 21, 22A, 22B, 23, 24, 25 и 26
+# Миграции схемы SQLite: Stage 19A, 19B, 20A, 20B, 21, 22A, 22B, 23, 24, 25, 26 и 27A
 
-Статус: **реализовано в Stage 19A, 19B, 20A, 20B, 21, 22A, 22B, 23, 24, 25 и 26**.
+Статус: **реализовано в Stage 19A, 19B, 20A, 20B, 21, 22A, 22B, 23, 24, 25, 26 и 27A**.
 Документ описывает фактический механизм, созданные таблицы, ограничения,
 автоматическую резервную копию, совместимость со старой базой и порядок
-безопасного применения миграций. Текущая последняя версия — **11**
-(`brick_proposals`, Stage 26). Целевая архитектура справочника мест,
+безопасного применения миграций. Текущая последняя версия — **12**
+(`announcement_wizard`, Stage 27A). Целевая архитектура справочника мест,
 кирпичиков и шаблонов — в
 [`stage18_architecture.md`](stage18_architecture.md).
 
-## 1. Границы Stage 19A, 19B, 20A, 20B, 21, 22A, 22B, 23, 24, 25 и 26
+## 1. Границы Stage 19A, 19B, 20A, 20B, 21, 22A, 22B, 23, 24, 25, 26 и 27A
 
 Stage 19A — фундамент:
 
@@ -194,8 +194,29 @@ Stage 26 — предложения кирпичиков:
 версию и не меняет историю/снимки. Предложения кирпичиков встроены в
 существующие «Мои кирпичики» и кабинет; второго кабинета нет. Одобрение
 создаёт отдельный кирпичик и не перебинживает старые версии/снимки
-шаблонов. Шаблоны пока не вставляются в мастер поста; `draft_values` и
-адаптивное создание остаются будущим Stage 27.
+шаблонов. На момент Stage 26 шаблоны ещё не вставлялись в мастер поста;
+`draft_values` и адаптивное создание оставались будущим Stage 27.
+
+Stage 27A — фундамент адаптивного мастера анонсов:
+
+- версия 12 (`announcement_wizard`): отдельные таблицы `announcement_drafts`,
+  `announcement_values` и `announcement_extras`; старые `drafts`/
+  `user_states` не меняются и не конвертируются;
+- `announcement_wizard.py` — независимый снимок версии шаблона, сохранённые
+  привязки `код → brick_id`, детерминированные вопросы, значения места,
+  все семь типов и переиспользование валидаторов Stage 22A/17;
+- `announcement_store.py` — место и альтернативное название без создания
+  нового места, стандартный/личный шаблон с проверкой прав, значения по
+  `brick_id`, дополнительные кирпичики только этого анонса, этапы,
+  рестарт, атомарные операции и optimistic locking по `revision`;
+- 43 новых теста Stage 27A: 6 schema, 13 wizard и 24 store — всего
+  **1189** в полном наборе.
+
+Граница 27A: Telegram-интерфейс нового мастера, фотопоток в новой модели,
+публикация и подключение к существующим обработчикам постов не реализованы;
+это Stage 27B. Девятишаговый мастер, `POST_STEPS`, старые черновики, WIP и
+публикация не изменялись. `draft_values` из ранних планов не понадобился:
+значения хранятся в `announcement_values` по постоянному `brick_id`.
 
 Историческая справка: на момент завершения 19A в коде не было Telegram-UI,
 поиска и альтернативных названий. В 19B они реализованы; границы ниже
@@ -204,10 +225,12 @@ Stage 26 — предложения кирпичиков:
 Не реализовано и остаётся будущим этапам:
 
 - слияние дублей мест;
-- `draft_values`, полный интерфейс управления кирпичиками места и
-  адаптивное создание (Stage 27);
-- интеграция выбранного места, шаблонов и значений кирпичиков в
-  девятишаговый мастер (Stage 27);
+- `draft_values` (не понадобился), полный интерфейс управления кирпичиками
+  места и Mini App;
+- Telegram-интерфейс нового мастера, фотопоток, предпросмотр и публикация
+  (Stage 27B);
+- замена девятишагового мастера или подключение нового мастера к
+  существующим обработчикам постов;
 - изменения текущего визарда, WIP, календаря, фото/альбомов и отправки постов;
 - миграции настоящей `Poster/post_bot.db` (она не изменялась).
 
@@ -735,6 +758,173 @@ CREATE TABLE brick_proposals (
 `expires_at` нет; `pending` бессрочен. Миграция 11 не меняет кирпичики,
 шаблоны, версии, снимки, привязки, `drafts`, WIP и фото.
 
+### Версия 12 (Stage 27A) — `announcement_wizard`
+
+```sql
+CREATE TABLE announcement_drafts (
+    id                   INTEGER NOT NULL PRIMARY KEY,
+    author_user_id       INTEGER NOT NULL,
+    place_id             INTEGER NOT NULL,
+    place_name_id        INTEGER,
+    place_display_name   TEXT NOT NULL,
+    place_address        TEXT,
+    place_url            TEXT,
+    template_id          INTEGER,
+    template_version     INTEGER,
+    template_snapshot_id INTEGER,
+    stage                TEXT NOT NULL DEFAULT 'place',
+    revision             INTEGER NOT NULL DEFAULT 1,
+    idempotency_key      TEXT,
+    created_at           DATETIME NOT NULL,
+    updated_at           DATETIME NOT NULL,
+    CONSTRAINT ck_announcement_drafts_stage CHECK (stage IN (
+        'place','template','questions','extras','preview','completed')),
+    CONSTRAINT ck_announcement_drafts_revision CHECK (revision >= 1),
+    CONSTRAINT ck_announcement_drafts_display_name
+        CHECK (length(trim(place_display_name)) > 0),
+    CONSTRAINT ck_announcement_drafts_address
+        CHECK (place_address IS NULL OR length(trim(place_address)) > 0),
+    CONSTRAINT ck_announcement_drafts_url
+        CHECK (place_url IS NULL OR length(trim(place_url)) > 0),
+    CONSTRAINT ck_announcement_drafts_idempotency
+        CHECK (idempotency_key IS NULL OR length(trim(idempotency_key)) > 0),
+    CONSTRAINT ck_announcement_drafts_template_shape CHECK (
+        (template_id IS NULL AND template_version IS NULL
+            AND template_snapshot_id IS NULL)
+        OR (template_id IS NOT NULL AND template_version IS NOT NULL
+            AND template_version >= 1 AND template_snapshot_id IS NOT NULL)
+    ),
+    CONSTRAINT fk_announcement_drafts_author
+        FOREIGN KEY (author_user_id) REFERENCES users (id)
+        ON DELETE RESTRICT,
+    CONSTRAINT fk_announcement_drafts_place
+        FOREIGN KEY (place_id) REFERENCES places (id)
+        ON DELETE RESTRICT,
+    CONSTRAINT fk_announcement_drafts_place_name
+        FOREIGN KEY (place_name_id) REFERENCES place_names (id)
+        ON DELETE SET NULL,
+    CONSTRAINT fk_announcement_drafts_template
+        FOREIGN KEY (template_id) REFERENCES templates (id)
+        ON DELETE RESTRICT,
+    CONSTRAINT fk_announcement_drafts_snapshot
+        FOREIGN KEY (template_snapshot_id) REFERENCES template_snapshots (id)
+        ON DELETE RESTRICT
+);
+
+CREATE TABLE announcement_values (
+    id         INTEGER NOT NULL PRIMARY KEY,
+    draft_id   INTEGER NOT NULL,
+    brick_id   INTEGER NOT NULL,
+    state      TEXT NOT NULL,
+    value_json TEXT,
+    created_at DATETIME NOT NULL,
+    updated_at DATETIME NOT NULL,
+    CONSTRAINT ck_announcement_values_state
+        CHECK (state IN ('valid','empty_optional')),
+    CONSTRAINT ck_announcement_values_payload CHECK (
+        (state = 'valid' AND value_json IS NOT NULL
+            AND json_valid(value_json) AND json_type(value_json) = 'object')
+        OR (state = 'empty_optional' AND value_json IS NULL)
+    ),
+    CONSTRAINT fk_announcement_values_draft
+        FOREIGN KEY (draft_id) REFERENCES announcement_drafts (id)
+        ON DELETE CASCADE,
+    CONSTRAINT fk_announcement_values_brick
+        FOREIGN KEY (brick_id) REFERENCES bricks (id)
+        ON DELETE RESTRICT,
+    CONSTRAINT uq_announcement_values_draft_brick
+        UNIQUE (draft_id, brick_id)
+);
+
+CREATE TABLE announcement_extras (
+    id         INTEGER NOT NULL PRIMARY KEY,
+    draft_id   INTEGER NOT NULL,
+    brick_id   INTEGER NOT NULL,
+    section    TEXT NOT NULL,
+    position   TEXT NOT NULL DEFAULT 'end',
+    occurrence INTEGER NOT NULL DEFAULT 1,
+    created_at DATETIME NOT NULL,
+    updated_at DATETIME NOT NULL,
+    CONSTRAINT ck_announcement_extras_section
+        CHECK (section IN ('header','body','footer')),
+    CONSTRAINT ck_announcement_extras_position
+        CHECK (position IN ('start','end')),
+    CONSTRAINT ck_announcement_extras_occurrence CHECK (occurrence >= 1),
+    CONSTRAINT fk_announcement_extras_draft
+        FOREIGN KEY (draft_id) REFERENCES announcement_drafts (id)
+        ON DELETE CASCADE,
+    CONSTRAINT fk_announcement_extras_brick
+        FOREIGN KEY (brick_id) REFERENCES bricks (id)
+        ON DELETE RESTRICT,
+    CONSTRAINT uq_announcement_extras_draft_brick_occurrence
+        UNIQUE (draft_id, brick_id, occurrence)
+);
+```
+
+Индексы:
+
+- `ix_announcement_drafts_author_updated` — выборка анонсов автора по
+  времени обновления;
+- `ux_announcement_drafts_snapshot` — частичный уникальный индекс: один
+  `template_snapshot_id` принадлежит ровно одному анонсу, повторное
+  использование живого/чужого снимка запрещено;
+- `ux_announcement_drafts_idempotency` — частичный уникальный индекс
+  `(author_user_id, idempotency_key)`: повтор запроса не создаёт второй
+  анонс;
+- `ix_announcement_values_brick`, `ix_announcement_extras_draft` и
+  `ix_announcement_extras_brick` — поиск значений/дополнений по анонсу и
+  кирпичику.
+
+Триггеры:
+
+- `trg_announcement_drafts_revision_increases` — `revision` может только
+  расти. Сервис делает `UPDATE ... WHERE revision = :expected`; прямой SQL,
+  уменьшающий ревизию, отклоняется SQLite;
+- `trg_announcement_drafts_identity_immutable` — автор, `place_id`, ключ
+  идемпотентности и `created_at` не переписываются. Подмена ID не делает
+  чужой анонс своим и не меняет выбранное место;
+- `trg_announcement_drafts_template_immutable` — после привязки снимка
+  нельзя изменить `template_id`, `template_version` или
+  `template_snapshot_id`; правка живого шаблона и повторный выбор не
+  переписывают начатый анонс;
+- `trg_announcement_values_identity_immutable` — `draft_id`, `brick_id` и
+  `created_at` значения неизменяемы (меняются только `state`, payload и
+  `updated_at`);
+- `trg_announcement_extras_identity_immutable` — `draft_id`, `brick_id`,
+  `occurrence` и `created_at` дополнительного кирпичика неизменяемы
+  (меняются секция, позиция и `updated_at`).
+
+Семантика Stage 27A:
+
+- **Место.** `place_id` — постоянная ссылка на справочник;
+  `place_name_id` — выбранный вариант названия (канонический или
+  альтернативный), `place_display_name` — его снимок. Выбор альтернативы
+  не создаёт новое место. `place_address`/`place_url` — снимок известных
+  контактов; `NULL` означает «значения нет», а не пустую строку/заглушку.
+  При подтверждении сервис обновляет снимок из справочника.
+- **Шаблон.** До выбора все три поля `NULL`, после — заполнены вместе.
+  Снимок создаётся в `template_snapshots`/`template_snapshot_bricks`
+  (Stage 23) в той же транзакции и не зависит от последующих версий.
+- **Значения.** Отсутствие строки в `announcement_values` — вопрос ещё не
+  отвечен; `state='valid'` с JSON-объектом payload — допустимое значение;
+  `state='empty_optional'` — явно пропущенное допустимое пустое значение.
+  Значения связаны с постоянным `brick_id`, а не с текстовым `[код]`.
+- **Дополнения.** `announcement_extras` существует только в этом анонсе:
+  секция (`header`/`body`/`footer`), позиция (`start`/`end`) и
+  `occurrence` (Stage 27A использует `1`). Уникальность
+  `(draft_id, brick_id, occurrence)` не даёт добавить один и тот же
+  кирпичик дважды в одной роли.
+- **Этапы и locking.** `stage` — `place`, `template`, `questions`,
+  `extras`, `preview` или `completed`; переходы проверяет сервис.
+  `revision` растёт при каждом изменении, конфликт ожидаемой ревизии
+  возвращает `AnnouncementConflictError` и не меняет данные. Все операции
+  автора перепроверяют владельца в сервисе; чужой анонс выглядит как
+  «не найден».
+- **Старые данные.** Миграция 12 не читает и не меняет `drafts`,
+  `user_states`, WIP, фото/альбомы, `place_sessions`, `template_sessions`,
+  `brick_sessions` и `brick_proposals`. Старый формат черновиков не
+  конвертируется: новый мастер Stage 27B будет отдельным потоком.
+
 ## 4. Созданные таблицы и ограничения
 
 ### 4.1. `users`
@@ -924,7 +1114,8 @@ address=None, url=None)`:
   Тогда `draft_values`, шаблоны, парсер `[код]`, `brick_proposals`,
   интерфейс кирпичиков места и адаптивное создание ещё не были добавлены;
   сейчас шаблоны/парсер реализованы в Stage 23–25, предложения кирпичиков —
-  в Stage 26, `draft_values` и адаптивное создание — в Stage 27.
+  в Stage 26, новый мастер — в Stage 27A (`announcement_values`; `draft_values`
+  не создавался).
   Существующие `drafts`/WIP/`user_states` и фото/альбомы не мигрируются.
 - **Архив и код.** Физического удаления нет; архивный код остаётся
   занятым, в том числе для владельца. Восстановление возвращает тот же
@@ -932,12 +1123,32 @@ address=None, url=None)`:
   владельца в сервисе; суперадмин и админ места не получают доступа к
   чужим личным кирпичикам.
 
+### 4.8. `announcement_drafts`, `announcement_values`, `announcement_extras`
+
+Созданы миграцией 12 (Stage 27A); полная схема, индексы и триггеры — в
+разделе «Версия 12» выше. Это отдельная модель незавершённого анонса, не
+связанная с легаси `drafts`/`user_states`.
+
+- `announcement_drafts` хранит автора (`users.id`), постоянный `place_id`,
+  выбранный вариант названия и снимок известных данных места, выбранный
+  шаблон/версию/снимок, этап, `revision` и ключ идемпотентности.
+- `announcement_values` хранит нормализованный payload конкретного
+  `brick_id`: отсутствие строки — «не задано», `empty_optional` — явно
+  допустимое пустое значение. Определение кирпичика остаётся в `bricks`.
+- `announcement_extras` хранит дополнительные кирпичики только этого
+  анонса с секцией, позицией и `occurrence`. Это не глобальная привязка
+  шаблона и не влияет на другие черновики.
+- Фотографии по-прежнему не являются кирпичиками и не входят в эти
+  таблицы; фотопоток нового мастера — Stage 27B.
+- Прямой доступ к чужому анонсу по ID невозможен через сервис; SQL-триггеры
+  дополнительно защищают идентичность и снимок шаблона от перезаписи.
+
 ## 5. Порядок инициализации
 
 `database.init_db()` вызывается при старте бота и выполняет:
 
 1. `run_migrations(engine)` — при необходимости копия базы, затем журнал и
-   недостающие версии 1–11;
+   недостающие версии 1–12;
 2. `Base.metadata.create_all(engine)` — **легаси-базлайн** `drafts` и
    `user_states` (новые таблицы уже существуют и пропускаются);
 3. `_migrate(engine)` — добавление колонок `photos/formats/updated_at`
@@ -1111,6 +1322,18 @@ address=None, url=None)`:
 - перед DDL автоматически копируется состояние 10; повторный запуск видит
   журнал 1–11 и ничего не применяет.
 
+База Stage 26 (журнал 1–11) при обновлении до Stage 27A:
+
+- получает только миграцию 12: три пустые таблицы
+  `announcement_drafts`/`announcement_values`/`announcement_extras`, их
+  индексы и пять триггеров;
+- сохраняет кирпичики, шаблоны, версии, снимки, привязки, предложения,
+  `drafts`, WIP, фото, места, роли, правки и передачи без изменений;
+- старые черновики и WIP не конвертируются и не получают строк в новых
+  таблицах: Stage 27A не меняет формат легаси-черновика;
+- перед DDL автоматически копируется состояние 11; повторный запуск видит
+  журнал 1–12 и ничего не применяет.
+
 `init_db` затем:
 
 - `create_all` не трогает существующие таблицы;
@@ -1172,7 +1395,7 @@ address=None, url=None)`:
 - чистить/удалять «мусор» в реальной базе;
 - запускать polling ради проверки миграции.
 
-## 11. Тесты Stage 19A–26
+## 11. Тесты Stage 19A–27A
 
 Файлы Stage 19A:
 
@@ -1341,14 +1564,32 @@ address=None, url=None)`:
   уведомления при сбое Telegram, бессрочность, WIP и доступность
   одобренных кирпичиков редактору Stage 25.
 
-Всего в полном наборе — **1146 тестов** (932 после Stage 22B + 145 Stage 23–25
-+ 69 Stage 26: 10 schema, 19 service, 40 integration).
+Файлы Stage 27A:
+
+- `tests/test_stage27a_announcement_schema.py` — 6 тестов миграции 12:
+  таблицы/индексы/CHECK/FK, различие отсутствующего и пустого значения,
+  уникальность снимка и идемпотентного ключа, неизменяемость автора/места/
+  снимка/значений/дополнений, рост ревизии и сохранность легаси-черновика;
+- `tests/test_stage27a_announcement_wizard.py` — 13 тестов доменной логики:
+  независимый снимок и сохранённые `код → brick_id`, порядок
+  шапка→тело→подвал, один вопрос на повторяющийся `brick_id`, пропуск
+  известных/допустимо пустых значений, все семь типов, даты/время/URL,
+  контекст места без заглушек и диагностика архива/несовместимости;
+- `tests/test_stage27a_announcement_store.py` — 24 сервисных теста:
+  место только по `place_id`, альтернативное название без создания места,
+  стандартный/личный шаблон и запрет чужих личных, независимый снимок,
+  значения по `brick_id`, допустимое пустое значение, дополнения только
+  текущего анонса, этапы, рестарт, идемпотентность, optimistic locking,
+  атомарный откат и изоляция автора.
+
+Всего в полном наборе — **1189 тестов** (1146 после Stage 26 + 43 Stage 27A:
+6 schema, 13 wizard, 24 store).
 
 Все тесты используют только временные файлы SQLite. Настоящая
 `Poster/post_bot.db` не открывается на запись; тест сверяет её sha256 и
 mtime до и после полной инициализации временной базы.
 
-## 12. Ограничения Stage 19A–26
+## 12. Ограничения Stage 19A–27A
 
 - В базе технически возможно место без названий (нет триггера); публичного
   API для этого нет. `get_place_details`/списки такие строки не показывают.
@@ -1359,14 +1600,25 @@ mtime до и после полной инициализации временн�
   без искусственного предела длины; ссылка — до 500 символов интерфейса.
 - Слияния дублей мест нет: только предупреждение и явный выбор пользователя.
 - Подтверждённое место хранится в `place_sessions` (сценарий), но
-  девятишаговый мастер его пока не использует — интеграция в Stage 27.
+  девятишаговый мастер его пока не использует — интеграция в Stage 27B.
 - Стандартный шаблон создаётся атомарно вместе с местом и бэкфиллится
   миграцией 8 для существующих мест; ровно один стандарт на место.
 - Stage 26 добавляет бессрочные предложения кирпичиков в существующие
-  «Мои кирпичики» и кабинет. `draft_values`, полный интерфейс управления
-  кирпичиками места, Mini App и адаптивное создание не реализованы. Мастер
-  поста продолжает использовать девять легаси-полей; шаблоны и кирпичики
-  пока не вставляются в посты (Stage 27).
+  «Мои кирпичики» и кабинет. Stage 27A добавляет только сервисный фундамент
+  нового мастера; полный интерфейс управления кирпичиками места, Mini App и
+  Telegram-UI адаптивного создания не реализованы. Мастер поста продолжает
+  использовать девять легаси-полей; шаблоны и кирпичики пока не вставляются
+  в посты.
+- Stage 27A не заменяет девятишаговый мастер, `POST_STEPS`, старые
+  черновики, WIP и публикацию: новый анонс живёт в отдельных
+  `announcement_*`-таблицах и пока доступен только сервису. Фотопоток,
+  выбор места/шаблона в Telegram, доп. информация и предпросмотр в
+  интерфейсе — Stage 27B. Старый формат черновика не конвертируется в
+  `announcement_values`; `draft_values` из ранних планов не создавался.
+- Все вопросы нового мастера необязательны: допустимый пропуск хранится как
+  `empty_optional`, а не как отсутствие строки. Некорректное непустое
+  значение отклоняется; известные значения места подставляются по
+  постоянным ID 5–7, отсутствующие адрес/ссылка не заменяются заглушками.
 - У предложения нет TTL/`expires_at` и фоновых проверок: `pending` ждёт
   решения или отзыва бессрочно. `approved`/`rejected`/`withdrawn` —
   терминальные статусы; `superseded` и `expired` для предложений не
@@ -1422,9 +1674,9 @@ mtime до и после полной инициализации временн�
 - `create_all` остаётся для легаси-таблиц; новые таблицы должны создаваться
   только миграциями. Прямой `create_all` на рабочей базе запрещён.
 
-## 13. Готовность к Stage 27
+## 13. Готовность к Stage 27B
 
-После 19A–25 работают:
+После 19A–27A работают:
 
 - журнал миграций, копия перед первым ожидающим применением и правило
   добавлять только новые версии;
@@ -1455,15 +1707,20 @@ mtime до и после полной инициализации временн�
   статуса, права места/суперадмина, approve/reject/withdraw,
   транзакционное создание отдельного кирпичика, конфликты/резервация
   кодов, очереди в кабинетах и best-effort уведомления (Stage 26);
+- `announcement_drafts`/`announcement_values`/`announcement_extras` —
+  сервисный фундамент адаптивного мастера: место по `place_id` и
+  альтернативному названию, стандартный/личный шаблон, независимый снимок,
+  вопросы по сохранённым `brick_id`, явное пустое значение, дополнения
+  только анонса, этапы, рестарт, идемпотентность и optimistic locking
+  (Stage 27A);
 - атомарные создание места, альтернативы, назначение/замена/отзыв
   администратора, подтверждение передачи, конкурентное создание кирпичика
   и условные обновления шаблонов (ограничения SQLite + одна транзакция,
   откат при сбое);
 - внешние ключи/каскады на соединениях приложения.
 
-Stage 23–26 не меняли мастер поста, WIP, календарь, фото/альбомы и
-отправку. Остаётся будущим: Stage 27 — `draft_values`, полный интерфейс
-кирпичиков места, интеграция подтверждённого места, шаблонов и значений
-кирпичиков в адаптивный мастер; Stage 28 — сквозной регресс и
-совместимость черновиков. Реальная `Poster/post_bot.db` в тестах не
-изменялась.
+Stage 23–27A не меняли мастер поста, WIP, календарь, фото/альбомы и
+отправку. Остаётся будущим: Stage 27B — Telegram-интерфейс нового мастера,
+фотопоток, предпросмотр и публикация; полный интерфейс кирпичиков места не
+входит в 27A; Stage 28 — сквозной регресс и совместимость черновиков.
+Реальная `Poster/post_bot.db` в тестах не изменялась.
