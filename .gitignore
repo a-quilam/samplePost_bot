@@ -172,5 +172,8 @@ Poster/*.db-wal
 Poster/*.db-shm
 Poster/handlers/*.db
 
+# Резервные копии базы (создаются штатным механизмом migrations.py)
+backups/
+
 # macOS
 .DS_Store
