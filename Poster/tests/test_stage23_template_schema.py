@@ -2,7 +2,7 @@
 """
 Stage 23: настоящие ограничения SQLite для шаблонов, версий и снимков.
 
-Временный файл, миграции 1–11, реальные UNIQUE/CHECK/FK/триггеры. Проверяется,
+Временный файл, миграции 1–12, реальные UNIQUE/CHECK/FK/триггеры. Проверяется,
 что историю нельзя переписать, стандарт нельзя удалить, а привязка живёт по
 постоянному brick_id. Реальная Poster/post_bot.db не открывается.
 """
@@ -54,7 +54,8 @@ class TemplateSchemaTests(TemplateDatabaseTestCase):
 
     def test_template_migrations_apply_and_are_idempotent(self) -> None:
         self.assertEqual(self.migrations_applied, LATEST_VERSION)
-        self.assertEqual(LATEST_VERSION, 11)
+        self.assertEqual(LATEST_VERSION, 12)
+        self.assertIn((12, "announcement_wizard"), self.journal())
         self.assertIn((8, "templates_versions_snapshots"), self.journal())
         self.assertIn((9, "template_binding_codes"), self.journal())
         self.assertIn((10, "template_sessions"), self.journal())
