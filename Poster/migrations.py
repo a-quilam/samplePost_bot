@@ -1399,6 +1399,240 @@ MIGRATION_11_BRICK_PROPOSALS = Migration(
 )
 
 
+# --- Версия 12: состояние адаптивного мастера анонсов (Stage 27A) ----------
+
+
+MIGRATION_12_ANNOUNCEMENT_WIZARD = Migration(
+    version=12,
+    name="announcement_wizard",
+    statements=(
+        # Незавершённый анонс нового мастера. Хранится отдельно от легаси
+        # `drafts`/`user_states`: старый WIP не конвертируется и не меняется.
+        # place_* — снимок выбранного места на момент подтверждения; NULL
+        # означает отсутствующее значение, а не пустую строку/заглушку.
+        """
+        CREATE TABLE announcement_drafts (
+            id INTEGER NOT NULL PRIMARY KEY,
+            author_user_id INTEGER NOT NULL,
+            place_id INTEGER NOT NULL,
+            place_name_id INTEGER,
+            place_display_name TEXT NOT NULL,
+            place_address TEXT,
+            place_url TEXT,
+            template_id INTEGER,
+            template_version INTEGER,
+            template_snapshot_id INTEGER,
+            stage TEXT NOT NULL DEFAULT 'place',
+            revision INTEGER NOT NULL DEFAULT 1,
+            idempotency_key TEXT,
+            created_at DATETIME NOT NULL,
+            updated_at DATETIME NOT NULL,
+            CONSTRAINT ck_announcement_drafts_stage
+                CHECK (stage IN (
+                    'place', 'template', 'questions', 'extras',
+                    'preview', 'completed'
+                )),
+            CONSTRAINT ck_announcement_drafts_revision
+                CHECK (revision >= 1),
+            CONSTRAINT ck_announcement_drafts_display_name
+                CHECK (length(trim(place_display_name)) > 0),
+            CONSTRAINT ck_announcement_drafts_address
+                CHECK (place_address IS NULL OR length(trim(place_address)) > 0),
+            CONSTRAINT ck_announcement_drafts_url
+                CHECK (place_url IS NULL OR length(trim(place_url)) > 0),
+            CONSTRAINT ck_announcement_drafts_idempotency
+                CHECK (
+                    idempotency_key IS NULL
+                    OR length(trim(idempotency_key)) > 0
+                ),
+            CONSTRAINT ck_announcement_drafts_template_shape
+                CHECK (
+                    (template_id IS NULL
+                        AND template_version IS NULL
+                        AND template_snapshot_id IS NULL)
+                    OR (template_id IS NOT NULL
+                        AND template_version IS NOT NULL
+                        AND template_version >= 1
+                        AND template_snapshot_id IS NOT NULL)
+                ),
+            CONSTRAINT fk_announcement_drafts_author
+                FOREIGN KEY (author_user_id) REFERENCES users (id)
+                ON DELETE RESTRICT,
+            CONSTRAINT fk_announcement_drafts_place
+                FOREIGN KEY (place_id) REFERENCES places (id)
+                ON DELETE RESTRICT,
+            CONSTRAINT fk_announcement_drafts_place_name
+                FOREIGN KEY (place_name_id) REFERENCES place_names (id)
+                ON DELETE SET NULL,
+            CONSTRAINT fk_announcement_drafts_template
+                FOREIGN KEY (template_id) REFERENCES templates (id)
+                ON DELETE RESTRICT,
+            CONSTRAINT fk_announcement_drafts_snapshot
+                FOREIGN KEY (template_snapshot_id) REFERENCES template_snapshots (id)
+                ON DELETE RESTRICT
+        )
+        """,
+        """
+        CREATE INDEX ix_announcement_drafts_author_updated
+            ON announcement_drafts (author_user_id, updated_at)
+        """,
+        # Один снимок принадлежит ровно одному анонсу: живая версия шаблона
+        # и чужой черновик не могут использовать его повторно.
+        """
+        CREATE UNIQUE INDEX ux_announcement_drafts_snapshot
+            ON announcement_drafts (template_snapshot_id)
+            WHERE template_snapshot_id IS NOT NULL
+        """,
+        """
+        CREATE UNIQUE INDEX ux_announcement_drafts_idempotency
+            ON announcement_drafts (author_user_id, idempotency_key)
+            WHERE idempotency_key IS NOT NULL
+        """,
+        # Значение конкретного анонса. Определение кирпичика остаётся в
+        # `bricks`; здесь только постоянный brick_id и нормализованный payload.
+        # Отсутствие строки — «значение не задано»; state='empty_optional' —
+        # явно допустимое пустое значение (разные состояния мастера).
+        """
+        CREATE TABLE announcement_values (
+            id INTEGER NOT NULL PRIMARY KEY,
+            draft_id INTEGER NOT NULL,
+            brick_id INTEGER NOT NULL,
+            state TEXT NOT NULL,
+            value_json TEXT,
+            created_at DATETIME NOT NULL,
+            updated_at DATETIME NOT NULL,
+            CONSTRAINT ck_announcement_values_state
+                CHECK (state IN ('valid', 'empty_optional')),
+            CONSTRAINT ck_announcement_values_payload
+                CHECK (
+                    (state = 'valid'
+                        AND value_json IS NOT NULL
+                        AND json_valid(value_json)
+                        AND json_type(value_json) = 'object')
+                    OR (state = 'empty_optional' AND value_json IS NULL)
+                ),
+            CONSTRAINT fk_announcement_values_draft
+                FOREIGN KEY (draft_id) REFERENCES announcement_drafts (id)
+                ON DELETE CASCADE,
+            CONSTRAINT fk_announcement_values_brick
+                FOREIGN KEY (brick_id) REFERENCES bricks (id)
+                ON DELETE RESTRICT,
+            CONSTRAINT uq_announcement_values_draft_brick
+                UNIQUE (draft_id, brick_id)
+        )
+        """,
+        """
+        CREATE INDEX ix_announcement_values_brick
+            ON announcement_values (brick_id)
+        """,
+        # Дополнительный кирпичик существует только в этом анонсе. Секция и
+        # позиция задают вставку, occurrence оставлен для будущих повторяемых
+        # экземпляров; Stage 27A создаёт occurrence=1.
+        """
+        CREATE TABLE announcement_extras (
+            id INTEGER NOT NULL PRIMARY KEY,
+            draft_id INTEGER NOT NULL,
+            brick_id INTEGER NOT NULL,
+            section TEXT NOT NULL,
+            position TEXT NOT NULL DEFAULT 'end',
+            occurrence INTEGER NOT NULL DEFAULT 1,
+            created_at DATETIME NOT NULL,
+            updated_at DATETIME NOT NULL,
+            CONSTRAINT ck_announcement_extras_section
+                CHECK (section IN ('header', 'body', 'footer')),
+            CONSTRAINT ck_announcement_extras_position
+                CHECK (position IN ('start', 'end')),
+            CONSTRAINT ck_announcement_extras_occurrence
+                CHECK (occurrence >= 1),
+            CONSTRAINT fk_announcement_extras_draft
+                FOREIGN KEY (draft_id) REFERENCES announcement_drafts (id)
+                ON DELETE CASCADE,
+            CONSTRAINT fk_announcement_extras_brick
+                FOREIGN KEY (brick_id) REFERENCES bricks (id)
+                ON DELETE RESTRICT,
+            CONSTRAINT uq_announcement_extras_draft_brick_occurrence
+                UNIQUE (draft_id, brick_id, occurrence)
+        )
+        """,
+        """
+        CREATE INDEX ix_announcement_extras_draft
+            ON announcement_extras (draft_id)
+        """,
+        """
+        CREATE INDEX ix_announcement_extras_brick
+            ON announcement_extras (brick_id)
+        """,
+        # Ревизия растёт только сервисом: условный UPDATE ... WHERE revision
+        # остаётся настоящей optimistic locking даже при прямом SQL.
+        """
+        CREATE TRIGGER trg_announcement_drafts_revision_increases
+        BEFORE UPDATE OF revision ON announcement_drafts
+        FOR EACH ROW
+        WHEN NEW.revision <= OLD.revision
+        BEGIN
+            SELECT RAISE(ABORT, 'announcement draft revision must increase');
+        END
+        """,
+        # Автор, место и ключ идемпотентности не переписываются: подмена ID
+        # не превращает чужой анонс в свой и не меняет выбранное место.
+        """
+        CREATE TRIGGER trg_announcement_drafts_identity_immutable
+        BEFORE UPDATE OF author_user_id, place_id, idempotency_key, created_at
+        ON announcement_drafts
+        FOR EACH ROW
+        WHEN NEW.author_user_id IS NOT OLD.author_user_id
+            OR NEW.place_id IS NOT OLD.place_id
+            OR NEW.idempotency_key IS NOT OLD.idempotency_key
+            OR NEW.created_at IS NOT OLD.created_at
+        BEGIN
+            SELECT RAISE(ABORT, 'announcement draft identity is immutable');
+        END
+        """,
+        # Однажды выбранный snapshot шаблона нельзя подменить: правка живого
+        # шаблона или повторный выбор не переписывают начатый анонс.
+        """
+        CREATE TRIGGER trg_announcement_drafts_template_immutable
+        BEFORE UPDATE OF template_id, template_version, template_snapshot_id
+        ON announcement_drafts
+        FOR EACH ROW
+        WHEN OLD.template_snapshot_id IS NOT NULL
+            AND (
+                NEW.template_id IS NOT OLD.template_id
+                OR NEW.template_version IS NOT OLD.template_version
+                OR NEW.template_snapshot_id IS NOT OLD.template_snapshot_id
+            )
+        BEGIN
+            SELECT RAISE(ABORT, 'announcement template snapshot is immutable');
+        END
+        """,
+        """
+        CREATE TRIGGER trg_announcement_values_identity_immutable
+        BEFORE UPDATE OF draft_id, brick_id, created_at ON announcement_values
+        FOR EACH ROW
+        WHEN NEW.draft_id IS NOT OLD.draft_id
+            OR NEW.brick_id IS NOT OLD.brick_id
+            OR NEW.created_at IS NOT OLD.created_at
+        BEGIN
+            SELECT RAISE(ABORT, 'announcement value identity is immutable');
+        END
+        """,
+        """
+        CREATE TRIGGER trg_announcement_extras_identity_immutable
+        BEFORE UPDATE OF draft_id, brick_id, occurrence, created_at
+        ON announcement_extras
+        FOR EACH ROW
+        WHEN NEW.draft_id IS NOT OLD.draft_id
+            OR NEW.brick_id IS NOT OLD.brick_id
+            OR NEW.occurrence IS NOT OLD.occurrence
+            OR NEW.created_at IS NOT OLD.created_at
+        BEGIN
+            SELECT RAISE(ABORT, 'announcement extra identity is immutable');
+        END
+        """,
+    ),
+)
+
+
 DEFAULT_MIGRATIONS: tuple[Migration, ...] = (
     MIGRATION_1_USERS_PLACES,
     MIGRATION_2_PLACE_CONTACTS_UI,
@@ -1411,6 +1645,7 @@ DEFAULT_MIGRATIONS: tuple[Migration, ...] = (
     MIGRATION_9_BINDING_CODES,
     MIGRATION_10_TEMPLATE_SESSIONS,
     MIGRATION_11_BRICK_PROPOSALS,
+    MIGRATION_12_ANNOUNCEMENT_WIZARD,
 )
 
 LATEST_VERSION = DEFAULT_MIGRATIONS[-1].version if DEFAULT_MIGRATIONS else 0

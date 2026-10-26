@@ -1515,6 +1515,7 @@ def create_template_snapshot(
     template_id: int,
     expected_revision: int | None = None,
     idempotency_key: object | None = None,
+    commit: bool = True,
 ) -> TemplateSnapshotDetails:
     """
     Создаёт самостоятельный снимок текущей версии доступного шаблона.
@@ -1522,6 +1523,10 @@ def create_template_snapshot(
     Секции и все brick_id копируются одной транзакцией. `idempotency_key`
     делает повтор операции безопасным: возвращается уже созданный снимок,
     а не второй. Снимок не связан со старой таблицей `drafts`.
+
+    `commit=False` позволяет вызывающему сервису (Stage 27A) включить снимок
+    в собственную транзакцию вместе с привязкой к черновику. При ошибке
+    вызывающий обязан откатить сессию; по умолчанию поведение прежнее.
     """
     actor = _require_actor_user(session, actor_telegram_user_id)
     key = _validate_idempotency_key(idempotency_key)
@@ -1573,7 +1578,10 @@ def create_template_snapshot(
             raise TemplatePermissionError(
                 "Права на чтение шаблона больше не действуют."
             )
-        session.commit()
+        if commit:
+            session.commit()
+        else:
+            session.flush()
     except (IntegrityError, OperationalError) as exc:
         session.rollback()
         if key is not None:

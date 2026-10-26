@@ -1105,6 +1105,249 @@ class TemplateSnapshotBrick(Base):
         )
 
 
+class AnnouncementDraft(Base):
+    """
+    Незавершённый анонс адаптивного мастера Stage 27A.
+
+    Отдельная таблица, а не `user_states.payload`: старый WIP остаётся
+    нетронутым и продолжает открываться девятишаговым мастером. Строка
+    хранит выбор места/названия, ссылку на конкретный независимый снимок
+    шаблона, текущий этап и ревизию для optimistic locking.
+
+    `place_address`/`place_url` — снимок известных данных справочника на
+    момент подтверждения места. NULL означает «сведений нет», а не пустую
+    строку-заглушку: мастер задаст вопрос только если шаблон использует
+    такой кирпичик.
+    """
+
+    __tablename__ = "announcement_drafts"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    author_user_id: Mapped[int] = mapped_column(
+        Integer,
+        ForeignKey("users.id", ondelete="RESTRICT"),
+        nullable=False,
+    )
+    place_id: Mapped[int] = mapped_column(
+        Integer,
+        ForeignKey("places.id", ondelete="RESTRICT"),
+        nullable=False,
+    )
+    place_name_id: Mapped[int | None] = mapped_column(
+        Integer,
+        ForeignKey("place_names.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+    place_display_name: Mapped[str] = mapped_column(Text, nullable=False)
+    place_address: Mapped[str | None] = mapped_column(Text, nullable=True)
+    place_url: Mapped[str | None] = mapped_column(Text, nullable=True)
+    template_id: Mapped[int | None] = mapped_column(
+        Integer,
+        ForeignKey("templates.id", ondelete="RESTRICT"),
+        nullable=True,
+    )
+    template_version: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    template_snapshot_id: Mapped[int | None] = mapped_column(
+        Integer,
+        ForeignKey("template_snapshots.id", ondelete="RESTRICT"),
+        nullable=True,
+    )
+    stage: Mapped[str] = mapped_column(
+        Text, nullable=False, default="place", server_default=text("'place'")
+    )
+    revision: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=1, server_default=text("1")
+    )
+    idempotency_key: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime, default=utcnow, nullable=False
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime, default=utcnow, onupdate=utcnow, nullable=False
+    )
+
+    __table_args__ = (
+        CheckConstraint(
+            "stage IN ('place', 'template', 'questions', 'extras', "
+            "'preview', 'completed')",
+            name="ck_announcement_drafts_stage",
+        ),
+        CheckConstraint("revision >= 1", name="ck_announcement_drafts_revision"),
+        CheckConstraint(
+            "length(trim(place_display_name)) > 0",
+            name="ck_announcement_drafts_display_name",
+        ),
+        CheckConstraint(
+            "place_address IS NULL OR length(trim(place_address)) > 0",
+            name="ck_announcement_drafts_address",
+        ),
+        CheckConstraint(
+            "place_url IS NULL OR length(trim(place_url)) > 0",
+            name="ck_announcement_drafts_url",
+        ),
+        CheckConstraint(
+            "idempotency_key IS NULL OR length(trim(idempotency_key)) > 0",
+            name="ck_announcement_drafts_idempotency",
+        ),
+        CheckConstraint(
+            "(template_id IS NULL AND template_version IS NULL "
+            "AND template_snapshot_id IS NULL) "
+            "OR (template_id IS NOT NULL AND template_version IS NOT NULL "
+            "AND template_version >= 1 AND template_snapshot_id IS NOT NULL)",
+            name="ck_announcement_drafts_template_shape",
+        ),
+        Index(
+            "ix_announcement_drafts_author_updated",
+            "author_user_id",
+            "updated_at",
+        ),
+        Index(
+            "ux_announcement_drafts_snapshot",
+            "template_snapshot_id",
+            unique=True,
+            sqlite_where=text("template_snapshot_id IS NOT NULL"),
+        ),
+        Index(
+            "ux_announcement_drafts_idempotency",
+            "author_user_id",
+            "idempotency_key",
+            unique=True,
+            sqlite_where=text("idempotency_key IS NOT NULL"),
+        ),
+    )
+
+    def __repr__(self) -> str:
+        return (
+            f"<AnnouncementDraft(id={self.id}, author_user_id={self.author_user_id}, "
+            f"stage={self.stage!r})>"
+        )
+
+
+class AnnouncementValue(Base):
+    """
+    Значение кирпичика в конкретном незавершённом анонсе.
+
+    `brick_id` — постоянная ссылка на определение, а не текстовый `[код]`.
+    Отсутствие строки означает «не задано»; `state='empty_optional'` —
+    осознанно пропущенное допустимое пустое значение. Определение и его
+    значение не смешиваются: тип/правила читаются из `bricks`.
+    """
+
+    __tablename__ = "announcement_values"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    draft_id: Mapped[int] = mapped_column(
+        Integer,
+        ForeignKey("announcement_drafts.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    brick_id: Mapped[int] = mapped_column(
+        Integer,
+        ForeignKey("bricks.id", ondelete="RESTRICT"),
+        nullable=False,
+    )
+    state: Mapped[str] = mapped_column(Text, nullable=False)
+    value_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime, default=utcnow, nullable=False
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime, default=utcnow, nullable=False
+    )
+
+    __table_args__ = (
+        CheckConstraint(
+            "state IN ('valid', 'empty_optional')",
+            name="ck_announcement_values_state",
+        ),
+        CheckConstraint(
+            "(state = 'valid' AND value_json IS NOT NULL "
+            "AND json_valid(value_json) AND json_type(value_json) = 'object') "
+            "OR (state = 'empty_optional' AND value_json IS NULL)",
+            name="ck_announcement_values_payload",
+        ),
+        UniqueConstraint(
+            "draft_id",
+            "brick_id",
+            name="uq_announcement_values_draft_brick",
+        ),
+        Index("ix_announcement_values_brick", "brick_id"),
+    )
+
+    def __repr__(self) -> str:
+        return (
+            f"<AnnouncementValue(draft_id={self.draft_id}, "
+            f"brick_id={self.brick_id}, state={self.state!r})>"
+        )
+
+
+class AnnouncementExtra(Base):
+    """
+    Дополнительный кирпичик только этого анонса (Stage 27A).
+
+    Вставка не меняет ни стандартный/личный шаблон, ни его версии/снимок:
+    строка живёт в `announcement_extras` и учитывается только при построении
+    представления конкретного черновика. `position` — начало/конец выбранной
+    секции; `occurrence` оставлен для будущих повторяемых экземпляров.
+    """
+
+    __tablename__ = "announcement_extras"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    draft_id: Mapped[int] = mapped_column(
+        Integer,
+        ForeignKey("announcement_drafts.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    brick_id: Mapped[int] = mapped_column(
+        Integer,
+        ForeignKey("bricks.id", ondelete="RESTRICT"),
+        nullable=False,
+    )
+    section: Mapped[str] = mapped_column(Text, nullable=False)
+    position: Mapped[str] = mapped_column(
+        Text, nullable=False, default="end", server_default=text("'end'")
+    )
+    occurrence: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=1, server_default=text("1")
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime, default=utcnow, nullable=False
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime, default=utcnow, nullable=False
+    )
+
+    __table_args__ = (
+        CheckConstraint(
+            "section IN ('header', 'body', 'footer')",
+            name="ck_announcement_extras_section",
+        ),
+        CheckConstraint(
+            "position IN ('start', 'end')",
+            name="ck_announcement_extras_position",
+        ),
+        CheckConstraint(
+            "occurrence >= 1",
+            name="ck_announcement_extras_occurrence",
+        ),
+        UniqueConstraint(
+            "draft_id",
+            "brick_id",
+            "occurrence",
+            name="uq_announcement_extras_draft_brick_occurrence",
+        ),
+        Index("ix_announcement_extras_draft", "draft_id"),
+        Index("ix_announcement_extras_brick", "brick_id"),
+    )
+
+    def __repr__(self) -> str:
+        return (
+            f"<AnnouncementExtra(id={self.id}, draft_id={self.draft_id}, "
+            f"brick_id={self.brick_id}, section={self.section!r})>"
+        )
+
+
 # --- Фотографии поста (медиа-группы) -----------------------------------------
 
 
