@@ -49,7 +49,9 @@ from announcement_wizard import (
     WizardStage,
     answer_payload_to_raw,
     build_questions,
+    evaluate_announcement_readiness,
     place_context_values,
+    snapshot_section,
     snapshot_tokens_by_section,
     visible_brick_issue,
 )
@@ -69,6 +71,7 @@ from models import (
     utcnow,
 )
 from place_store import get_place_details, get_place_name
+from template_compiler import render_template
 from template_parser import BrickNode
 from template_store import (
     TemplateError,
@@ -165,6 +168,64 @@ class AnnouncementRenderPayload:
     tokens_by_section: Mapping[str, tuple[Any, ...]]
     values_by_id: Mapping[int, object]
     definitions_by_id: Mapping[int, BrickDefinition]
+
+
+FIELD_STATUS_VALID = "valid"
+FIELD_STATUS_SKIPPED = "empty_optional"
+FIELD_STATUS_MISSING = "missing"
+FIELD_STATUS_KNOWN = "known"
+
+
+@dataclass(frozen=True)
+class AnnouncementFieldState:
+    """Состояние одного кирпичика снимка для вопросов и обзора."""
+
+    brick_id: int
+    code: str
+    title: str
+    value_type: str
+    section: str
+    status: str
+    raw_value: object | None = None
+    rules: Mapping[str, object] = field(default_factory=dict)
+
+    @property
+    def is_filled(self) -> bool:
+        return self.status == FIELD_STATUS_VALID
+
+    @property
+    def is_skipped(self) -> bool:
+        return self.status == FIELD_STATUS_SKIPPED
+
+    @property
+    def is_missing(self) -> bool:
+        return self.status == FIELD_STATUS_MISSING
+
+    @property
+    def is_known(self) -> bool:
+        return self.status == FIELD_STATUS_KNOWN
+
+
+@dataclass(frozen=True)
+class AnnouncementPreview:
+    """Собранный предварительный текст и диагностика готовности."""
+
+    draft: AnnouncementDraftDetails
+    html: str
+    visible_text: str
+    ready: bool
+    issues: tuple[str, ...]
+    warnings: tuple[str, ...]
+    fields: tuple[AnnouncementFieldState, ...]
+    missing: tuple[Question, ...]
+
+
+def _display_raw_value(raw: object | None) -> str:
+    if raw is None:
+        return ""
+    if isinstance(raw, (list, tuple)):
+        return ", ".join(str(item) for item in raw)
+    return str(raw)
 
 
 def _valid_positive_id(value: object) -> bool:
@@ -279,6 +340,7 @@ def _snapshot_view(details: TemplateSnapshotDetails) -> AnnouncementTemplateSnap
             SnapshotBinding(brick_id=binding.brick_id, code=binding.code)
             for binding in details.bindings
         ),
+        source_name=details.source_name,
     )
 
 
@@ -1282,4 +1344,158 @@ def build_announcement_render_payload(
         tokens_by_section=sections,
         values_by_id=values_by_id,
         definitions_by_id=definitions,
+    )
+
+
+def build_announcement_fields(
+    session: Session,
+    *,
+    actor_telegram_user_id: int | None,
+    draft_id: int,
+    today: date | None = None,
+) -> tuple[AnnouncementFieldState, ...]:
+    """
+    Возвращает все кирпичики снимка в порядке шапка → тело → подвал.
+
+    Недостающие поля берутся из того же `build_questions`, что и мастер,
+    поэтому второй алгоритм определения вопросов в Telegram-слое не нужен.
+    Известные значения места отличаются от явно пропущенных.
+    """
+    actor = _require_actor(session, actor_telegram_user_id)
+    row = _load_owned_draft(session, actor, draft_id)
+    snapshot = _draft_snapshot(session, actor, row)
+    if snapshot is None:
+        raise AnnouncementStageError("Сначала выберите шаблон анонса.")
+    details = _draft_details(session, actor, row)
+    questions = build_announcement_questions(
+        session,
+        actor_telegram_user_id=actor_telegram_user_id,
+        draft_id=draft_id,
+        today=today,
+    )
+    question_map = {question.brick_id: question for question in questions}
+    payload = build_announcement_render_payload(
+        session,
+        actor_telegram_user_id=actor_telegram_user_id,
+        draft_id=draft_id,
+    )
+    known = place_context_values(
+        display_name=row.place_display_name,
+        address=row.place_address,
+        url=row.place_url,
+    )
+
+    states: list[AnnouncementFieldState] = []
+    for brick_id in snapshot.brick_ids:
+        definition = payload.definitions_by_id[brick_id]
+        question = question_map.get(brick_id)
+        value = details.value_for(brick_id)
+        raw: object | None = None
+        if value is not None and value.status is BrickValueStatus.VALID:
+            status = FIELD_STATUS_VALID
+            raw = answer_payload_to_raw(
+                BrickValueResult(
+                    status=value.status,
+                    payload=dict(value.payload) if value.payload is not None else None,
+                )
+            )
+        elif value is not None and value.status is BrickValueStatus.EMPTY_OPTIONAL:
+            status = FIELD_STATUS_SKIPPED
+        elif question is not None:
+            status = FIELD_STATUS_MISSING
+        elif brick_id in known:
+            status = FIELD_STATUS_KNOWN
+            raw = known[brick_id]
+        else:
+            raise AnnouncementSnapshotError(
+                f"Кирпичик #{brick_id} не имеет значения и не попал в вопросы."
+            )
+
+        states.append(
+            AnnouncementFieldState(
+                brick_id=brick_id,
+                code=definition.code,
+                title=question.title if question is not None else definition.title,
+                value_type=definition.value_type,
+                section=(
+                    question.section
+                    if question is not None
+                    else snapshot_section(snapshot, definition.code)
+                ),
+                status=status,
+                raw_value=raw,
+                rules=dict(
+                    question.rules if question is not None else definition.rules
+                ),
+            )
+        )
+    return tuple(states)
+
+
+def build_announcement_preview(
+    session: Session,
+    *,
+    actor_telegram_user_id: int | None,
+    draft_id: int,
+    today: date | None = None,
+) -> AnnouncementPreview:
+    """
+    Собирает предварительный текст по снимку и `brick_id`.
+
+    Ошибки компилятора не превращаются в «готовый» текст: вызывающий слой
+    показывает их как диагностику. Данные в SQLite при этом не меняются.
+    """
+    details = get_announcement_draft(
+        session,
+        actor_telegram_user_id=actor_telegram_user_id,
+        draft_id=draft_id,
+    )
+    fields = build_announcement_fields(
+        session,
+        actor_telegram_user_id=actor_telegram_user_id,
+        draft_id=draft_id,
+        today=today,
+    )
+    payload = build_announcement_render_payload(
+        session,
+        actor_telegram_user_id=actor_telegram_user_id,
+        draft_id=draft_id,
+    )
+    html = render_template(
+        payload.tokens_by_section,
+        payload.values_by_id,
+        payload.definitions_by_id,
+    )
+    snapshot_brick_count = (
+        len(details.template_snapshot.brick_ids)
+        if details.template_snapshot is not None
+        else 0
+    )
+    snapshot = details.template_snapshot
+    relevant_brick_ids = set(snapshot.brick_ids) if snapshot is not None else set()
+    if snapshot is not None:
+        relevant_brick_ids.update(extra.brick_id for extra in details.extras)
+    filled_value_count = sum(
+        1 for brick_id in relevant_brick_ids if brick_id in payload.values_by_id
+    )
+    readiness = evaluate_announcement_readiness(
+        html,
+        snapshot_brick_count=snapshot_brick_count,
+        filled_value_count=filled_value_count,
+    )
+    questions = build_announcement_questions(
+        session,
+        actor_telegram_user_id=actor_telegram_user_id,
+        draft_id=draft_id,
+        today=today,
+    )
+    return AnnouncementPreview(
+        draft=details,
+        html=html,
+        visible_text=readiness.visible_text,
+        ready=readiness.ready,
+        issues=readiness.issues,
+        warnings=readiness.warnings,
+        fields=fields,
+        missing=tuple(questions),
     )

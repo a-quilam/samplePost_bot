@@ -19,6 +19,8 @@
 
 from __future__ import annotations
 
+import html as html_module
+import re
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
 from datetime import date
@@ -129,6 +131,7 @@ class AnnouncementTemplateSnapshot:
     source_place_id: int | None
     sections: Mapping[str, str]
     bindings: tuple[SnapshotBinding, ...] = field(default_factory=tuple)
+    source_name: str | None = None
 
     @property
     def brick_ids(self) -> tuple[int, ...]:
@@ -161,6 +164,75 @@ class Question:
     required: bool = False
     allow_empty: bool = True
     context_error: str | None = None
+
+
+@dataclass(frozen=True)
+class AnnouncementReadiness:
+    """
+    Итог проверки собранного текста для следующего этапа.
+
+    Пропуск отдельного кирпичика разрешён, но пустой текст или шаблон,
+    в котором ни одно поле так и не получило значения, готовым анонсом
+    не считается. Публикация в Stage 27B не выполняется: решение лишь
+    показывает, можно ли передать текст дальше.
+    """
+
+    ready: bool
+    visible_text: str
+    issues: tuple[str, ...] = ()
+    warnings: tuple[str, ...] = ()
+
+
+_HTML_TAG_RE = re.compile(r"<[^>]*>")
+
+
+def visible_announcement_text(rendered_html: str) -> str:
+    """Текст без HTML-разметки для проверки готовности и служебной сводки."""
+    without_tags = _HTML_TAG_RE.sub("", rendered_html or "")
+    return html_module.unescape(without_tags).strip()
+
+
+def evaluate_announcement_readiness(
+    rendered_html: str,
+    *,
+    snapshot_brick_count: int,
+    filled_value_count: int,
+) -> AnnouncementReadiness:
+    """
+    Разделяет допустимость пропуска поля и готовность собранного текста.
+
+    - отдельный кирпичик пропускать можно;
+    - текст обязан остаться непустым после удаления разметки;
+    - если в снимке есть кирпичики, хотя бы один из них (включая известные
+      значения места) должен иметь значение — полностью пустой анонс
+      готовым не считается;
+    - статический шаблон без кирпичиков может быть готов, если его текст
+      непуст.
+    """
+    visible = visible_announcement_text(rendered_html)
+    issues: list[str] = []
+    warnings: list[str] = []
+    if not visible:
+        issues.append(
+            "В анонсе нет текста: все поля пропущены, а шаблон не содержит "
+            "постоянного текста."
+        )
+    if snapshot_brick_count > 0 and filled_value_count == 0:
+        issues.append(
+            "В шаблоне есть поля, но ни одно значение не заполнено. "
+            "Заполните хотя бы одно поле или выберите другой шаблон."
+        )
+    if not issues and snapshot_brick_count > 0:
+        warnings.append(
+            "Часть полей может быть пропущена — это допустимо, но проверьте "
+            "обзор перед следующим этапом."
+        )
+    return AnnouncementReadiness(
+        ready=not issues,
+        visible_text=visible,
+        issues=tuple(issues),
+        warnings=tuple(warnings),
+    )
 
 
 def place_context_values(
