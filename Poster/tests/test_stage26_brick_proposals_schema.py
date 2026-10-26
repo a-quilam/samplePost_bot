@@ -83,12 +83,13 @@ class BrickProposalSchemaTests(BrickDatabaseTestCase):
             )
 
     def test_migration_12_follows_brick_proposals_and_has_constraints(self) -> None:
-        self.assertEqual(LATEST_VERSION, 12)
+        self.assertEqual(LATEST_VERSION, 13)
         self.assertEqual(
-            self.journal()[-2:],
+            self.journal()[-3:],
             [
                 (11, "brick_proposals"),
                 (12, "announcement_wizard"),
+                (13, "announcement_photos_publication"),
             ],
         )
         connection = connect(self.path)

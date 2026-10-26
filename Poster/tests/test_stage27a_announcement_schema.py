@@ -33,8 +33,8 @@ from tests.stage27_helpers import AnnouncementDatabaseTestCase
 class AnnouncementWizardMigrationTests(AnnouncementDatabaseTestCase):
     """Миграция 12 и ограничения новых таблиц."""
 
-    def test_latest_migration_is_twelve_and_follows_brick_proposals(self) -> None:
-        self.assertEqual(LATEST_VERSION, 12)
+    def test_latest_migration_is_thirteen_and_follows_brick_proposals(self) -> None:
+        self.assertEqual(LATEST_VERSION, 13)
         self.assertEqual(
             [(migration.version, migration.name) for migration in DEFAULT_MIGRATIONS],
             [
@@ -50,10 +50,11 @@ class AnnouncementWizardMigrationTests(AnnouncementDatabaseTestCase):
                 (10, "template_sessions"),
                 (11, "brick_proposals"),
                 (12, "announcement_wizard"),
+                (13, "announcement_photos_publication"),
             ],
         )
-        self.assertEqual(run_migrations(self.engine), 12)
-        self.assertEqual(run_migrations(self.engine), 12)
+        self.assertEqual(run_migrations(self.engine), 13)
+        self.assertEqual(run_migrations(self.engine), 13)
 
     def test_new_tables_columns_indexes_and_triggers_exist(self) -> None:
         connection = sqlite3.connect(self.path)
@@ -92,6 +93,14 @@ class AnnouncementWizardMigrationTests(AnnouncementDatabaseTestCase):
                     "stage",
                     "revision",
                     "idempotency_key",
+                    "photos",
+                    "publication_status",
+                    "publication_text",
+                    "publication_photos",
+                    "publication_progress",
+                    "publication_error",
+                    "publication_started_at",
+                    "published_at",
                     "created_at",
                     "updated_at",
                 }
@@ -147,6 +156,7 @@ class AnnouncementWizardMigrationTests(AnnouncementDatabaseTestCase):
                     "ix_announcement_drafts_author_updated",
                     "ux_announcement_drafts_snapshot",
                     "ux_announcement_drafts_idempotency",
+                    "ix_announcement_drafts_publication_status",
                     "ix_announcement_values_brick",
                     "ix_announcement_extras_draft",
                     "ix_announcement_extras_brick",
@@ -166,6 +176,13 @@ class AnnouncementWizardMigrationTests(AnnouncementDatabaseTestCase):
                     "trg_announcement_drafts_template_immutable",
                     "trg_announcement_values_identity_immutable",
                     "trg_announcement_extras_identity_immutable",
+                    "trg_announcement_drafts_media_json_insert",
+                    "trg_announcement_drafts_media_json_update",
+                    "trg_announcement_drafts_publication_status_insert",
+                    "trg_announcement_drafts_publication_status_update",
+                    "trg_announcement_drafts_publication_shape_insert",
+                    "trg_announcement_drafts_publication_shape",
+                    "trg_announcement_drafts_published_immutable",
                 }
                 <= triggers
             )
@@ -286,7 +303,7 @@ class OldDraftCompatibilityTests(unittest.TestCase):
         self.addCleanup(self.engine.dispose)
 
     def test_old_draft_and_wip_survive_without_content_migration(self) -> None:
-        self.assertEqual(run_migrations(self.engine), 12)
+        self.assertEqual(run_migrations(self.engine), 13)
         self.session = sessionmaker(bind=self.engine, expire_on_commit=False)()
         self.addCleanup(self.session.close)
 

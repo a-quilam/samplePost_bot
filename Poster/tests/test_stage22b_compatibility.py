@@ -133,7 +133,7 @@ class Stage22BCompatibilityTests(unittest.TestCase):
         self.session.close()
 
         self.assertEqual(journal(self.path)[-1], (6, "bricks_registry"))
-        self.assertEqual(run_migrations(self.engine), 12)
+        self.assertEqual(run_migrations(self.engine), 13)
         copies = self.backup_paths()
         self.assertEqual(len(copies), 1, copies)
         backup = copies[0]
@@ -167,7 +167,9 @@ class Stage22BCompatibilityTests(unittest.TestCase):
         finally:
             backup_connection.close()
 
-        self.assertEqual(journal(self.path)[-1], (12, "announcement_wizard"))
+        self.assertEqual(
+            journal(self.path)[-1], (13, "announcement_photos_publication")
+        )
         with self.Session() as session:
             stored_draft = session.get(Draft, draft_id)
             stored_state = session.get(UserState, user.id)
@@ -189,7 +191,7 @@ class Stage22BCompatibilityTests(unittest.TestCase):
             self.assertIsNotNone(session.get(Place, place.id))
 
     def test_migration_seven_is_idempotent_and_sessions_survive_restart(self) -> None:
-        self.assertEqual(run_migrations(self.engine), 12)
+        self.assertEqual(run_migrations(self.engine), 13)
         with self.engine.begin() as connection:
             connection.exec_driver_sql(
                 "INSERT INTO brick_sessions "
@@ -197,9 +199,9 @@ class Stage22BCompatibilityTests(unittest.TestCase):
                 "VALUES (?, ?, '2026-01-01 00:00:00')",
                 (9_440_002, '{"phase":"hub","page":0}'),
             )
-        self.assertEqual(run_migrations(self.engine), 12)
-        self.assertEqual(run_migrations(self.engine), 12)
-        self.assertEqual(len(journal(self.path)), 12)
+        self.assertEqual(run_migrations(self.engine), 13)
+        self.assertEqual(run_migrations(self.engine), 13)
+        self.assertEqual(len(journal(self.path)), 13)
         self.assertEqual(
             scalar(
                 self.path,

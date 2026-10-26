@@ -30,8 +30,8 @@ class BrickManagementSchemaTests(BrickDatabaseTestCase):
             connection.close()
 
     def test_migration_seven_is_latest_and_has_revision_and_sessions(self) -> None:
-        self.assertEqual(LATEST_VERSION, 12)
-        self.assertEqual(self.journal()[-1], (12, "announcement_wizard"))
+        self.assertEqual(LATEST_VERSION, 13)
+        self.assertEqual(self.journal()[-1], (13, "announcement_photos_publication"))
         connection = connect(self.path)
         try:
             brick_columns = {
@@ -118,8 +118,8 @@ class BrickManagementSchemaTests(BrickDatabaseTestCase):
     def test_restart_and_repeated_migration_are_idempotent(self) -> None:
         self.assertEqual(run_migrations(self.engine), LATEST_VERSION)
         self.assertEqual(run_migrations(self.engine), LATEST_VERSION)
-        self.assertEqual(len(self.journal()), 12)
-        self.assertEqual(self.journal()[-1], (12, "announcement_wizard"))
+        self.assertEqual(len(self.journal()), 13)
+        self.assertEqual(self.journal()[-1], (13, "announcement_photos_publication"))
 
 
 if __name__ == "__main__":
