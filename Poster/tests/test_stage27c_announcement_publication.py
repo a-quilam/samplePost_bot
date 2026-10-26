@@ -390,14 +390,22 @@ class AnnouncementPublicationServiceTests(AnnouncementPublicationTestCase):
             draft_id=sent.draft_id,
         )
         self.assertEqual(again.revision, sent.revision)
-        with self.assertRaises(AnnouncementPublicationError):
-            begin_announcement_publication(
-                self.session,
-                actor_telegram_user_id=OWNER_TG,
-                draft_id=sent.draft_id,
-                expected_revision=sent.revision,
-                today=TODAY,
-            )
+        # Stage 28: доставленный анонс можно пересобрать. Прошлые адреса не
+        # теряются — они переносятся в `previous_ids`, а `ids` новой отправки
+        # появится только после её подтверждения.
+        rebuilt = begin_announcement_publication(
+            self.session,
+            actor_telegram_user_id=OWNER_TG,
+            draft_id=sent.draft_id,
+            expected_revision=sent.revision,
+            today=TODAY,
+        )
+        self.assertEqual(rebuilt.draft.publication_status, PUBLICATION_STATUS_SENDING)
+        self.assertIsNone(rebuilt.draft.published_at)
+        self.assertEqual(rebuilt.draft.previous_message_ids, (501,))
+        self.assertEqual(rebuilt.draft.delivered_message_ids, ())
+        self.assertEqual(rebuilt.draft.publication_text, sent.publication_text)
+        self.assertEqual(rebuilt.draft.publication_photos, ())
 
     def test_begin_requires_ready_preview_and_rejects_stale_revision(self) -> None:
         draft = self.start_at_questions()

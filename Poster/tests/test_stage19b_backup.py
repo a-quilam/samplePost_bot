@@ -98,7 +98,7 @@ class MigrationBackupTests(unittest.TestCase):
             )
         self.assertEqual(
             [version for version, _ in journal(self.path)],
-            [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13],
+            [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14],
         )
 
     def test_second_migration_is_backed_up_before_it_runs(self) -> None:
@@ -142,7 +142,7 @@ class MigrationBackupTests(unittest.TestCase):
         )
         self.assertEqual(
             [version for version, _ in journal(self.path)],
-            [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13],
+            [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14],
         )
         self.assertEqual(
             scalar(self.path, "SELECT name FROM place_names WHERE place_id = 7"),
@@ -259,7 +259,7 @@ class MigrationBackupTests(unittest.TestCase):
         run_migrations(restored_engine)
         self.assertEqual(
             [version for version, _ in journal(restored)],
-            [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13],
+            [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14],
         )
         self.assertEqual(len(backups(restored)), 1)
 

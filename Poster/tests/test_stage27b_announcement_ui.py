@@ -215,7 +215,15 @@ async def _choose_personal(h, template_id: int) -> None:
 
 
 async def _preview(h) -> None:
-    await h.callback(_callback(h, "aw_preview"))
+    """
+    Открывает обзор, если он есть.
+
+    Stage 28: последний ответ сразу доставляет анонс, поэтому обзора может
+    уже не быть — тогда экран управления доставкой и есть актуальный экран.
+    """
+    data = _callbacks(h, "aw_preview")
+    if data:
+        await h.callback(data[0])
 
 
 @unittest.skipIf(
@@ -378,14 +386,15 @@ class AnnouncementWizardTemplateTests(unittest.TestCase):
             )
 
         await h.text("Значение")
-        await _preview(h)
-        preview_text = h.screen_text()
-        self.assertIn("СТАРЫЙ ТЕКСТ", preview_text)
-        self.assertNotIn("НОВЫЙ ТЕКСТ", preview_text)
+        # Stage 28: последний ответ сразу доставляет готовый анонс.
+        self.assertIn("Готовый анонс отправлен в этот чат", h.screen_text())
+        delivered = h.posts()[-1] or ""
+        self.assertIn("СТАРЫЙ ТЕКСТ", delivered)
+        self.assertNotIn("НОВЫЙ ТЕКСТ", delivered)
         draft = _draft_by_id(h, draft_id)
         self.assertEqual(draft.template_snapshot_id, snapshot_id)
         self.assertEqual(draft.template_id, owner_tid)
-        self.assertEqual(draft.stage, WizardStage.PREVIEW.value)
+        self.assertEqual(draft.stage, WizardStage.COMPLETED.value)
 
         # Значение привязано к brick_id снимка.
         with h.session_factory() as session:
@@ -476,11 +485,11 @@ class AnnouncementWizardQuestionTests(unittest.TestCase):
         await h.callback(_callback(h, "aw_choice", ":0"))
         await h.callback(_callback(h, "aw_choice", ":1"))
         await h.callback(_callback(h, "aw_choice_done"))
-        self.assertIn("Дополнительные кирпичики", h.screen_text())
-
-        await _preview(h)
-        text = h.screen_text()
-        self.assertIn("Анонс можно передать", text)
+        # Stage 28: последний ответ автоматически доставляет анонс.
+        self.assertIn("Готовый анонс отправлен в этот чат", h.screen_text())
+        posts_after_delivery = h.posts()
+        self.assertEqual(len(posts_after_delivery), 1)
+        text = posts_after_delivery[0] or ""
         self.assertIn("Коротко", text)
         self.assertIn("Длинный текст", text)
         self.assertIn(chosen_day.strftime("%d.%m.%Y"), text)
@@ -489,14 +498,16 @@ class AnnouncementWizardQuestionTests(unittest.TestCase):
         self.assertIn("42", text)
         self.assertIn("Музыка", text)
         self.assertIn("X, Y", text)
-        self.assertTrue(_callbacks(h, "aw_save"))
-        self.assertFalse(_callbacks(h, "finish"))
-        self.assertEqual(h.posts(), [])
+        self.assertTrue(_callbacks(h, "aw_qmanage"))
+        # Финальной кнопки «отправить/сформировать» в доставке нет.
+        self.assertFalse(_callbacks(h, "aw_send"))
+        self.assertFalse(_callbacks(h, "aw_apply"))
 
+        await h.callback(_callback(h, "aw_preview"))
+        self.assertIn("Анонс готов", h.screen_text())
         await h.callback(_callback(h, "aw_save"))
-        self.assertIn("Публикация не выполнялась", h.screen_text())
         self.assertIn("Черновик сохранён", h.screen_text())
-        self.assertEqual(h.posts(), [])
+        self.assertEqual(h.posts(), posts_after_delivery)
 
         draft = _latest_draft(h)
         with h.session_factory() as session:
@@ -519,7 +530,8 @@ class AnnouncementWizardQuestionTests(unittest.TestCase):
         assert isinstance(tags, list)
         self.assertEqual(set(tags), {"X", "Y"})
         self.assertTrue(all(field.status == FIELD_STATUS_VALID for field in fields))
-        self.assertEqual(draft.stage, WizardStage.PREVIEW.value)
+        # Stage 28: последний ответ сразу доставил анонс.
+        self.assertEqual(draft.stage, WizardStage.COMPLETED.value)
 
 
 @unittest.skipIf(
@@ -546,6 +558,11 @@ class AnnouncementWizardExtrasTests(unittest.TestCase):
         await _start_to_template(h, place_id)
         await _choose_personal(h, template_id)
         await h.text("Главное")
+        # Stage 28: последний ответ доставляет анонс, extras — уже после.
+        self.assertEqual(h.dialog_state(name=CONVERSATION_NAME), AW_PREVIEW)
+        self.assertIn("Готовый анонс отправлен в этот чат", h.screen_text())
+        self.assertEqual(len(h.posts()), 1)
+        await h.callback(_callback(h, "aw_extras"))
         self.assertEqual(h.dialog_state(name=CONVERSATION_NAME), AW_EXTRAS)
         self.assertIn("Дополнительных кирпичиков пока нет", h.screen_text())
 
@@ -612,8 +629,13 @@ class AnnouncementWizardExtrasTests(unittest.TestCase):
             )
             self.assertEqual(second.extras, ())
 
+        # Stage 28: правки доп. поля применяются явной кнопкой и заменяют
+        # доставленную версию.
+        await h.callback(_callback(h, "aw_apply"))
+        self.assertIn("Дополнительно", h.posts()[-1] or "")
         await _preview(h)
         self.assertIn("Дополнительно", h.screen_text())
+        await h.callback(_callback(h, "aw_panel"))
         await h.callback(_callback(h, "aw_extras"))
         self.assertIn("Доп 0", h.screen_text())
         await h.callback(_callback(h, "aw_exedit"))
@@ -659,8 +681,7 @@ class AnnouncementWizardPersistenceTests(unittest.TestCase):
         await _start_to_template(h, place_id)
         await _choose_personal(h, template_id)
         await h.text("Исходное")
-        await _preview(h)
-        self.assertIn("Исходное", h.screen_text())
+        self.assertIn("Исходное", h.posts()[-1] or "")
 
         await h.callback(_callback(h, "aw_qmanage"))
         self.assertIn("Поля анонса", h.screen_text())
@@ -672,16 +693,25 @@ class AnnouncementWizardPersistenceTests(unittest.TestCase):
         await h.callback(_callback(h, "aw_qedit"))
         self.assertIn("Текущее значение: Исходное", h.screen_text())
         await h.text("Новое")
-        await _preview(h)
+        # Правка доставленного анонса применяется явной кнопкой.
+        self.assertIn("Применить изменения", str(h.screen_buttons()))
+        await h.callback(_callback(h, "aw_apply"))
+        self.assertIn("Новое", h.posts()[-1] or "")
+
+        # Обзор открывается для проверки и не отправляет ещё одну копию.
+        posts_after_apply = h.posts()
+        await h.callback(_callback(h, "aw_preview"))
         self.assertIn("Новое", h.screen_text())
+        self.assertEqual(h.posts(), posts_after_apply)
 
         await h.callback(_callback(h, "aw_save"))
         self.assertIn("Черновик сохранён", h.screen_text())
-        self.assertEqual(h.posts(), [])
+        posts_after_save = h.posts()
+        self.assertEqual(posts_after_save, posts_after_apply)
         draft = _latest_draft(h)
         draft_id = draft.id
         snapshot_id = draft.template_snapshot_id
-        self.assertEqual(draft.stage, WizardStage.PREVIEW.value)
+        self.assertEqual(draft.stage, WizardStage.COMPLETED.value)
         with h.session_factory() as session:
             snapshots_before = session.scalar(select(func.count(TemplateSnapshot.id)))
 
@@ -691,13 +721,14 @@ class AnnouncementWizardPersistenceTests(unittest.TestCase):
         self.assertIn("Незавершённые анонсы", h.screen_text())
         self.assertIn("Дом культуры", h.screen_text())
         await h.callback(_callback(h, "aw_open", f":{draft_id}"))
-        self.assertIn("Обзор анонса", h.screen_text())
-        self.assertIn("Новое", h.screen_text())
+        self.assertIn("Готовый анонс отправлен в этот чат", h.screen_text())
+        # Повторное открытие не отправляет ещё одну копию.
+        self.assertEqual(h.posts(), posts_after_save)
         self.assertEqual(h.dialog_state(name=CONVERSATION_NAME), AW_PREVIEW)
 
         resumed = _draft_by_id(h, draft_id)
         self.assertEqual(resumed.template_snapshot_id, snapshot_id)
-        self.assertEqual(resumed.stage, WizardStage.PREVIEW.value)
+        self.assertEqual(resumed.stage, WizardStage.COMPLETED.value)
         with h.session_factory() as session:
             snapshots_after = session.scalar(select(func.count(TemplateSnapshot.id)))
         self.assertEqual(snapshots_after, snapshots_before)
@@ -706,7 +737,8 @@ class AnnouncementWizardPersistenceTests(unittest.TestCase):
         await h.callback("main_menu")
         self.assertIsNone(h.dialog_state(name=CONVERSATION_NAME))
         self.assertIsNotNone(_draft_by_id(h, draft_id))
-        self.assertEqual(h.posts(), [])
+        # Выход в меню не отправляет и не удаляет доставленный анонс.
+        self.assertEqual(h.posts(), posts_after_save)
 
     @scenario_test
     async def test_long_preview_is_truncated_but_sqlite_keeps_full_value(
@@ -724,6 +756,7 @@ class AnnouncementWizardPersistenceTests(unittest.TestCase):
         await _start_to_template(h, place_id)
         await _choose_personal(h, template_id)
         await h.text(long_value)
+        self.assertIn("Готовый анонс отправлен в этот чат", h.screen_text())
         await _preview(h)
         self.assertIn("Предпросмотр сокращён", h.screen_text())
         self.assertIn("Полные данные сохранены", h.screen_text())
@@ -753,13 +786,17 @@ class AnnouncementWizardSafetyTests(unittest.TestCase):
         await _choose_personal(h, template_id)
         stale_skip = _callback(h, "aw_qskip")
         await h.text("Значение")
-        self.assertEqual(h.dialog_state(name=CONVERSATION_NAME), AW_EXTRAS)
+        self.assertEqual(h.dialog_state(name=CONVERSATION_NAME), AW_PREVIEW)
+        self.assertEqual(len(h.posts()), 1)
         draft = _latest_draft(h)
         revision_after_save = draft.revision
 
         await h.callback(stale_skip)
         self.assertIn("Экран устарел", h.screen_text())
-        self.assertIn("Дополнительные кирпичики", h.screen_text())
+        self.assertIn(
+            "➕ Дополнительные кирпичики",
+            [label for label, _data in h.screen_buttons()],
+        )
         with h.session_factory() as session:
             fields = build_announcement_fields(
                 session,
@@ -828,10 +865,11 @@ class AnnouncementWizardSafetyTests(unittest.TestCase):
         self.assertIn("Черновик сохранён, данные не потеряны", h.screen_text())
         self.assertIn("Обновить", h.screen_text() + str(h.screen_buttons()))
         draft = _latest_draft(h)
-        self.assertEqual(draft.stage, WizardStage.PREVIEW.value)
+        # Анонс уже доставлен: сбой пересборки не откатывает готовый статус.
+        self.assertEqual(draft.stage, WizardStage.COMPLETED.value)
         self.assertIsNotNone(draft.template_snapshot_id)
 
-        retry = _callback(h, "aw_preview")
+        retry = _callback(h, "aw_apply")
         self.assertIn(f":{draft.id}:{draft.revision}", retry)
         await h.callback(retry)
         self.assertIn("Не удалось собрать", h.screen_text())
@@ -883,13 +921,24 @@ class AnnouncementWizardStandardTemplateTests(unittest.TestCase):
             self.assertIn("Вопрос", h.screen_text())
             self.assertIn("Пропустить", str(h.screen_buttons()))
             await h.callback(_callback(h, "aw_qskip"))
-        self.assertIn("Дополнительные кирпичики", h.screen_text())
 
-        await _preview(h)
-        text = h.screen_text()
+        # Последний пропуск — последний шаг: анонс уходит автоматически.
+        self.assertIn("Готовый анонс отправлен в этот чат", h.screen_text())
+        posts = h.posts()
+        self.assertEqual(len(posts), 1)
+        text = posts[0] or ""
         self.assertIn("Дом культуры", text)
         self.assertIn("ул. Тестовая, 1", text)
         self.assertIn("https://example.com/place", text)
-        self.assertIn("из справочника", text)
-        self.assertIn("Анонс можно передать", text)
-        self.assertEqual(h.posts(), [])
+        with h.session_factory() as session:
+            stored = get_announcement_draft(
+                session,
+                actor_telegram_user_id=DEFAULT_USER_ID,
+                draft_id=_latest_draft(h).id,
+            )
+        self.assertIn("Дом культуры", stored.publication_text or "")
+        self.assertNotIn("[", stored.publication_text or "")
+        self.assertEqual(stored.publication_status, "sent")
+        # «Из справочника» — пометка обзора, а не текст анонса.
+        await _preview(h)
+        self.assertIn("из справочника", h.screen_text())

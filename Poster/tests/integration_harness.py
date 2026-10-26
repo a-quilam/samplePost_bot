@@ -260,6 +260,7 @@ def make_text_update(
     update_id: int = 1,
     message_id: int = 1,
     entities: list[MessageEntity] | None = None,
+    chat_type: str = "private",
 ) -> Update:
     """
     Текстовое сообщение.
@@ -282,7 +283,7 @@ def make_text_update(
     message = Message(
         message_id=message_id,
         date=FIXTURE_DATE,
-        chat=Chat(id=chat_id, type="private"),
+        chat=Chat(id=chat_id, type=chat_type),
         from_user=User(id=user_id, first_name="Тест", is_bot=False),
         text=text,
         entities=entities,
@@ -297,13 +298,14 @@ def make_callback_update(
     user_id: int = DEFAULT_USER_ID,
     update_id: int = 2,
     message_id: int = 2,
+    chat_type: str = "private",
 ) -> Update:
     """Нажатие inline-кнопки (сообщение бота как контекст callback'а)."""
     user = User(id=user_id, first_name="Тест", is_bot=False)
     message = Message(
         message_id=message_id,
         date=FIXTURE_DATE,
-        chat=Chat(id=chat_id, type="private"),
+        chat=Chat(id=chat_id, type=chat_type),
         from_user=user,
         text=None,
     )
@@ -325,12 +327,13 @@ def make_photo_update(
     user_id: int = DEFAULT_USER_ID,
     update_id: int = 3,
     message_id: int = 3,
+    chat_type: str = "private",
 ) -> Update:
     """Фото-сообщение (опционально — часть альбома)."""
     message = Message(
         message_id=message_id,
         date=FIXTURE_DATE,
-        chat=Chat(id=chat_id, type="private"),
+        chat=Chat(id=chat_id, type=chat_type),
         from_user=User(id=user_id, first_name="Тест", is_bot=False),
         photo=[
             PhotoSize(
@@ -563,6 +566,7 @@ class Harness:
         user_id: int | None = None,
         entities: list[MessageEntity] | None = None,
         message_id: int | None = None,
+        chat_type: str = "private",
     ) -> Update:
         self._update_seq += 1
         return await self.feed(
@@ -575,6 +579,7 @@ class Harness:
                     message_id if message_id is not None else self._next_user_msg_id()
                 ),
                 entities=entities,
+                chat_type=chat_type,
             )
         )
 
@@ -585,6 +590,7 @@ class Harness:
         chat_id: int | None = None,
         user_id: int | None = None,
         message_id: int | None = None,
+        chat_type: str = "private",
     ) -> Update:
         self._update_seq += 1
         return await self.feed(
@@ -594,6 +600,7 @@ class Harness:
                 user_id=user_id if user_id is not None else self.user_id,
                 update_id=self._update_seq,
                 message_id=message_id if message_id is not None else 2,
+                chat_type=chat_type,
             )
         )
 

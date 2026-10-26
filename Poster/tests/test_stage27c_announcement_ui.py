@@ -1,10 +1,12 @@
 # tests/test_stage27c_announcement_ui.py
 """
-Stage 27C: сквозные сценарии фото и публикации адаптивного мастера.
+Stage 28: сквозные сценарии автоматической выдачи анонса и его замены.
 
 Все Update проходят через настоящее приложение/FakeBot, БД временная.
 Проверяются оба вида шаблонов, 0/1/много фото, рестарт, двойной callback,
-сбой API, частичная отправка, продолжение и защита от дублей.
+сбой API, частичная отправка, продолжение, замена прошлой версии и защита
+от дублей. Публикация в каналы не используется: готовый анонс приходит
+только в личный чат автора.
 """
 
 from __future__ import annotations
@@ -21,8 +23,8 @@ try:
         get_announcement_draft,
     )
     from announcement_wizard import WizardStage
-    from handlers.announcement_wizard import AW_PREVIEW, CONVERSATION_NAME
-    from models import AnnouncementDraft, User
+    from handlers.announcement_wizard import AW_EXTRAS, AW_PREVIEW, CONVERSATION_NAME
+    from models import User
     from template_store import get_standard_template
     from tests.integration_harness import (
         DEFAULT_USER_ID,
@@ -36,7 +38,6 @@ try:
         _choose_personal,
         _draft_by_id,
         _latest_draft,
-        _preview,
         _seed_personal_template,
         _seed_place,
         _start_to_template,
@@ -47,12 +48,13 @@ except Exception as exc:  # noqa: BLE001 — причина попадает в 
     INTEGRATION_IMPORT_ERROR = str(exc)
 
 
-async def _personal_preview(
+async def _personal_delivered(
     h,
     *,
     body: str | None = None,
     specs: list[tuple[str, str, str, dict[str, object]]] | None = None,
 ):
+    """Личный шаблон: последний ответ сразу доставляет анонс в этот чат."""
     place_id, _alias_id = _seed_place(h)
     template_id, _revision, bricks = _seed_personal_template(
         h,
@@ -62,12 +64,14 @@ async def _personal_preview(
     await _start_to_template(h, place_id)
     await _choose_personal(h, template_id)
     await h.text("Значение")
-    await _preview(h)
+    if "Готовый анонс отправлен в этот чат" not in h.screen_text():
+        raise AssertionError(f"Анонс не доставлен: {h.screen_text()}")
     draft = _latest_draft(h)
     return draft, bricks
 
 
-async def _standard_preview(h):
+async def _standard_delivered(h):
+    """Стандартный шаблон места: пропуск последнего вопроса доставляет."""
     place_id, _alias_id = _seed_place(h)
     with h.session_factory() as session:
         standard_id = get_standard_template(
@@ -80,7 +84,8 @@ async def _standard_preview(h):
         if not skips:
             break
         await h.callback(skips[0])
-    await _preview(h)
+    if "Готовый анонс отправлен в этот чат" not in h.screen_text():
+        raise AssertionError(f"Анонс не доставлен: {h.screen_text()}")
     return _latest_draft(h)
 
 
@@ -94,68 +99,79 @@ def _post_types(h, types: set[str]) -> list[dict]:
     return [call for call in h.calls if call["type"] in types]
 
 
+def _stored(h, draft_id: int):
+    with h.session_factory() as session:
+        return get_announcement_draft(
+            session,
+            actor_telegram_user_id=DEFAULT_USER_ID,
+            draft_id=draft_id,
+        )
+
+
 @unittest.skipIf(
     INTEGRATION_IMPORT_ERROR is not None,
     f"интеграционное окружение недоступно: {INTEGRATION_IMPORT_ERROR}",
 )
-class AnnouncementPublicationStandardTests(unittest.TestCase):
+class AnnouncementAutoDeliveryStandardTests(unittest.TestCase):
     @scenario_test
-    async def test_standard_zero_photos_success_and_repeated_confirm(self, h) -> None:
+    async def test_standard_zero_photos_delivered_by_last_skip(self, h) -> None:
         await h.text("/start")
-        draft = await _standard_preview(h)
-        self.assertIn("Фотографии: 0", h.screen_text())
-        self.assertTrue(_callbacks(h, "aw_pub_start"))
-        self.assertEqual(h.post_records(), [])
+        draft = await _standard_delivered(h)
 
-        await h.callback(_callback(h, "aw_pub_start"))
-        self.assertIn("Публикация анонса", h.screen_text())
-        self.assertIn("Вложений: 0", h.screen_text())
-        confirm_data = _callback(h, "aw_pub_confirm")
-        posts_before = len(h.post_records())
-        await h.callback(confirm_data)
+        # Финальной кнопки нет: доставка произошла последним ответом.
+        self.assertFalse(_callbacks(h, "aw_pub_start"))
+        self.assertFalse(_callbacks(h, "aw_pub_confirm"))
+        self.assertFalse(_callbacks(h, "aw_send"))
+        self.assertEqual(h.dialog_state(name=CONVERSATION_NAME), AW_PREVIEW)
 
-        with h.session_factory() as session:
-            stored = get_announcement_draft(
-                session,
-                actor_telegram_user_id=DEFAULT_USER_ID,
-                draft_id=draft.id,
-            )
+        posts = h.posts()
+        self.assertEqual(len(posts), 1)
+        self.assertIn("Дом культуры", posts[0] or "")
+        self.assertIn("ул. Тестовая, 1", posts[0] or "")
+
+        stored = _stored(h, draft.id)
         self.assertEqual(stored.publication_status, "sent")
         self.assertEqual(stored.stage, WizardStage.COMPLETED)
         self.assertIsNotNone(stored.published_at)
         self.assertEqual(stored.publication_photos, ())
         self.assertIn("Дом культуры", stored.publication_text or "")
-        self.assertNotIn("[фото]", stored.publication_text or "")
-        self.assertIn("Анонс опубликован", h.screen_text())
-        self.assertEqual(len(h.post_records()), posts_before + 1)
-        self.assertIn("Дом культуры", h.posts()[-1] or "")
+        self.assertNotIn("[", stored.publication_text or "")
+        self.assertTrue(stored.delivered_message_ids)
+        self.assertTrue(stored.delivery_fingerprint)
 
-        # Старый callback подтверждения не публикует второй раз.
-        published_at = stored.published_at
-        posts_after_success = len(h.post_records())
-        await h.callback(confirm_data)
-        self.assertEqual(len(h.post_records()), posts_after_success)
-        with h.session_factory() as session:
-            again = get_announcement_draft(
-                session,
-                actor_telegram_user_id=DEFAULT_USER_ID,
-                draft_id=draft.id,
-            )
-        self.assertEqual(again.published_at, published_at)
-        self.assertEqual(again.publication_status, "sent")
+        # Кнопки управления — в отдельном сообщении, а не в тексте анонса.
+        self.assertIn("Готовый анонс отправлен в этот чат", h.screen_text())
+        from tests.integration_harness import is_post_message, is_screen_record
+
+        post_records = [call for call in h.calls if is_post_message(call)]
+        screen_records = [call for call in h.calls if is_screen_record(call)]
+        self.assertEqual(len(post_records), 1)
+        # Пост отправлен отдельным сообщением, без клавиатуры управления.
+        self.assertIsNone(post_records[0].get("reply_markup"))
+        self.assertTrue(screen_records)
+        self.assertNotEqual((post_records[0].get("text") or ""), h.screen_text())
+
+        # Старый callback подтверждения больше не существует и не отправляет.
+        posts_after = len(h.post_records())
+        await h.callback(f"aw_pub_confirm:{draft.id}:{draft.revision}")
+        self.assertEqual(len(h.post_records()), posts_after)
+        self.assertEqual(_stored(h, draft.id).published_at, stored.published_at)
 
 
 @unittest.skipIf(
     INTEGRATION_IMPORT_ERROR is not None,
     f"интеграционное окружение недоступно: {INTEGRATION_IMPORT_ERROR}",
 )
-class AnnouncementPublicationPhotoTests(unittest.TestCase):
+class AnnouncementAutoDeliveryPhotoTests(unittest.TestCase):
     @scenario_test
-    async def test_photos_view_replace_restart_and_publish(self, h) -> None:
+    async def test_photos_view_replace_restart_and_deliver(self, h) -> None:
         await h.text("/start")
-        draft, _bricks = await _personal_preview(h)
-        self.assertEqual(h.post_records(), [])
+        draft, _bricks = await _personal_delivered(h)
+        self.assertEqual(len(h.posts()), 1)
+        first_delivery_ids = set(_stored(h, draft.id).delivered_message_ids)
+        self.assertTrue(first_delivery_ids)
 
+        # Фото добавляются уже после доставки: сама доставка не повторяется.
         await _open_photos(h)
         first_update = await h.photo("photo-1", media_group_id="album-1")
         await h.photo("photo-2", media_group_id="album-1")
@@ -168,6 +184,8 @@ class AnnouncementPublicationPhotoTests(unittest.TestCase):
             if call["type"] == "delete_message" and len(call["args"]) > 1
         ]
         self.assertIn(first_update.message.message_id, deleted_inputs)
+        # Добавление фото не отправляет новую версию само по себе.
+        self.assertEqual(len(h.posts()), 1)
 
         # Повторный Update того же file_id не создаёт второе вложение.
         await h.photo("photo-1")
@@ -175,14 +193,15 @@ class AnnouncementPublicationPhotoTests(unittest.TestCase):
         self.assertEqual(duplicate.revision, revision)
         self.assertEqual(tuple(json.loads(duplicate.photos)), ("photo-1", "photo-2"))
 
-        # Рестарт теряет user_data, но фото и анонс остаются в SQLite.
+        # Рестарт теряет user_data, но фото и доставка остаются в SQLite.
         await h.restart()
         await h.text("/start")
         await h.callback("aw_start")
         await h.callback(_callback(h, "aw_open", f":{draft.id}"))
-        self.assertIn("Обзор анонса", h.screen_text())
-        self.assertIn("Фотографии: 2", h.screen_text())
+        self.assertIn("Готовый анонс отправлен в этот чат", h.screen_text())
+        self.assertIn("Сейчас в черновике фотографий: 2", h.screen_text())
         self.assertEqual(h.dialog_state(name=CONVERSATION_NAME), AW_PREVIEW)
+        self.assertEqual(len(h.posts()), 1)
 
         # Удаление одного фото и добавление нового — замена без фото-кирпичиков.
         await _open_photos(h)
@@ -193,84 +212,71 @@ class AnnouncementPublicationPhotoTests(unittest.TestCase):
         after_add = _draft_by_id(h, draft.id)
         self.assertEqual(tuple(json.loads(after_add.photos)), ("photo-2", "photo-3"))
 
-        # Реальный предпросмотр вложений идёт тем же отправителем.
-        await h.callback(_callback(h, "aw_photo_show"))
-        self.assertIn("временный предпросмотр", h.screen_text())
-        preview_ids = list(h.user_data().get("preview_messages") or [])
-        self.assertTrue(preview_ids)
-        self.assertTrue(any(c["type"] == "media_group" for c in h.calls))
+        # Правки применяются явной кнопкой: новая версия заменяет прошлую.
+        await h.callback(_callback(h, "aw_apply"))
+        posts_after_edit = h.posts()
+        self.assertEqual(len(posts_after_edit), 2)
+        self.assertEqual(
+            [
+                getattr(item, "media", None)
+                for item in _post_types(h, {"media_group"})[0]["media"]
+            ],
+            ["photo-2", "photo-3"],
+        )
 
-        await h.callback(_callback(h, "aw_preview"))
-        await h.callback(_callback(h, "aw_pub_start"))
-        confirm_data = _callback(h, "aw_pub_confirm")
-        posts_before = len(h.post_records())
-        await h.callback(confirm_data)
-
-        with h.session_factory() as session:
-            sent = get_announcement_draft(
-                session,
-                actor_telegram_user_id=DEFAULT_USER_ID,
-                draft_id=draft.id,
-            )
+        sent = _stored(h, draft.id)
         self.assertEqual(sent.publication_status, "sent")
         self.assertEqual(sent.publication_photos, ("photo-2", "photo-3"))
         self.assertEqual(sent.photos, ("photo-2", "photo-3"))
         self.assertIn("Значение", sent.publication_text or "")
         self.assertNotIn("[фото]", sent.publication_text or "")
-        new_posts = h.post_records()[posts_before:]
-        self.assertEqual(len(new_posts), 1)
-        self.assertEqual(new_posts[0]["type"], "media_group")
-        self.assertEqual(
-            [getattr(item, "media", None) for item in new_posts[0]["media"]],
-            ["photo-2", "photo-3"],
-        )
-        self.assertIn("Значение", h.posts()[-1] or "")
-        deleted = [call for call in h.calls if call["type"] == "delete_message"]
-        self.assertTrue(
-            all(any(pid in call["args"] for call in deleted) for pid in preview_ids)
-        )
+        new_ids = set(sent.delivered_message_ids)
+        self.assertTrue(new_ids)
+        # id прошлой версии не смешиваются с id текущей доставки.
+        self.assertFalse(new_ids & first_delivery_ids)
+        self.assertEqual(set(sent.previous_message_ids), first_delivery_ids)
+        # Прошлая версия удалена только после успешной доставки новой.
+        self.assertTrue(first_delivery_ids <= set(h.deleted_ids()))
 
-        # Повторное подтверждение после успеха не отправляет снова.
-        posts_after = len(h.post_records())
-        await h.callback(confirm_data)
-        self.assertEqual(len(h.post_records()), posts_after)
+        # Повторное применение без изменений не создаёт дубль: кнопки
+        # применения нет, экран прямо сообщает, что версия уже отправлена.
+        posts_before = len(h.posts())
+        self.assertEqual(_callbacks(h, "aw_apply"), [])
+        await h.callback(_callback(h, "aw_preview"))
+        await h.callback(_callback(h, "aw_panel"))
+        self.assertEqual(len(h.posts()), posts_before)
 
     @scenario_test
     async def test_single_photo_caption_failure_is_partial_and_resumes(self, h) -> None:
         await h.text("/start")
         long_body = ("Длинный текст анонса " * 150) + "[main]"
-        draft, _bricks = await _personal_preview(h, body=long_body)
+        draft, _bricks = await _personal_delivered(h, body=long_body)
         await _open_photos(h)
         await h.photo("long-photo")
-        await h.callback(_callback(h, "aw_preview"))
 
         h.bot.fail_after["message"] = 0
-        await h.callback(_callback(h, "aw_pub_start"))
-        confirm_data = _callback(h, "aw_pub_confirm")
-        await h.callback(confirm_data)
+        await h.callback(_callback(h, "aw_apply"))
 
-        with h.session_factory() as session:
-            partial = get_announcement_draft(
-                session,
-                actor_telegram_user_id=DEFAULT_USER_ID,
-                draft_id=draft.id,
-            )
+        partial = _stored(h, draft.id)
         self.assertEqual(partial.publication_status, "partial")
         self.assertEqual(partial.publication_step, 1)
         self.assertEqual(len(partial.publication_progress["ids"]), 1)
         self.assertFalse(partial.publication_can_reset)
         self.assertIn("отправлен частично", h.screen_text())
         self.assertFalse(_callbacks(h, "aw_pub_reset"))
+        # Прошлая доставленная версия остаётся в чате до успеха новой:
+        # её адреса сохранены, но не выдаются за id текущей отправки.
+        self.assertTrue(partial.previous_message_ids)
+        self.assertNotEqual(
+            set(partial.previous_message_ids),
+            set(partial.publication_progress["ids"]),
+        )
+        self.assertIn("В чате остаётся прошлая доставленная версия", h.screen_text())
 
         h.bot.fail_after.clear()
         photos_before = len(_post_types(h, {"photo"}))
         await h.callback(_callback(h, "aw_pub_resume"))
-        with h.session_factory() as session:
-            sent = get_announcement_draft(
-                session,
-                actor_telegram_user_id=DEFAULT_USER_ID,
-                draft_id=draft.id,
-            )
+        sent = _stored(h, draft.id)
         self.assertEqual(sent.publication_status, "sent")
         # Фото из подтверждённого шага не отправлялось второй раз.
         self.assertEqual(len(_post_types(h, {"photo"})), photos_before)
@@ -279,28 +285,16 @@ class AnnouncementPublicationPhotoTests(unittest.TestCase):
     @scenario_test
     async def test_eleven_photos_use_two_groups_and_partial_resume(self, h) -> None:
         await h.text("/start")
-        draft, _bricks = await _personal_preview(h)
+        draft, _bricks = await _personal_delivered(h)
         await _open_photos(h)
         for index in range(11):
             await h.photo(f"group-photo-{index}")
-        await h.callback(_callback(h, "aw_preview"))
-        with h.session_factory() as session:
-            stored = get_announcement_draft(
-                session,
-                actor_telegram_user_id=DEFAULT_USER_ID,
-                draft_id=draft.id,
-            )
-        self.assertEqual(len(stored.photos), 11)
+        stored = _draft_by_id(h, draft.id)
+        self.assertEqual(len(json.loads(stored.photos)), 11)
 
         h.bot.fail_after["media_group"] = 1
-        await h.callback(_callback(h, "aw_pub_start"))
-        await h.callback(_callback(h, "aw_pub_confirm"))
-        with h.session_factory() as session:
-            partial = get_announcement_draft(
-                session,
-                actor_telegram_user_id=DEFAULT_USER_ID,
-                draft_id=draft.id,
-            )
+        await h.callback(_callback(h, "aw_apply"))
+        partial = _stored(h, draft.id)
         self.assertEqual(partial.publication_status, "partial")
         self.assertEqual(partial.publication_step, 1)
         self.assertEqual(partial.publication_total, 2)
@@ -308,15 +302,11 @@ class AnnouncementPublicationPhotoTests(unittest.TestCase):
 
         h.bot.fail_after.clear()
         await h.callback(_callback(h, "aw_pub_resume"))
-        with h.session_factory() as session:
-            sent = get_announcement_draft(
-                session,
-                actor_telegram_user_id=DEFAULT_USER_ID,
-                draft_id=draft.id,
-            )
+        sent = _stored(h, draft.id)
         self.assertEqual(sent.publication_status, "sent")
         groups = _post_types(h, {"media_group"})
-        # Одна группа до сбоя и одна после resume; первая не повторялась.
+        # Одна группа до сбоя и одна после resume: первая не повторялась,
+        # 11 фото укладываются ровно в 2 группы (10 + 1).
         self.assertEqual(len(groups), 2)
         self.assertEqual(
             [getattr(item, "media", None) for item in groups[0]["media"]],
@@ -332,55 +322,50 @@ class AnnouncementPublicationPhotoTests(unittest.TestCase):
     INTEGRATION_IMPORT_ERROR is not None,
     f"интеграционное окружение недоступно: {INTEGRATION_IMPORT_ERROR}",
 )
-class AnnouncementPublicationFailureTests(unittest.TestCase):
+class AnnouncementAutoDeliveryFailureTests(unittest.TestCase):
     @scenario_test
-    async def test_failed_before_first_operation_can_return_to_editing(self, h) -> None:
+    async def test_failed_first_delivery_keeps_data_and_allows_retry(self, h) -> None:
         await h.text("/start")
-        draft, _bricks = await _personal_preview(h)
-        h.bot.fail_after["message"] = 0
-        await h.callback(_callback(h, "aw_pub_start"))
-        await h.callback(_callback(h, "aw_pub_confirm"))
+        place_id, _alias_id = _seed_place(h)
+        template_id, _revision, _bricks = _seed_personal_template(h)
+        await _start_to_template(h, place_id)
+        await _choose_personal(h, template_id)
 
-        with h.session_factory() as session:
-            failed = get_announcement_draft(
-                session,
-                actor_telegram_user_id=DEFAULT_USER_ID,
-                draft_id=draft.id,
-            )
+        # Сбой Telegram на самой первой отправке: данные и черновик целы.
+        h.bot.fail_after["message"] = 0
+        await h.text("Значение")
+
+        draft = _latest_draft(h)
+        failed = _stored(h, draft.id)
         self.assertEqual(failed.publication_status, "failed")
         self.assertEqual(failed.publication_step, 0)
         self.assertTrue(failed.publication_can_reset)
         self.assertIn("Ни одна операция", h.screen_text())
         self.assertTrue(_callbacks(h, "aw_pub_reset"))
+        self.assertEqual(h.posts(), [])
 
         await h.callback(_callback(h, "aw_pub_reset"))
-        with h.session_factory() as session:
-            reset = get_announcement_draft(
-                session,
-                actor_telegram_user_id=DEFAULT_USER_ID,
-                draft_id=draft.id,
-            )
+        reset = _stored(h, draft.id)
         self.assertIsNone(reset.publication_status)
         self.assertIn("Обзор анонса", h.screen_text())
-        self.assertIn("можно изменить", h.screen_text())
-        self.assertTrue(_callbacks(h, "aw_pub_start"))
+        self.assertIn("Значение", h.screen_text())
+        self.assertTrue(_callbacks(h, "aw_send"))
+        # Значение не потеряно: данные остались в черновике.
+        self.assertIsNone(reset.publication_text)
+        self.assertIn("Основное поле", h.screen_text())
 
+        # Повтор — только явным действием автора, без автоматического ретрая.
         h.bot.fail_after.clear()
-        await h.callback(_callback(h, "aw_pub_start"))
-        await h.callback(_callback(h, "aw_pub_confirm"))
-        with h.session_factory() as session:
-            sent = get_announcement_draft(
-                session,
-                actor_telegram_user_id=DEFAULT_USER_ID,
-                draft_id=draft.id,
-            )
+        await h.callback(_callback(h, "aw_send"))
+        sent = _stored(h, draft.id)
         self.assertEqual(sent.publication_status, "sent")
-        self.assertIn("Анонс опубликован", h.screen_text())
+        self.assertIn("Готовый анонс отправлен в этот чат", h.screen_text())
+        self.assertEqual(len(h.post_records()), 1)
 
     @scenario_test
     async def test_restart_during_sending_resumes_frozen_payload(self, h) -> None:
         await h.text("/start")
-        draft, _bricks = await _personal_preview(h)
+        draft, _bricks = await _personal_delivered(h)
         with h.session_factory() as session:
             details = get_announcement_draft(
                 session,
@@ -404,21 +389,19 @@ class AnnouncementPublicationFailureTests(unittest.TestCase):
         self.assertFalse(_callbacks(h, "aw_pub_start"))
 
         await h.callback(_callback(h, "aw_pub_resume"))
-        with h.session_factory() as session:
-            sent = get_announcement_draft(
-                session,
-                actor_telegram_user_id=DEFAULT_USER_ID,
-                draft_id=draft.id,
-            )
+        sent = _stored(h, draft.id)
         self.assertEqual(sent.publication_status, "sent")
-        self.assertIn("Анонс опубликован", h.screen_text())
+        self.assertIn("Готовый анонс отправлен в этот чат", h.screen_text())
 
     @scenario_test
-    async def test_foreign_callback_cannot_start_or_publish(self, h) -> None:
+    async def test_foreign_callback_cannot_deliver(self, h) -> None:
         await h.text("/start")
-        draft, _bricks = await _personal_preview(h)
-        await h.callback(_callback(h, "aw_pub_start"))
-        confirm_data = _callback(h, "aw_pub_confirm")
+        draft, _bricks = await _personal_delivered(h)
+        await h.callback(_callback(h, "aw_qmanage"))
+        await h.callback(_callback(h, "aw_qgoto"))
+        await h.callback(_callback(h, "aw_qedit"))
+        await h.text("Чужое изменение")
+        send_data = _callback(h, "aw_apply")
 
         with h.session_factory() as session:
             other = session.scalar(
@@ -427,16 +410,189 @@ class AnnouncementPublicationFailureTests(unittest.TestCase):
             if other is None:
                 other = User(
                     telegram_user_id=OTHER_TG,
-                    username="foreign-stage27c",
+                    username="foreign-stage28",
                     full_name="Чужой",
                 )
                 session.add(other)
                 session.commit()
 
         posts_before = len(h.post_records())
-        await h.callback(confirm_data, user_id=OTHER_TG)
+        await h.callback(send_data, user_id=OTHER_TG)
         self.assertEqual(len(h.post_records()), posts_before)
-        with h.session_factory() as session:
-            stored = session.get(AnnouncementDraft, draft.id)
+        stored = _stored(h, draft.id)
+        self.assertEqual(stored.publication_status, "sent")
+        self.assertEqual(len(stored.delivered_message_ids), 1)
+
+    @scenario_test
+    async def test_group_chat_never_receives_auto_delivery(self, h) -> None:
+        """Мастер можно открыть в группе, но анонс туда не уходит."""
+        group_id = 900_001
+        await h.text("/start")
+        place_id, _alias_id = _seed_place(h)
+        template_id, _revision, _bricks = _seed_personal_template(h)
+
+        # Весь сбор идёт в групповом чате.
+        await h.callback("aw_start", chat_id=group_id, chat_type="group")
+        await h.callback("aw_place_search", chat_id=group_id, chat_type="group")
+        await h.text("Дом", chat_id=group_id, chat_type="group")
+        await h.callback(
+            f"aw_place_open:{place_id}", chat_id=group_id, chat_type="group"
+        )
+        await h.callback(
+            _callback(h, "aw_place_confirm"), chat_id=group_id, chat_type="group"
+        )
+        await h.callback(
+            _callback(h, "aw_template", f":{template_id}"),
+            chat_id=group_id,
+            chat_type="group",
+        )
+        await h.text("Секретное значение", chat_id=group_id, chat_type="group")
+
+        # Ни одного поста: отказ до вызова Telegram.
+        self.assertEqual(h.posts(), [])
+        self.assertIn("только в личный чат", h.screen_text())
+        draft = _latest_draft(h)
+        stored = _stored(h, draft.id)
         self.assertIsNone(stored.publication_status)
-        self.assertNotEqual(stored.stage, WizardStage.COMPLETED)
+        self.assertFalse(stored.delivered_message_ids)
+
+        # Тот же черновик завершается в личном чате — там доставка проходит.
+        await h.text("/start")
+        await h.callback("aw_start")
+        await h.callback(_callback(h, "aw_open", f":{draft.id}"))
+        await h.callback(_callback(h, "aw_send"))
+        self.assertEqual(len(h.posts()), 1)
+        self.assertIn("Секретное значение", h.posts()[0] or "")
+        self.assertTrue(_stored(h, draft.id).delivered_message_ids)
+
+
+@unittest.skipIf(
+    INTEGRATION_IMPORT_ERROR is not None,
+    f"интеграционное окружение недоступно: {INTEGRATION_IMPORT_ERROR}",
+)
+class AnnouncementRedeliveryTests(unittest.TestCase):
+    @scenario_test
+    async def test_edit_rebuild_keeps_old_version_until_new_success(self, h) -> None:
+        """Успешная правка: новое сообщение выше, прошлое удалено после."""
+        await h.text("/start")
+        draft, _bricks = await _personal_delivered(h)
+        first = _stored(h, draft.id)
+        first_ids = tuple(first.delivered_message_ids)
+        first_fingerprint = first.delivery_fingerprint
+        self.assertEqual(len(h.posts()), 1)
+
+        # Меняем значение через управление полями.
+        await h.callback(_callback(h, "aw_qmanage"))
+        await h.callback(_callback(h, "aw_qgoto"))
+        await h.callback(_callback(h, "aw_qedit"))
+        await h.text("Обновлённое")
+
+        # Ответ на правку не отправляет сам: нужна явная кнопка применения.
+        self.assertEqual(len(h.posts()), 1)
+        self.assertIn("Применить изменения", str(h.screen_buttons()))
+
+        # Пересборка доставленной версии — не «возобновление изменившегося
+        # поста»: ложного предупреждения о сбросе прогресса быть не должно.
+        with self.assertNoLogs("handlers.post_creation", level="WARNING"):
+            await h.callback(_callback(h, "aw_apply"))
+        posts = h.posts()
+        self.assertEqual(len(posts), 2)
+        self.assertIn("Обновлённое", posts[-1] or "")
+
+        second = _stored(h, draft.id)
+        second_ids = tuple(second.delivered_message_ids)
+        self.assertTrue(second_ids)
+        self.assertFalse(set(second_ids) & set(first_ids))
+        # Прошлые адреса сохранены отдельно и не выдаются за текущие.
+        self.assertEqual(tuple(second.previous_message_ids), first_ids)
+        self.assertNotEqual(second.delivery_fingerprint, first_fingerprint)
+        # Удаление прошлой версии произошло только после успеха новой.
+        self.assertTrue(set(first_ids) <= set(h.deleted_ids()))
+
+        # Ещё одна правка заменяет уже вторую версию, а не первую.
+        await h.callback(_callback(h, "aw_qmanage"))
+        await h.callback(_callback(h, "aw_qgoto"))
+        await h.callback(_callback(h, "aw_qedit"))
+        await h.text("Третье")
+        await h.callback(_callback(h, "aw_apply"))
+        third = _stored(h, draft.id)
+        self.assertEqual(tuple(third.previous_message_ids), second_ids)
+        self.assertIn("Третье", h.posts()[-1] or "")
+        self.assertEqual(len(h.posts()), 3)
+
+    @scenario_test
+    async def test_deletion_failure_of_old_version_keeps_new_one_available(
+        self, h
+    ) -> None:
+        """Telegram не удаляет сообщения старше 48 часов — это не сбой."""
+        await h.text("/start")
+        draft, _bricks = await _personal_delivered(h)
+        first_ids = tuple(_stored(h, draft.id).delivered_message_ids)
+
+        from telegram.error import BadRequest
+
+        h.bot.errors_by_type["delete_message"] = BadRequest(
+            "Message can't be deleted for everyone"
+        )
+        await h.callback(_callback(h, "aw_qmanage"))
+        await h.callback(_callback(h, "aw_qgoto"))
+        await h.callback(_callback(h, "aw_qedit"))
+        await h.text("Новая версия")
+        await h.callback(_callback(h, "aw_apply"))
+
+        # Неудача удаления не откатывает успешную доставку: новая версия есть,
+        # статус остаётся sent, прошлая копия просто осталась в чате.
+        self.assertIn("Готовый анонс отправлен в этот чат", h.screen_text())
+        self.assertIn("Новая версия", h.posts()[-1] or "")
+        sent = _stored(h, draft.id)
+        self.assertEqual(sent.publication_status, "sent")
+        self.assertEqual(tuple(sent.previous_message_ids), first_ids)
+        self.assertTrue(sent.delivered_message_ids)
+        self.assertFalse(set(sent.delivered_message_ids) & set(first_ids))
+        self.assertFalse(set(first_ids) & set(h.deleted_ids()))
+
+    @scenario_test
+    async def test_extras_edit_after_delivery_rebuilds_post(self, h) -> None:
+        """Доп. кирпичик: значение применяется пересборкой и заменой."""
+        await h.text("/start")
+        specs: list[tuple[str, str, str, dict[str, object]]] = [
+            ("main", "Основное", "short_text", {}),
+            ("extra0", "Доп 0", "short_text", {}),
+        ]
+        draft, bricks = await _personal_delivered(h, specs=specs, body="[main]")
+        first_ids = tuple(_stored(h, draft.id).delivered_message_ids)
+        await h.callback(_callback(h, "aw_extras"))
+        self.assertEqual(h.dialog_state(name=CONVERSATION_NAME), AW_EXTRAS)
+
+        await h.callback(_callback(h, "aw_exadd"))
+        for _attempt in range(4):
+            if _callbacks(h, "aw_exbrick", f":{bricks['extra0']}"):
+                break
+            next_page = [
+                data for label, data in h.screen_buttons() if label == "▶️" and data
+            ]
+            if not next_page:
+                break
+            await h.callback(next_page[0])
+        await h.callback(_callback(h, "aw_exbrick", f":{bricks['extra0']}"))
+        await h.callback(_callback(h, "aw_exsec", ":body"))
+        await h.callback(_callback(h, "aw_expos", ":start"))
+        await h.text("Дополнительно")
+        self.assertIn("Дополнительно", h.screen_text())
+
+        await h.callback(_callback(h, "aw_apply"))
+        self.assertIn("Дополнительно", h.posts()[-1] or "")
+        sent = _stored(h, draft.id)
+        self.assertEqual(tuple(sent.previous_message_ids), first_ids)
+        self.assertTrue(set(first_ids) <= set(h.deleted_ids()))
+
+        # Удаление доп. кирпичика тоже приводит к новой версии.
+        await h.callback(_callback(h, "aw_extras"))
+        await h.callback(_callback(h, "aw_exdel"))
+        self.assertIn("Дополнительных кирпичиков пока нет", h.screen_text())
+        await h.callback(_callback(h, "aw_apply"))
+        self.assertNotIn("Дополнительно", h.posts()[-1] or "")
+
+
+if __name__ == "__main__":
+    unittest.main()
