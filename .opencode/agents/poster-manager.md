@@ -64,9 +64,60 @@ permissions:
     resource: '.opencode/*'
     effect: deny
 
-  # --- Чтение и поиск: без подтверждений ---
+  # --- Чтение и поиск: без подтверждений, но только внутри проекта ---
   - action: read
-    resource: '*'
+    resource: 'Poster/*.py'
+    effect: allow
+  - action: read
+    resource: 'Poster/*.md'
+    effect: allow
+  - action: read
+    resource: 'Poster/*.toml'
+    effect: allow
+  - action: read
+    resource: 'Poster/*.txt'
+    effect: allow
+  - action: read
+    resource: 'Poster/Makefile'
+    effect: allow
+  - action: read
+    resource: 'Poster/handlers/*.py'
+    effect: allow
+  - action: read
+    resource: 'Poster/utils/*.py'
+    effect: allow
+  - action: read
+    resource: 'Poster/tests/*.py'
+    effect: allow
+  - action: read
+    resource: 'Poster/docs/*.md'
+    effect: allow
+  - action: read
+    resource: 'Poster/docs/agent_team/*.md'
+    effect: allow
+  - action: read
+    resource: '*.md'
+    effect: allow
+  - action: read
+    resource: 'opencode.jsonc'
+    effect: allow
+  - action: read
+    resource: '.opencode/*.md'
+    effect: allow
+  - action: read
+    resource: '.opencode/agents/*.md'
+    effect: allow
+  - action: read
+    resource: 'Poster/*.yml'
+    effect: allow
+  - action: read
+    resource: 'Poster/*.sh'
+    effect: allow
+  - action: read
+    resource: 'Poster/Dockerfile'
+    effect: allow
+  - action: read
+    resource: '.github/workflows/*.yml'
     effect: allow
   - action: glob
     resource: '*'
@@ -348,14 +399,29 @@ permissions:
 
   # --- Безопасные автоматические проверки ---
   - action: shell
+    resource: 'make check*'
+    effect: allow
+  - action: shell
+    resource: 'make accept*'
+    effect: allow
+  - action: shell
+    resource: 'make lint*'
+    effect: allow
+  - action: shell
+    resource: 'make types*'
+    effect: allow
+  - action: shell
+    resource: 'make test*'
+    effect: allow
+  - action: shell
+    resource: '.venv/bin/python -m unittest *'
+    effect: allow
+  - action: shell
     resource: 'git add *'
     effect: allow
   - action: shell
     resource: 'git commit*'
     effect: allow
-  - action: shell
-    resource: 'git push *'
-    effect: ask
 
   # --- Запись, конвейеры, интерпретаторы: всегда запрещены ---
   - action: shell
@@ -698,6 +764,9 @@ permissions:
     resource: 'git worktree prune*'
     effect: deny
   - action: shell
+    resource: 'git push*'
+    effect: deny
+  - action: shell
     resource: 'git push --force*'
     effect: deny
   - action: shell
@@ -809,10 +878,10 @@ permissions:
    ревизия ревизора. Ты не дублируешь их полный аудит: сверяй отчёты и
    критерии приёмки.
 7. **Интегрируй.** Убедись, что изменения не конфликтуют, тесты зелёные,
-   `AGENTS.md` соблюдён. Коммит — можно (`git commit` разрешён). Push —
-   только после явного подтверждения владельца и по правилам `AGENTS.md`:
-   покажи ветку, remote, отправляемые коммиты, `git diff --stat` и что push
-   не force.
+   `AGENTS.md` соблюдён. Коммит — можно (`git add`/`git commit` разрешены).
+   **Push запрещён на уровне правил.** Ветку не отправляй; в итоговом отчёте
+   перечисли коммиты и `git diff --stat`, а push оставь владельцу.
+   Force push, `reset --hard`, `git clean` и удаление файлов запрещены.
 8. **Зафиксируй состояние** в `Poster/docs/agent_team/state.md` (шаблон в
    начале файла) и выдай единый итоговый отчёт.
 
@@ -858,7 +927,7 @@ permissions:
 3. Запущенные проверки и их итог.
 4. Замечания ревизора и как закрыты.
 5. Открытые вопросы и риски.
-6. Нужен ли push/коммит и что осталось за владельцем.
+6. Какие коммиты сделаны и что владельцу нужно запушить самому.
 
 ## Автономная работа
 
@@ -878,5 +947,7 @@ permissions:
   исключай их, иначе вывод раздувается на тысячи строк.
 - Если действие требует подтверждения (`ask`), а диалог недоступен, считай
   это отказом и выбери безопасную альтернативу. Не обходи правила.
-- Подтверждения нужны только для записи, удаления, push и выхода за
-  рабочую директорию. О чтении и поиске владельца не спрашивай.
+- Подтверждения могут потребоваться только для записи и удаления.
+  Чтение, поиск, тесты и `git add`/`git commit` разрешены без вопроса.
+- `git push` запрещён правилами, а не только текстом: команда не выполнится
+  ни в каком виде. Не предлагай обойти это и не проси подтверждение.

@@ -45,6 +45,11 @@ permissions:
   - action: edit
     resource: 'Poster/docs/agent_team/*'
     effect: deny
+  # S2: диагностический отчёт админки пишет разработчик;
+  # state.md и README остаются за менеджером.
+  - action: edit
+    resource: 'Poster/docs/agent_team/admin_access_report.md'
+    effect: allow
   - action: edit
     resource: '*.env'
     effect: deny
@@ -79,9 +84,60 @@ permissions:
     resource: '.opencode/*'
     effect: deny
 
-  # --- Чтение и поиск: без подтверждений ---
+  # --- Чтение и поиск: без подтверждений, но только внутри проекта ---
   - action: read
-    resource: '*'
+    resource: 'Poster/*.py'
+    effect: allow
+  - action: read
+    resource: 'Poster/*.md'
+    effect: allow
+  - action: read
+    resource: 'Poster/*.toml'
+    effect: allow
+  - action: read
+    resource: 'Poster/*.txt'
+    effect: allow
+  - action: read
+    resource: 'Poster/Makefile'
+    effect: allow
+  - action: read
+    resource: 'Poster/handlers/*.py'
+    effect: allow
+  - action: read
+    resource: 'Poster/utils/*.py'
+    effect: allow
+  - action: read
+    resource: 'Poster/tests/*.py'
+    effect: allow
+  - action: read
+    resource: 'Poster/docs/*.md'
+    effect: allow
+  - action: read
+    resource: 'Poster/docs/agent_team/*.md'
+    effect: allow
+  - action: read
+    resource: '*.md'
+    effect: allow
+  - action: read
+    resource: 'opencode.jsonc'
+    effect: allow
+  - action: read
+    resource: '.opencode/*.md'
+    effect: allow
+  - action: read
+    resource: '.opencode/agents/*.md'
+    effect: allow
+  - action: read
+    resource: 'Poster/*.yml'
+    effect: allow
+  - action: read
+    resource: 'Poster/*.sh'
+    effect: allow
+  - action: read
+    resource: 'Poster/Dockerfile'
+    effect: allow
+  - action: read
+    resource: '.github/workflows/*.yml'
     effect: allow
   - action: glob
     resource: '*'
@@ -366,6 +422,9 @@ permissions:
     resource: 'make check*'
     effect: allow
   - action: shell
+    resource: 'make accept*'
+    effect: allow
+  - action: shell
     resource: 'make lint*'
     effect: allow
   - action: shell
@@ -376,7 +435,7 @@ permissions:
     effect: allow
   - action: shell
     resource: 'make format*'
-    effect: ask
+    effect: allow
   - action: shell
     resource: '.venv/bin/python -m unittest *'
     effect: allow
@@ -392,6 +451,10 @@ permissions:
   - action: shell
     resource: '.venv/bin/python -m black *'
     effect: ask
+  # автоформат только своего кода; `make format` — стандартный путь
+  - action: shell
+    resource: '.venv/bin/python -m black Poster/*'
+    effect: allow
   - action: shell
     resource: '.venv/bin/python -m mypy*'
     effect: allow
@@ -880,5 +943,7 @@ permissions:
   исключай их, иначе вывод раздувается на тысячи строк.
 - Если действие требует подтверждения (`ask`), а диалог недоступен, считай
   это отказом и выбери безопасную альтернативу. Не обходи правила.
-- Подтверждения нужны только для записи, удаления, push и выхода за
-  рабочую директорию. О чтении и поиске владельца не спрашивай.
+- Подтверждения могут потребоваться только для записи и удаления.
+  Чтение, поиск, тесты и `git add`/`git commit` разрешены без вопроса.
+- `git push` запрещён правилами, а не только текстом: команда не выполнится
+  ни в каком виде. Не предлагай обойти это и не проси подтверждение.
