@@ -1,6 +1,6 @@
 # handlers/announcement_wizard.py
 """
-Telegram-интерфейс адаптивного мастера анонсов Stage 27B.
+Telegram-интерфейс адаптивного мастера анонсов Stage 27B/27C.
 
 Мастер использует только сервисы Stage 27A и компилятор Stage 24:
 
@@ -9,15 +9,18 @@ Telegram-интерфейс адаптивного мастера анонсов
 - вопросы строит `announcement_store.build_announcement_questions`, а не
   отдельный алгоритм Telegram-слоя;
 - значения и дополнительные кирпичики сохраняются по `brick_id`;
-- предпросмотр собирается `build_announcement_preview` из снимка.
+- предпросмотр собирается `build_announcement_preview` из снимка;
+- фотографии — отдельная коллекция вложений анонса, не кирпичики;
+- публикация замораживает готовый HTML/фото и отправляет их существующим
+  `send_rendered_post` (тот же формат и прогресс, что у старого мастера).
 
 В `user_data` хранится только навигационное состояние интерфейса. Место,
-шаблон, снимок, ответы, extras, этап и revision живут в SQLite. Поэтому
-рестарт процесса не теряет работу: после входа в «📝 Новый мастер» черновик
-открывается из базы. Кнопки содержат draft_id и revision; устаревший экран
-не перезаписывает данные.
+шаблон, снимок, ответы, extras, фото, этап, revision и прогресс публикации
+живут в SQLite. Поэтому рестарт процесса не теряет работу: после входа в
+«📝 Новый мастер» черновик открывается из базы. Кнопки содержат draft_id и
+revision; устаревший экран не перезаписывает данные.
 
-Публикация, фотографии, каналы и изменение старого мастера сюда не входят.
+Старый девятишаговый мастер, его WIP и формат публикации не заменяются.
 """
 
 from __future__ import annotations
@@ -43,20 +46,33 @@ from announcement_store import (
     FIELD_STATUS_MISSING,
     FIELD_STATUS_SKIPPED,
     FIELD_STATUS_VALID,
+    PUBLICATION_STATUS_FAILED,
+    PUBLICATION_STATUS_PARTIAL,
+    PUBLICATION_STATUS_SENDING,
+    PUBLICATION_STATUS_SENT,
     AnnouncementActorError,
     AnnouncementError,
     AnnouncementFieldState,
     AnnouncementNotFoundError,
     AnnouncementPreview,
     add_announcement_extra,
+    add_announcement_photo,
+    begin_announcement_publication,
     build_announcement_fields,
     build_announcement_preview,
     build_announcement_render_payload,
     choose_announcement_template,
+    clear_announcement_photos,
     confirm_announcement_place,
     get_announcement_draft,
     list_announcement_drafts,
+    mark_announcement_publication_failed,
+    mark_announcement_publication_sent,
+    record_announcement_publication_progress,
     remove_announcement_extra,
+    remove_announcement_photo,
+    reset_failed_announcement_publication,
+    resume_announcement_publication,
     save_announcement_value,
     set_announcement_stage,
     start_announcement_wizard,
@@ -114,6 +130,7 @@ AW_PLACE, AW_TEMPLATE, AW_QUESTIONS, AW_EXTRAS, AW_PREVIEW = range(5)
 PLACE_PAGE_SIZE = 8
 TEMPLATE_PAGE_SIZE = 6
 EXTRA_PAGE_SIZE = 8
+PHOTO_PAGE_SIZE = 8
 PREVIEW_VISIBLE_LIMIT = 1800
 FIELD_DISPLAY_LIMIT = 120
 MAX_PREVIEW_FIELDS = 12
@@ -125,7 +142,7 @@ STAGE_LABELS = {
     WizardStage.QUESTIONS.value: "вопросы",
     WizardStage.EXTRAS.value: "доп. поля",
     WizardStage.PREVIEW.value: "обзор",
-    WizardStage.COMPLETED.value: "сохранён",
+    WizardStage.COMPLETED.value: "опубликован",
 }
 
 SECTION_LABELS = {
@@ -176,6 +193,8 @@ def _fresh_ui() -> dict[str, Any]:
         "active_brick_id": None,
         "active_source": None,
         "editing": False,
+        "photos_page": 0,
+        "photo_add": False,
         "place": {
             "phase": "home",
             "query": "",
@@ -211,6 +230,7 @@ def _clear_active(ui: dict[str, Any]) -> None:
     ui["active_brick_id"] = None
     ui["active_source"] = None
     ui["editing"] = False
+    ui["photo_add"] = False
 
 
 def _short(value: object, limit: int = 60) -> str:
@@ -349,6 +369,19 @@ def _main_menu_keyboard() -> InlineKeyboardMarkup:
     return main_menu_keyboard()
 
 
+def _draft_status_label(draft) -> str:
+    status = getattr(draft, "publication_status", None)
+    if status == PUBLICATION_STATUS_SENDING:
+        return "отправка"
+    if status == PUBLICATION_STATUS_PARTIAL:
+        return "частично отправлен"
+    if status == PUBLICATION_STATUS_FAILED:
+        return "ошибка отправки"
+    if status == PUBLICATION_STATUS_SENT:
+        return "опубликован"
+    return STAGE_LABELS.get(str(getattr(draft, "stage", "")), "черновик")
+
+
 def _home_content(user_id: int, page: int) -> tuple[str, InlineKeyboardMarkup, int]:
     try:
         with SessionLocal() as session:
@@ -367,13 +400,13 @@ def _home_content(user_id: int, page: int) -> tuple[str, InlineKeyboardMarkup, i
         "📝 Новый мастер",
         "",
         "Адаптивный мастер сам определит недостающие поля по выбранному "
-        "шаблону. Публикация на этом этапе не подключается: результат "
-        "сохраняется как черновик.",
+        "шаблону. Фотографии можно добавить отдельно. Публикация выполняется "
+        "только после явного подтверждения и только по кнопке.",
     ]
     if shown:
         lines.extend(["", "Незавершённые анонсы:"])
         for number, draft in enumerate(shown, start=1):
-            stage = STAGE_LABELS.get(str(getattr(draft, "stage", "")), "черновик")
+            stage = _draft_status_label(draft)
             lines.append(f"{number}. {_short(draft.place_display_name, 70)} — {stage}")
     elif drafts:
         lines.extend(["", "На этой странице черновиков нет."])
@@ -384,7 +417,7 @@ def _home_content(user_id: int, page: int) -> tuple[str, InlineKeyboardMarkup, i
         [InlineKeyboardButton("➕ Новый анонс", callback_data="aw_new")]
     ]
     for index, draft in enumerate(shown):
-        stage = STAGE_LABELS.get(str(getattr(draft, "stage", "")), "черновик")
+        stage = _draft_status_label(draft)
         label = f"▶️ {index + 1}. {_short(draft.place_display_name, 38)}"
         if stage:
             label += f" — {stage}"
@@ -849,6 +882,8 @@ async def _open_draft(
         return await _enter_questions(update, context, details)
     if stage == WizardStage.EXTRAS:
         return await _render_extras(update, context, details)
+    if details.publication_status is not None:
+        return await _render_publish_status(update, context, details)
     return await _render_preview(update, context, details)
 
 
@@ -2797,6 +2832,7 @@ def _preview_summary_lines(
         f"Адрес: {_h(details.place_address) if details.place_address else 'не указан'}",
         f"Ссылка: {_h(details.place_url) if details.place_url else 'не указана'}",
         f"Шаблон: {_h(_preview_template_name(details))}",
+        f"Фотографии: {len(details.photos)} " "(отдельные вложения, не часть шаблона)",
     ]
     if details.template_snapshot is not None:
         lines.append(
@@ -2843,7 +2879,7 @@ def _preview_summary_lines(
 
 def _preview_block(preview: AnnouncementPreview) -> list[str]:
     if preview.ready:
-        lines = ["", "✅ Анонс можно передать на следующий этап."]
+        lines = ["", "✅ Анонс можно передать к публикации."]
         if preview.warnings:
             lines.append(_h(preview.warnings[0]))
         lines.extend(["", "📄 Предпросмотр:"])
@@ -2875,36 +2911,65 @@ def _preview_block(preview: AnnouncementPreview) -> list[str]:
     return lines
 
 
-def _preview_keyboard(details, *, saved: bool = False) -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(
+def _preview_keyboard(
+    details, *, ready: bool = False, saved: bool = False
+) -> InlineKeyboardMarkup:
+    draft_id = details.draft_id
+    revision = details.revision
+    rows: list[list[InlineKeyboardButton]] = [
         [
+            InlineKeyboardButton(
+                "✅ Черновик сохранён" if saved else "✅ Сохранить черновик",
+                callback_data=f"aw_save:{draft_id}:{revision}",
+            )
+        ],
+        [
+            InlineKeyboardButton(
+                "✏️ Изменить поля",
+                callback_data=f"aw_qmanage:{draft_id}:{revision}",
+            )
+        ],
+        [
+            InlineKeyboardButton(
+                "➕ Дополнительные кирпичики",
+                callback_data=f"aw_extras:{draft_id}:{revision}",
+            )
+        ],
+        [
+            InlineKeyboardButton(
+                f"📷 Фотографии ({len(details.photos)})",
+                callback_data=f"aw_photos:{draft_id}:{revision}:0",
+            )
+        ],
+    ]
+    if details.photos:
+        rows.append(
             [
                 InlineKeyboardButton(
-                    "✅ Черновик сохранён" if saved else "✅ Сохранить черновик",
-                    callback_data=(f"aw_save:{details.draft_id}:{details.revision}"),
+                    "👁 Предпросмотр с фото",
+                    callback_data=f"aw_media_preview:{draft_id}:{revision}",
                 )
-            ],
+            ]
+        )
+    if ready:
+        rows.append(
             [
                 InlineKeyboardButton(
-                    "✏️ Изменить поля",
-                    callback_data=(f"aw_qmanage:{details.draft_id}:{details.revision}"),
+                    "🚀 Опубликовать анонс",
+                    callback_data=f"aw_pub_start:{draft_id}:{revision}",
                 )
-            ],
-            [
-                InlineKeyboardButton(
-                    "➕ Дополнительные кирпичики",
-                    callback_data=(f"aw_extras:{details.draft_id}:{details.revision}"),
-                )
-            ],
-            [
-                InlineKeyboardButton(
-                    "🔄 Обновить",
-                    callback_data=(f"aw_preview:{details.draft_id}:{details.revision}"),
-                )
-            ],
-            [InlineKeyboardButton("🏠 Главное меню", callback_data="main_menu")],
+            ]
+        )
+    rows.append(
+        [
+            InlineKeyboardButton(
+                "🔄 Обновить",
+                callback_data=f"aw_preview:{draft_id}:{revision}",
+            )
         ]
     )
+    rows.append([InlineKeyboardButton("🏠 Главное меню", callback_data="main_menu")])
+    return InlineKeyboardMarkup(rows)
 
 
 async def _render_preview(
@@ -2917,6 +2982,8 @@ async def _render_preview(
 ) -> int:
     ui = _ui(context)
     _clear_active(ui)
+    if details.publication_status is not None:
+        return await _render_publish_status(update, context, details, notice=notice)
     updated = details
     try:
         updated = _ensure_stage(update, context, details, WizardStage.PREVIEW)
@@ -2929,6 +2996,10 @@ async def _render_preview(
             )
     except (AnnouncementError, TemplateError, TemplateCompileError, BrickError) as exc:
         return await _render_preview_error(update, context, updated, str(exc))
+    if preview.draft.publication_status is not None:
+        return await _render_publish_status(
+            update, context, preview.draft, notice=notice
+        )
     _set_details(ui, preview.draft)
     lines = _preview_summary_lines(preview, _user_id(update))
     lines.extend(_preview_block(preview))
@@ -2938,7 +3009,7 @@ async def _render_preview(
         update,
         context,
         "\n".join(lines),
-        _preview_keyboard(preview.draft, saved=saved),
+        _preview_keyboard(preview.draft, ready=preview.ready, saved=saved),
     )
     return AW_PREVIEW
 
@@ -3028,7 +3099,590 @@ async def _resume_current(
         return await _enter_questions(update, context, details, notice=notice)
     if stage == WizardStage.EXTRAS:
         return await _render_extras(update, context, details, notice=notice)
+    if details.publication_status is not None:
+        return await _render_publish_status(update, context, details, notice=notice)
     return await _render_preview(update, context, details, notice=notice)
+
+
+async def _render_photos(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+    details,
+    *,
+    notice: str | None = None,
+    page: int | None = None,
+    clear_confirm: bool = False,
+) -> int:
+    """Экран отдельной коллекции фото: просмотр списка, добавление, удаление."""
+    ui = _ui(context)
+    _set_details(ui, details)
+    _clear_active(ui)
+    photos = list(details.photos)
+    total = len(photos)
+    if page is None:
+        page = int(ui.get("photos_page") or 0)
+    pages = max(1, (total + PHOTO_PAGE_SIZE - 1) // PHOTO_PAGE_SIZE)
+    page = max(0, min(int(page), pages - 1))
+    ui["photos_page"] = page
+
+    lines = [
+        "📷 Фотографии анонса",
+        "",
+        f"Добавлено: {total}. Фото необязательны и не входят в шаблон: "
+        "они отправляются отдельными вложениями.",
+        "Можно отправить одиночные снимки или альбомы несколько раз подряд. "
+        "Одинаковые file_id не дублируются.",
+    ]
+    if notice:
+        lines.insert(1, notice)
+    if clear_confirm:
+        lines.extend(
+            [
+                "",
+                "Удалить все фотографии из этого анонса? Текст и значения "
+                "кирпичиков останутся без изменений.",
+            ]
+        )
+        await _render(
+            update,
+            context,
+            "\n".join(lines),
+            InlineKeyboardMarkup(
+                [
+                    [
+                        InlineKeyboardButton(
+                            "🗑 Да, удалить все",
+                            callback_data=(
+                                f"aw_photo_clear_yes:{details.draft_id}:"
+                                f"{details.revision}"
+                            ),
+                        )
+                    ],
+                    [
+                        InlineKeyboardButton(
+                            "◀️ Отмена",
+                            callback_data=(
+                                f"aw_photos:{details.draft_id}:"
+                                f"{details.revision}:{page}"
+                            ),
+                        )
+                    ],
+                    [
+                        InlineKeyboardButton(
+                            "🏠 Главное меню", callback_data="main_menu"
+                        )
+                    ],
+                ]
+            ),
+        )
+        return AW_PREVIEW
+
+    if total:
+        start = page * PHOTO_PAGE_SIZE
+        lines.extend(["", f"Страница {page + 1} из {pages}:"])
+        for number, _file_id in enumerate(
+            photos[start : start + PHOTO_PAGE_SIZE], start=start + 1
+        ):
+            lines.append(f"{number}. Фото добавлено")
+        lines.append("")
+        lines.append("Чтобы заменить фото, удалите его и добавьте новое.")
+    else:
+        lines.extend(
+            [
+                "",
+                "Фотографий пока нет — анонс можно опубликовать и без них.",
+            ]
+        )
+    if details.publication_status is not None:
+        lines.extend(
+            [
+                "",
+                "⚠️ Публикация уже начата: коллекция фотографий заморожена.",
+            ]
+        )
+
+    rows: list[list[InlineKeyboardButton]] = []
+    if details.publication_status is None:
+        rows.append(
+            [
+                InlineKeyboardButton(
+                    "📤 Добавить фото",
+                    callback_data=(
+                        f"aw_photo_add:{details.draft_id}:{details.revision}"
+                    ),
+                )
+            ]
+        )
+    start = page * PHOTO_PAGE_SIZE
+    if details.publication_status is None:
+        for offset in range(min(PHOTO_PAGE_SIZE, max(0, total - start))):
+            index = start + offset
+            rows.append(
+                [
+                    InlineKeyboardButton(
+                        f"🗑 Удалить фото {index + 1}",
+                        callback_data=(
+                            f"aw_photo_del:{details.draft_id}:"
+                            f"{details.revision}:{index}"
+                        ),
+                    )
+                ]
+            )
+    if total and details.publication_status is None:
+        rows.append(
+            [
+                InlineKeyboardButton(
+                    "👁 Показать вложения",
+                    callback_data=(
+                        f"aw_photo_show:{details.draft_id}:{details.revision}"
+                    ),
+                )
+            ]
+        )
+    nav: list[InlineKeyboardButton] = []
+    if page > 0:
+        nav.append(
+            InlineKeyboardButton(
+                "◀️",
+                callback_data=(
+                    f"aw_photos:{details.draft_id}:{details.revision}:{page - 1}"
+                ),
+            )
+        )
+    if page + 1 < pages:
+        nav.append(
+            InlineKeyboardButton(
+                "▶️",
+                callback_data=(
+                    f"aw_photos:{details.draft_id}:{details.revision}:{page + 1}"
+                ),
+            )
+        )
+    if nav:
+        rows.append(nav)
+    if total and details.publication_status is None:
+        rows.append(
+            [
+                InlineKeyboardButton(
+                    "🗑 Удалить все фото",
+                    callback_data=(
+                        f"aw_photo_clear:{details.draft_id}:{details.revision}"
+                    ),
+                )
+            ]
+        )
+    rows.append(
+        [
+            InlineKeyboardButton(
+                "◀️ К обзору",
+                callback_data=(f"aw_preview:{details.draft_id}:{details.revision}"),
+            )
+        ]
+    )
+    rows.append([InlineKeyboardButton("🏠 Главное меню", callback_data="main_menu")])
+    await _render(update, context, "\n".join(lines), InlineKeyboardMarkup(rows))
+    return AW_PREVIEW
+
+
+async def _show_media_preview(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+    details,
+) -> tuple[bool, str]:
+    """
+    Показывает временный предпросмотр ровно тем же отправителем, что и пост.
+
+    Это не публикация: сообщения учитываются как preview и удаляются после
+    успешной отправки/смены фото. При сбое уже ушедшая часть запоминается
+    для очистки, а данные анонса не меняются.
+    """
+    try:
+        with SessionLocal() as session:
+            preview = build_announcement_preview(
+                session,
+                actor_telegram_user_id=_user_id(update),
+                draft_id=details.draft_id,
+                today=app_today(),
+            )
+    except (AnnouncementError, TemplateError, TemplateCompileError, BrickError) as exc:
+        return False, f"Не удалось собрать предпросмотр: {_short(exc, 300)}"
+    if not preview.ready:
+        reason = preview.issues[0] if preview.issues else "анонс не готов"
+        return False, f"Предпросмотр недоступен: {_short(reason, 300)}"
+    if not preview.draft.photos:
+        return False, "В анонсе нет фотографий."
+    user_data = ctx.data(context)
+    delivery: dict = {}
+    try:
+        from handlers.post_creation import send_rendered_post
+
+        message_ids = await send_rendered_post(
+            context.bot,
+            ctx.chat(update).id,
+            preview.html,
+            list(preview.draft.photos),
+            progress=delivery,
+        )
+    except Exception as exc:  # noqa: BLE001 — показываем честный сбой UI
+        partial = [int(mid) for mid in delivery.get("ids") or []]
+        if partial:
+            old = [int(mid) for mid in (user_data.get("preview_messages") or [])]
+            screen.track_preview(user_data, old + partial)
+        logger.exception("Не удалось показать предпросмотр вложений: %s", exc)
+        return False, "Не удалось показать предпросмотр. Данные сохранены."
+    await screen.replace_preview(context, ctx.chat(update).id, user_data, message_ids)
+    return (
+        True,
+        "👁 Отправлен временный предпросмотр. Он не является публикацией "
+        "и будет удалён после отправки или смены фото.",
+    )
+
+
+async def _render_publish_confirm(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+    details,
+    preview: AnnouncementPreview,
+) -> int:
+    """Второй явный шаг: подтверждение отправки в текущий чат."""
+    ui = _ui(context)
+    _set_details(ui, details)
+    _clear_active(ui)
+    photos = len(details.photos)
+    excerpt = preview.visible_text[:1200].rstrip()
+    if len(preview.visible_text) > 1200:
+        excerpt += "…"
+    lines = [
+        "🚀 Публикация анонса",
+        "",
+        f"Место: {_h(details.place_display_name)}",
+        f"Вложений: {photos}.",
+        "",
+        "Telegram отправит готовый текст и фотографии в этот чат. "
+        "Это финальное действие; отдельного согласования в Poster нет.",
+    ]
+    if photos > 10:
+        lines.append(
+            "Фото уйдут несколькими альбомами: Telegram принимает не более "
+            "10 снимков в одной медиагруппе."
+        )
+    lines.extend(
+        [
+            "",
+            "Фрагмент текста:",
+            _h(excerpt),
+            "",
+            "⚠️ После подтверждения текст и фотографии фиксируются. "
+            "Изменить их можно будет только до первого подтверждённого "
+            "сообщения Telegram; после частичной отправки доступно лишь "
+            "продолжение.",
+            "Если Telegram принял сообщение, но ответ потерялся, повтор "
+            "может создать дубль — бот честно предупредит об этом.",
+        ]
+    )
+    await _render(
+        update,
+        context,
+        "\n".join(lines),
+        InlineKeyboardMarkup(
+            [
+                [
+                    InlineKeyboardButton(
+                        "✅ Подтвердить публикацию",
+                        callback_data=(
+                            f"aw_pub_confirm:{details.draft_id}:{details.revision}"
+                        ),
+                    )
+                ],
+                [
+                    InlineKeyboardButton(
+                        "◀️ Назад к обзору",
+                        callback_data=(
+                            f"aw_preview:{details.draft_id}:{details.revision}"
+                        ),
+                    )
+                ],
+                [InlineKeyboardButton("🏠 Главное меню", callback_data="main_menu")],
+            ]
+        ),
+    )
+    return AW_PREVIEW
+
+
+async def _render_publish_status(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+    details,
+    *,
+    notice: str | None = None,
+) -> int:
+    """Экран начатой/частичной/неудачной публикации без права правки."""
+    if details.publication_status == PUBLICATION_STATUS_SENT:
+        return await _render_published(update, context, details, notice=notice)
+    if details.publication_status is None:
+        return await _render_preview(update, context, details, notice=notice)
+    ui = _ui(context)
+    _set_details(ui, details)
+    _clear_active(ui)
+    status = details.publication_status
+    step = details.publication_step
+    total = details.publication_total
+    lines = [
+        "🚀 Публикация анонса",
+        "",
+        f"Место: {_h(details.place_display_name)}",
+        f"Фотографий: {len(details.publication_photos)}.",
+    ]
+    if notice:
+        lines.insert(1, notice)
+    if status == PUBLICATION_STATUS_SENDING:
+        lines.extend(
+            [
+                "",
+                "⏳ Отправка не завершена (возможно, процесс был перезапущен). "
+                "Продолжение использует замороженный текст и фото и не "
+                "перезапускает всю последовательность.",
+            ]
+        )
+    elif status == PUBLICATION_STATUS_PARTIAL:
+        lines.extend(
+            [
+                "",
+                "⚠️ Анонс отправлен частично. Уже подтверждённые сообщения "
+                "не отправляются повторно; можно дослать только оставшееся.",
+            ]
+        )
+    elif status == PUBLICATION_STATUS_FAILED:
+        lines.extend(
+            [
+                "",
+                "❌ Telegram не подтвердил отправку. Ни одна операция не "
+                "считается подтверждённой.",
+            ]
+        )
+    if total:
+        lines.append(f"Подтверждено операций: {min(step, total)} из {total}.")
+    else:
+        lines.append(
+            "Сохранённого прогресса нет: первая операция могла быть принята "
+            "Telegram до сбоя, поэтому повтор может создать дубль."
+        )
+    if details.publication_error:
+        lines.extend(["", f"Причина: {_h(details.publication_error)}"])
+    lines.extend(
+        [
+            "",
+            "Текст, значения кирпичиков и фотографии заморожены. Если "
+            "Telegram принял последнюю группу, но ответ потерялся, повтор "
+            "может создать дубль — это ограничение Telegram API.",
+        ]
+    )
+    rows: list[list[InlineKeyboardButton]] = []
+    label = (
+        "🔄 Продолжить отправку"
+        if status == PUBLICATION_STATUS_SENDING
+        else (
+            "🔁 Дослать оставшееся"
+            if status == PUBLICATION_STATUS_PARTIAL
+            else "🔁 Повторить отправку"
+        )
+    )
+    rows.append(
+        [
+            InlineKeyboardButton(
+                label,
+                callback_data=(f"aw_pub_resume:{details.draft_id}:{details.revision}"),
+            )
+        ]
+    )
+    if details.publication_can_reset:
+        rows.append(
+            [
+                InlineKeyboardButton(
+                    "↩️ Вернуться к редактированию",
+                    callback_data=(
+                        f"aw_pub_reset:{details.draft_id}:{details.revision}"
+                    ),
+                )
+            ]
+        )
+    rows.append([InlineKeyboardButton("📝 Мои анонсы", callback_data="aw_start")])
+    rows.append([InlineKeyboardButton("🏠 Главное меню", callback_data="main_menu")])
+    await _render(update, context, "\n".join(lines), InlineKeyboardMarkup(rows))
+    return AW_PREVIEW
+
+
+async def _render_published(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+    details,
+    *,
+    notice: str | None = None,
+) -> int:
+    ui = _ui(context)
+    _set_details(ui, details)
+    _clear_active(ui)
+    photos = len(details.publication_photos)
+    moment = ""
+    if details.published_at is not None:
+        moment = details.published_at.strftime("%d.%m.%Y %H:%M UTC")
+    lines = [
+        "✅ Анонс опубликован",
+        "",
+        f"Место: {_h(details.place_display_name)}",
+        f"Фотографий: {photos}.",
+    ]
+    if moment:
+        lines.append(f"Telegram подтвердил отправку: {moment}.")
+    if notice:
+        lines.insert(1, notice)
+    lines.extend(
+        [
+            "",
+            "Текст и вложения остались в этом чате выше. Повторная "
+            "публикация этого анонса заблокирована, чтобы не создавать дубль.",
+        ]
+    )
+    await _render(
+        update,
+        context,
+        "\n".join(lines),
+        InlineKeyboardMarkup(
+            [
+                [InlineKeyboardButton("➕ Новый анонс", callback_data="aw_new")],
+                [InlineKeyboardButton("📝 Мои анонсы", callback_data="aw_start")],
+                [InlineKeyboardButton("🏠 Главное меню", callback_data="main_menu")],
+            ]
+        ),
+    )
+    return AW_PREVIEW
+
+
+def _publication_error_text(exc: BaseException) -> str:
+    detail = " ".join(str(exc).split())[:500]
+    name = exc.__class__.__name__
+    return f"{name}: {detail}" if detail else name
+
+
+async def _render_publish_status_safely(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+    details,
+    *,
+    notice: str | None = None,
+) -> int:
+    """Сбой перерисовки статуса не должен скрывать уже сохранённый прогресс."""
+    try:
+        return await _render_publish_status(update, context, details, notice=notice)
+    except Exception:  # noqa: BLE001 — экран можно обновить следующим действием
+        logger.exception("Не удалось перерисовать экран статуса публикации.")
+        return AW_PREVIEW
+
+
+async def _run_announcement_publication(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+    publication,
+) -> int:
+    """
+    Отправляет только замороженный payload и сохраняет прогресс после каждой
+    подтверждённой операции. Успех фиксируется лишь после ответа Telegram.
+    """
+    user_id = _user_id(update)
+    draft_id = publication.draft.draft_id
+    chat_id = ctx.chat(update).id
+    delivery = dict(publication.progress)
+
+    def _persist_progress(snapshot: dict) -> None:
+        with SessionLocal() as session:
+            record_announcement_publication_progress(
+                session,
+                actor_telegram_user_id=user_id,
+                draft_id=draft_id,
+                progress=snapshot,
+            )
+
+    from handlers.post_creation import send_rendered_post
+
+    try:
+        await send_rendered_post(
+            context.bot,
+            chat_id,
+            publication.text,
+            list(publication.photos),
+            progress=delivery,
+            on_progress=_persist_progress,
+        )
+    except Exception as exc:  # noqa: BLE001 — сбой Telegram/БД должен быть виден
+        logger.exception("Публикация анонса #%s не завершена: %s", draft_id, exc)
+        error_text = _publication_error_text(exc)
+        try:
+            with SessionLocal() as session:
+                details = mark_announcement_publication_failed(
+                    session,
+                    actor_telegram_user_id=user_id,
+                    draft_id=draft_id,
+                    error=error_text,
+                )
+        except Exception:  # noqa: BLE001 — сохраняем исходную ошибку отправки
+            logger.exception(
+                "Не удалось сохранить статус сбоя публикации анонса #%s",
+                draft_id,
+            )
+            try:
+                with SessionLocal() as session:
+                    details = get_announcement_draft(
+                        session,
+                        actor_telegram_user_id=user_id,
+                        draft_id=draft_id,
+                    )
+            except Exception:  # noqa: BLE001 — показываем хотя бы прошлый снимок
+                details = publication.draft
+        return await _render_publish_status_safely(
+            update,
+            context,
+            details,
+            notice="❌ Отправку не удалось подтвердить. Проверьте статус.",
+        )
+
+    try:
+        with SessionLocal() as session:
+            details = mark_announcement_publication_sent(
+                session,
+                actor_telegram_user_id=user_id,
+                draft_id=draft_id,
+            )
+    except Exception as exc:  # noqa: BLE001 — сообщения могли уже уйти
+        logger.exception(
+            "Telegram подтвердил отправку, но статус анонса #%s не сохранён: %s",
+            draft_id,
+            exc,
+        )
+        try:
+            with SessionLocal() as session:
+                details = get_announcement_draft(
+                    session,
+                    actor_telegram_user_id=user_id,
+                    draft_id=draft_id,
+                )
+        except Exception:  # noqa: BLE001 — не врём об успехе
+            details = publication.draft
+        return await _render_publish_status_safely(
+            update,
+            context,
+            details,
+            notice=(
+                "⚠️ Telegram подтвердил отправку, но статус не сохранился. "
+                "Не повторяйте отправку вслепую; обновите экран."
+            ),
+        )
+    await screen.cleanup_preview(context, chat_id, ctx.data(context))
+    return await _render_published(
+        update,
+        context,
+        details,
+        notice="✅ Telegram подтвердил публикацию.",
+    )
 
 
 async def _handle_place_search_text(
@@ -3166,15 +3820,88 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int
 
 
 async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    await _reanchor(update, context)
-    return await _resume_current(
+    """
+    Принимает одиночные фото и альбомы только на этапе обзора.
+
+    Каждый Update сохраняется в SQLite отдельно, поэтому альбом из
+    нескольких сообщений не теряется при рестарте. Дубликат file_id
+    идемпотентен. После подтверждённой записи исходное сообщение удаляется
+    best-effort; при ошибке — остаётся, данные не теряются.
+    """
+    ui = _ui(context)
+    draft_id = ui.get("draft_id")
+    message = update.effective_message
+    photo = message.photo[-1] if message is not None and message.photo else None
+    if not draft_id or photo is None:
+        await _reanchor(update, context)
+        return await _resume_current(
+            update, context, notice="Не удалось прочитать фотографию."
+        )
+    try:
+        details = _session_details(_user_id(update), int(draft_id))
+    except (AnnouncementNotFoundError, AnnouncementActorError, AnnouncementError):
+        ctx.data(context)["announcement_ui"] = _fresh_ui()
+        return await _render_home(
+            update, context, notice="Черновик не найден или больше недоступен."
+        )
+    if details.stage != WizardStage.PREVIEW:
+        await _reanchor(update, context)
+        return await _resume_current(
+            update,
+            context,
+            notice=(
+                "Фотографии добавляются на этапе обзора. Анонс и значения "
+                "сохранены — завершите текущие шаги."
+            ),
+        )
+    if details.publication_status is not None:
+        return await _render_publish_status(
+            update,
+            context,
+            details,
+            notice=(
+                "Публикация уже начата: новые фотографии не принимаются. "
+                "Анонс и прогресс сохранены."
+            ),
+        )
+    before = len(details.photos)
+    try:
+        with SessionLocal() as session:
+            updated = add_announcement_photo(
+                session,
+                actor_telegram_user_id=_user_id(update),
+                draft_id=details.draft_id,
+                file_id=photo.file_id,
+                expected_revision=details.revision,
+            )
+    except (AnnouncementError, TemplateError, TemplateCompileError, BrickError) as exc:
+        await _render_photos(
+            update,
+            context,
+            details,
+            notice=f"Фото не добавлено: {_short(exc, 300)}",
+        )
+        screen.track_failed_input(
+            ctx.data(context), f"aw-photo:{details.draft_id}", message
+        )
+        return AW_PREVIEW
+    _set_details(ui, updated)
+    added = len(updated.photos) > before
+    await screen.cleanup_preview(context, ctx.chat(update).id, ctx.data(context))
+    result = await _render_photos(
         update,
         context,
+        updated,
         notice=(
-            "Фотографии в этом этапе не подключаются. Анонс и его значения "
-            "сохранены."
+            "✅ Фото добавлено."
+            if added
+            else "Это фото уже есть в анонсе — дубль не создан."
         ),
     )
+    # Ввод надёжно сохранён (или уже присутствовал) — временный источник
+    # можно удалить. Неудача очистки не отменяет сохранение.
+    await screen.drop_user_input(update, context)
+    return result
 
 
 async def _exit_to_main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
@@ -3977,13 +4704,20 @@ async def handle_preview_callback(
 ) -> int:
     parts = _callback_parts(update)
     action = parts[0]
+
+    def _guided() -> tuple[dict[str, Any], Any] | None:
+        if len(parts) < 3 or not all(item.isdigit() for item in parts[1:3]):
+            return None
+        return _guard_details(update, context, int(parts[1]), int(parts[2]))
+
     if action == "aw_save" and len(parts) == 3:
-        if not all(item.isdigit() for item in parts[1:]):
-            return await _stale(update, context)
-        guarded = _guard_details(update, context, int(parts[1]), int(parts[2]))
+        guarded = _guided()
         if guarded is None:
             return await _stale(update, context)
         _ui_data, details = guarded
+        if details.publication_status is not None:
+            await _answer(update, "Публикация уже начата.", alert=True)
+            return await _render_publish_status(update, context, details)
         try:
             updated = _ensure_stage(update, context, details, WizardStage.PREVIEW)
         except AnnouncementError as exc:
@@ -3998,17 +4732,34 @@ async def handle_preview_callback(
             saved=True,
         )
     if action == "aw_preview" and len(parts) == 3:
-        if not all(item.isdigit() for item in parts[1:]):
-            return await _stale(update, context)
-        guarded = _guard_details(update, context, int(parts[1]), int(parts[2]))
+        guarded = _guided()
         if guarded is None:
             return await _stale(update, context)
         _ui_data, details = guarded
         await _answer(update)
         return await _render_preview(update, context, details)
     if action == "aw_qmanage" and len(parts) == 3:
+        guarded = _guided()
+        if guarded is None:
+            return await _stale(update, context)
+        _ui_data, details = guarded
+        if details.publication_status is not None:
+            await _answer(update, "Публикация уже начата.", alert=True)
+            return await _render_publish_status(update, context, details)
         return await handle_question_callback(update, context)
     if action == "aw_extras" and len(parts) == 3:
+        guarded = _guided()
+        if guarded is None:
+            return await _stale(update, context)
+        _ui_data, details = guarded
+        if details.publication_status is not None:
+            await _answer(update, "Публикация уже начата.", alert=True)
+            return await _render_publish_status(update, context, details)
+        await _answer(update)
+        return await _enter_extras(update, context, details)
+
+    # --- фотографии -----------------------------------------------------
+    if action == "aw_photos" and len(parts) == 4:
         if not all(item.isdigit() for item in parts[1:]):
             return await _stale(update, context)
         guarded = _guard_details(update, context, int(parts[1]), int(parts[2]))
@@ -4016,7 +4767,248 @@ async def handle_preview_callback(
             return await _stale(update, context)
         _ui_data, details = guarded
         await _answer(update)
-        return await _enter_extras(update, context, details)
+        return await _render_photos(update, context, details, page=int(parts[3]))
+    if action == "aw_photo_add" and len(parts) == 3:
+        guarded = _guided()
+        if guarded is None:
+            return await _stale(update, context)
+        _ui_data, details = guarded
+        if details.publication_status is not None:
+            await _answer(update, "Публикация уже начата.", alert=True)
+            return await _render_publish_status(update, context, details)
+        await _answer(update)
+        return await _render_photos(
+            update,
+            context,
+            details,
+            notice=(
+                "Отправьте одну фотографию или альбом. Можно отправить "
+                "несколько сообщений подряд — все снимки добавятся."
+            ),
+        )
+    if action == "aw_photo_del" and len(parts) == 4:
+        if not all(item.isdigit() for item in parts[1:]):
+            return await _stale(update, context)
+        guarded = _guard_details(update, context, int(parts[1]), int(parts[2]))
+        if guarded is None:
+            return await _stale(update, context)
+        _ui_data, details = guarded
+        if details.publication_status is not None:
+            await _answer(update, "Коллекция фото заморожена.", alert=True)
+            return await _render_publish_status(update, context, details)
+        index = int(parts[3])
+        try:
+            with SessionLocal() as session:
+                updated = remove_announcement_photo(
+                    session,
+                    actor_telegram_user_id=_user_id(update),
+                    draft_id=details.draft_id,
+                    index=index,
+                    expected_revision=details.revision,
+                )
+        except AnnouncementError as exc:
+            await _answer(update, str(exc), alert=True)
+            return await _render_photos(
+                update, context, details, notice=f"Фото не удалено: {_short(exc, 300)}"
+            )
+        _set_details(_ui(context), updated)
+        await _answer(update, "Фото удалено.")
+        await screen.cleanup_preview(context, ctx.chat(update).id, ctx.data(context))
+        return await _render_photos(
+            update,
+            context,
+            updated,
+            notice="✅ Фото удалено. Чтобы заменить его, добавьте новое.",
+            page=index // PHOTO_PAGE_SIZE,
+        )
+    if action == "aw_photo_clear" and len(parts) == 3:
+        guarded = _guided()
+        if guarded is None:
+            return await _stale(update, context)
+        _ui_data, details = guarded
+        if details.publication_status is not None:
+            await _answer(update, "Коллекция фото заморожена.", alert=True)
+            return await _render_publish_status(update, context, details)
+        await _answer(update)
+        return await _render_photos(update, context, details, clear_confirm=True)
+    if action == "aw_photo_clear_yes" and len(parts) == 3:
+        guarded = _guided()
+        if guarded is None:
+            return await _stale(update, context)
+        _ui_data, details = guarded
+        if details.publication_status is not None:
+            await _answer(update, "Коллекция фото заморожена.", alert=True)
+            return await _render_publish_status(update, context, details)
+        try:
+            with SessionLocal() as session:
+                updated = clear_announcement_photos(
+                    session,
+                    actor_telegram_user_id=_user_id(update),
+                    draft_id=details.draft_id,
+                    expected_revision=details.revision,
+                )
+        except AnnouncementError as exc:
+            await _answer(update, str(exc), alert=True)
+            return await _render_photos(
+                update, context, details, notice=f"Фото не удалены: {_short(exc, 300)}"
+            )
+        _set_details(_ui(context), updated)
+        await _answer(update, "Все фотографии удалены.")
+        await screen.cleanup_preview(context, ctx.chat(update).id, ctx.data(context))
+        return await _render_photos(
+            update, context, updated, notice="✅ Все фотографии удалены."
+        )
+    if action == "aw_photo_show" and len(parts) == 3:
+        guarded = _guided()
+        if guarded is None:
+            return await _stale(update, context)
+        _ui_data, details = guarded
+        if details.publication_status is not None:
+            await _answer(update, "Публикация уже начата.", alert=True)
+            return await _render_publish_status(update, context, details)
+        await _answer(update)
+        ok, notice = await _show_media_preview(update, context, details)
+        return await _render_photos(
+            update,
+            context,
+            details,
+            notice=notice if ok else f"⚠️ {notice}",
+        )
+    if action == "aw_media_preview" and len(parts) == 3:
+        guarded = _guided()
+        if guarded is None:
+            return await _stale(update, context)
+        _ui_data, details = guarded
+        if details.publication_status is not None:
+            await _answer(update, "Публикация уже начата.", alert=True)
+            return await _render_publish_status(update, context, details)
+        await _answer(update)
+        ok, notice = await _show_media_preview(update, context, details)
+        return await _render_preview(
+            update,
+            context,
+            details,
+            notice=notice if ok else f"⚠️ {notice}",
+        )
+
+    # --- публикация ------------------------------------------------------
+    if action == "aw_pub_start" and len(parts) == 3:
+        guarded = _guided()
+        if guarded is None:
+            return await _stale(update, context)
+        _ui_data, details = guarded
+        if details.publication_status is not None:
+            await _answer(update, "Публикация уже начата.", alert=True)
+            return await _render_publish_status(update, context, details)
+        try:
+            with SessionLocal() as session:
+                preview = build_announcement_preview(
+                    session,
+                    actor_telegram_user_id=_user_id(update),
+                    draft_id=details.draft_id,
+                    today=app_today(),
+                )
+        except (
+            AnnouncementError,
+            TemplateError,
+            TemplateCompileError,
+            BrickError,
+        ) as exc:
+            await _answer(update, str(exc), alert=True)
+            return await _render_preview_error(update, context, details, str(exc))
+        if not preview.ready:
+            reason = preview.issues[0] if preview.issues else "анонс не готов"
+            await _answer(update, "Анонс пока не готов к публикации.", alert=True)
+            return await _render_preview(
+                update,
+                context,
+                preview.draft,
+                notice=f"⚠️ Публикация недоступна: {_short(reason, 300)}",
+            )
+        await _answer(update)
+        return await _render_publish_confirm(update, context, preview.draft, preview)
+    if action == "aw_pub_confirm" and len(parts) == 3:
+        guarded = _guided()
+        if guarded is None:
+            return await _stale(update, context)
+        _ui_data, details = guarded
+        if details.publication_status is not None:
+            # Повторный/запоздавший callback: ничего не отправляем.
+            await _answer(
+                update, "Публикация уже начата; повтор не выполняется.", alert=True
+            )
+            return await _render_publish_status(update, context, details)
+        try:
+            with SessionLocal() as session:
+                publication = begin_announcement_publication(
+                    session,
+                    actor_telegram_user_id=_user_id(update),
+                    draft_id=details.draft_id,
+                    expected_revision=details.revision,
+                    today=app_today(),
+                )
+        except (
+            AnnouncementError,
+            TemplateError,
+            TemplateCompileError,
+            BrickError,
+        ) as exc:
+            await _answer(update, str(exc), alert=True)
+            return await _render_preview_error(update, context, details, str(exc))
+        _set_details(_ui(context), publication.draft)
+        await _answer(update, "Отправляю анонс…")
+        return await _run_announcement_publication(update, context, publication)
+    if action == "aw_pub_resume" and len(parts) == 3:
+        guarded = _guided()
+        if guarded is None:
+            return await _stale(update, context)
+        _ui_data, details = guarded
+        try:
+            with SessionLocal() as session:
+                publication = resume_announcement_publication(
+                    session,
+                    actor_telegram_user_id=_user_id(update),
+                    draft_id=details.draft_id,
+                    expected_revision=details.revision,
+                )
+        except AnnouncementError as exc:
+            await _answer(update, str(exc), alert=True)
+            return await _resume_current(update, context, notice=str(exc))
+        _set_details(_ui(context), publication.draft)
+        await _answer(update, "Продолжаю отправку…")
+        return await _run_announcement_publication(update, context, publication)
+    if action == "aw_pub_reset" and len(parts) == 3:
+        guarded = _guided()
+        if guarded is None:
+            return await _stale(update, context)
+        _ui_data, details = guarded
+        try:
+            with SessionLocal() as session:
+                updated = reset_failed_announcement_publication(
+                    session,
+                    actor_telegram_user_id=_user_id(update),
+                    draft_id=details.draft_id,
+                    expected_revision=details.revision,
+                )
+        except AnnouncementError as exc:
+            await _answer(update, str(exc), alert=True)
+            return await _render_publish_status(update, context, details)
+        _set_details(_ui(context), updated)
+        await _answer(update, "Можно снова редактировать анонс.")
+        return await _render_preview(
+            update,
+            context,
+            updated,
+            notice=(
+                "↩️ Публикация не начиналась: можно изменить поля, extras "
+                "или фотографии."
+            ),
+        )
+
+    if action == "aw_new":
+        await _answer(update)
+        _reset_for_place(context)
+        return await _render_place_hub(update, context)
     if action == "aw_home":
         await _answer(update)
         return await _render_home(update, context)

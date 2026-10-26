@@ -1802,50 +1802,68 @@ def _delivery_fingerprint(text: str, file_ids: list[str]) -> str:
     return digest.hexdigest()
 
 
-async def send_post(
+async def send_rendered_post(
     bot,
     chat_id,
-    post_data: dict,
+    text: str,
     photos: list,
     *,
-    heading: str,
     reply_markup: InlineKeyboardMarkup | None = None,
     markup_lead_text: str | None = None,
     progress: dict | None = None,
+    on_progress: Callable[[dict], None] | None = None,
 ) -> list[int]:
     """
-    ЕДИНАЯ отправка поста: текст / фото с подписью / медиа-группа.
+    Низкоуровневая ЕДИНАЯ отправка уже готового HTML + фото.
 
-    Используется в превью и в финальной отправке по кнопке «Готово» —
-    формат сообщения одинаковый, без дублирования логики форматирования
-    и без повторного экранирования.
-
-    Текст длиннее MESSAGE_TEXT_LIMIT разбивается на несколько сообщений
-    (лимит Telegram — 4096); кнопки прикрепляются к первому сообщению.
-
-    Возвращает message_id отправленных сообщений (для превью — чтобы
-    заменять старое превью; для готового поста id не используется —
-    пост остаётся в чате навсегда).
+    Её используют и легаси-мастер через `send_post`, и новый адаптивный
+    мастер через замороженный payload. Второго формата/отправителя нет.
 
     progress — контейнер продолжения частичной отправки (Stage 12, §6):
     после каждой подтверждённой операции в него пишутся step (сколько
-    операций выполнено) и ids (их message_id). Повторная попытка с тем же
-    progress и тем же содержимым досылает ТОЛЬКО недостаающее — без
-    дублей уже отправленного и без его удаления. Изменение поста между
-    попытками сбрасывает прогресс (отпечаток текста и фото).
-    """
-    text = build_post_summary(post_data, heading=heading)
+    операций выполнено), ids (их message_id) и total. Повторная попытка
+    с тем же progress и тем же содержимым досылает ТОЛЬКО недостающее —
+    без дублей уже отправленного и без его удаления. Изменение текста/
+    фото между попытками сбрасывает прогресс по отпечатку.
 
+    on_progress вызывается после начальной синхронизации и после каждой
+    подтверждённой операции; новый мастер сохраняет этот снимок в SQLite.
+    Исключение из callback останавливает отправку: продолжать вслепую
+    нельзя, иначе возможны дубли.
+    """
     file_ids = [p for p in (photos or []) if p]
     chunks = split_long_text(text)
     sent: list[int] = []
     done = 0  # операций подтверждено (в т.ч. в прошлой попытке)
+    with_caption = utf16_len(text) <= CAPTION_TEXT_LIMIT
+    if not file_ids:
+        operation_total = len(chunks)
+    elif len(file_ids) == 1:
+        operation_total = 1 if with_caption else 1 + len(chunks)
+    else:
+        group_count = (len(file_ids) + MEDIA_GROUP_LIMIT - 1) // MEDIA_GROUP_LIMIT
+        operation_total = group_count
+        if not with_caption:
+            operation_total += len(chunks)
+        if reply_markup is not None:
+            operation_total += 1
+
+    tracking = (
+        progress if progress is not None else ({} if on_progress is not None else None)
+    )
 
     if progress is not None:
         fingerprint = _delivery_fingerprint(text, file_ids)
         if progress.get("fingerprint") == fingerprint:
             sent.extend(int(mid) for mid in progress.get("ids", []))
             done = int(progress.get("step", 0))
+            if done < 0 or done > operation_total:
+                logger.warning(
+                    "Прогресс частичной отправки не соответствует числу "
+                    "операций — отправка начинается заново."
+                )
+                sent.clear()
+                done = 0
         elif progress:
             # прежние id относятся к другому содержимому — начинаем заново
             logger.warning(
@@ -1854,6 +1872,16 @@ async def send_post(
         progress["fingerprint"] = fingerprint
         progress["step"] = done
         progress["ids"] = list(sent)
+        progress["total"] = operation_total
+
+    def _notify_progress(step: int | None = None) -> None:
+        if tracking is None:
+            return
+        tracking["step"] = op_index if step is None else step
+        tracking["ids"] = list(sent)
+        tracking["total"] = operation_total
+        if on_progress is not None:
+            on_progress(dict(tracking))
 
     op_index = 0
 
@@ -1873,9 +1901,14 @@ async def send_post(
         if current < done:
             return
         await runner()
-        if progress is not None:
-            progress["step"] = op_index
-            progress["ids"] = list(sent)
+        if tracking is not None:
+            _notify_progress()
+
+    # Начальный снимок фиксирует fingerprint/total ещё ДО первой сетевой
+    # операции: по нему можно продолжить после рестарта. При resume он
+    # идемпотентно подтверждает уже подтверждённый done.
+    if tracking is not None:
+        _notify_progress(done)
 
     def _text_runner(chunk_index: int, *, with_markup: bool):
         chunk = chunks[chunk_index]
@@ -1927,7 +1960,6 @@ async def send_post(
     # в одной группе (Stage 16: набор накапливается из нескольких альбомов
     # и одиночных фото) — больший набор отправляем группами; подпись
     # разрешена только у первого снимка ПЕРВОЙ группы
-    with_caption = utf16_len(text) <= CAPTION_TEXT_LIMIT
     groups = [
         file_ids[index : index + MEDIA_GROUP_LIMIT]
         for index in range(0, len(file_ids), MEDIA_GROUP_LIMIT)
@@ -1967,6 +1999,36 @@ async def send_post(
 
         await _perform(lead_runner)
     return sent
+
+
+async def send_post(
+    bot,
+    chat_id,
+    post_data: dict,
+    photos: list,
+    *,
+    heading: str,
+    reply_markup: InlineKeyboardMarkup | None = None,
+    markup_lead_text: str | None = None,
+    progress: dict | None = None,
+) -> list[int]:
+    """
+    Легаси-обёртка: собирает сводку старого мастера и отправляет её тем же
+    `send_rendered_post`, что и новый адаптивный мастер.
+
+    Текст длиннее MESSAGE_TEXT_LIMIT разбивается на несколько сообщений
+    (лимит Telegram — 4096); кнопки прикрепляются к первому сообщению.
+    Возвращает message_id отправленных сообщений.
+    """
+    return await send_rendered_post(
+        bot,
+        chat_id,
+        build_post_summary(post_data, heading=heading),
+        photos,
+        reply_markup=reply_markup,
+        markup_lead_text=markup_lead_text,
+        progress=progress,
+    )
 
 
 async def review_post(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
