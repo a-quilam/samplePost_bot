@@ -183,12 +183,52 @@ class AnnouncementDraftDetails:
 
     @property
     def publication_locked(self) -> bool:
-        """После начала отправки текст/фото/значения уже нельзя менять."""
-        return self.publication_status is not None
+        """Идёт отправка: текст/фото/значения менять нельзя до её завершения."""
+        return self.publication_status in PUBLICATION_FROZEN_STATUSES
 
     @property
     def publication_sent(self) -> bool:
         return self.publication_status == PUBLICATION_STATUS_SENT
+
+    @property
+    def delivered_message_ids(self) -> tuple[int, ...]:
+        """
+        message_id последней доставленной версии (ключ `ids` прогресса).
+
+        Хранятся только в SQLite-прогрессе: новых колонок и «истории
+        версий» нет — после пересборки прогресс описывает новую версию.
+        """
+        return _progress_ids(self.publication_progress, "ids")
+
+    @property
+    def previous_message_ids(self) -> tuple[int, ...]:
+        """
+        message_id прошлой доставленной версии, которую заменяет текущая.
+
+        Начатая пересборка переносит их в `previous_ids` прогресса: пока
+        новая версия не подтверждена целиком, прошлая остаётся в чате
+        единственной полной копией анонса.
+        """
+        return _progress_ids(self.publication_progress, "previous_ids")
+
+    @property
+    def delivery_fingerprint(self) -> str | None:
+        value = self.publication_progress.get("fingerprint")
+        return value if isinstance(value, str) and value else None
+
+    @property
+    def can_edit_after_delivery(self) -> bool:
+        """
+        Доставленный анонс можно править, пока не начата новая отправка.
+
+        `sending`/`partial`/`failed` означают незавершённую замену: правка
+        в этот момент создала бы третью версию и дубли.
+        """
+        if self.publication_status is None:
+            return True
+        return self.publication_status == PUBLICATION_STATUS_SENT and bool(
+            self.delivered_message_ids
+        )
 
     @property
     def publication_step(self) -> int:
@@ -206,11 +246,18 @@ class AnnouncementDraftDetails:
 
     @property
     def publication_can_reset(self) -> bool:
-        """Вернуться к правке можно только до первой операции отправки."""
+        """
+        Вернуться к правке можно только до первой операции отправки.
+
+        Пересборка уже доставленного анонса не сбрасывается: адреса прошлой
+        версии нельзя терять, иначе её не удалить и не заменить — в чате
+        остались бы две копии анонса.
+        """
         return (
             self.publication_status == PUBLICATION_STATUS_FAILED
             and self.publication_step == 0
             and not self.publication_progress.get("ids")
+            and not self.previous_message_ids
         )
 
 
@@ -370,6 +417,18 @@ def _validated_photo_id(value: object) -> str:
     return file_id
 
 
+def _progress_ids(progress: Mapping[str, Any], key: str) -> tuple[int, ...]:
+    value = progress.get(key)
+    if not isinstance(value, (list, tuple)):
+        return ()
+    result: list[int] = []
+    for item in value:
+        if isinstance(item, bool) or not isinstance(item, int) or item <= 0:
+            continue
+        result.append(item)
+    return tuple(dict.fromkeys(result))
+
+
 def _publication_progress_from_json(raw: str | None) -> Mapping[str, Any]:
     if not raw:
         return {}
@@ -389,16 +448,28 @@ def _publication_progress_to_json(progress: Mapping[str, Any]) -> str:
 
 
 def _ensure_content_editable(row: AnnouncementDraft) -> None:
-    """После первого шага публикации содержимое анонса заморожено."""
-    if row.publication_status is not None:
-        if row.publication_status == PUBLICATION_STATUS_SENT:
-            raise AnnouncementPublicationError(
-                "Анонс уже опубликован; повторная публикация не выполняется."
-            )
+    """
+    Правка содержимого разрешена до первой отправки и после доставки.
+
+    Stage 28: готовый анонс доставляется в личный чат автора, поэтому после
+    успешной доставки данные снова редактируемы — новая версия заменит
+    прошлую. Пока замена не завершена (`sending`/`partial`/`failed`),
+    правка запрещена: иначе третья версия останется в чате.
+    """
+    if row.publication_status is None:
+        return
+    if row.publication_status == PUBLICATION_STATUS_SENT:
+        progress = _publication_progress_from_json(row.publication_progress)
+        if _progress_ids(progress, "ids"):
+            return
         raise AnnouncementPublicationError(
-            "Публикация уже начата: изменить текст, значения или фотографии "
-            "нельзя. Продолжите отправку или завершите её по статусу."
+            "Анонс уже отправлен, но адреса доставки не сохранены. "
+            "Повторная отправка не выполняется, чтобы не создать дубль."
         )
+    raise AnnouncementPublicationError(
+        "Отправка уже начата: изменить текст, значения или фотографии "
+        "нельзя. Продолжите отправку или завершите её по статусу."
+    )
 
 
 def _require_actor(session: Session, telegram_user_id: int | None) -> User:
@@ -1520,11 +1591,30 @@ def begin_announcement_publication(
     actor = _require_actor(session, actor_telegram_user_id)
     row = _load_owned_draft(session, actor, draft_id)
     revision = _expected_revision(row, expected_revision)
+    previous_ids: list[int] = []
     if row.publication_status is not None:
-        raise AnnouncementPublicationError(
-            "Публикация уже начата или завершена; payload не пересобирается."
+        # Stage 28: доставленный анонс пересобирается после правки. Адреса
+        # прежней версии переносятся в `previous_ids` ТОЛЬКО как адреса
+        # прошлой отправки — они не смешиваются с `ids` новой. Незавершённая
+        # отправка по-прежнему не пересобирается: неизвестный исход нельзя
+        # перекрывать новой версией.
+        if row.publication_status != PUBLICATION_STATUS_SENT:
+            raise AnnouncementPublicationError(
+                "Отправка уже начата или завершена; payload не пересобирается."
+            )
+        previous_ids = list(
+            _progress_ids(
+                _publication_progress_from_json(row.publication_progress), "ids"
+            )
         )
-    if row.stage != WizardStage.PREVIEW.value:
+        if not previous_ids:
+            raise AnnouncementPublicationError(
+                "Адреса прежней доставки не сохранены: замена невозможна."
+            )
+    if row.stage not in {
+        WizardStage.PREVIEW.value,
+        WizardStage.COMPLETED.value,
+    }:
         raise AnnouncementStageError("Сначала завершите обзор анонса.")
     preview = build_announcement_preview(
         session,
@@ -1534,9 +1624,16 @@ def begin_announcement_publication(
     )
     if not preview.ready:
         reason = preview.issues[0] if preview.issues else "анонс не готов"
-        raise AnnouncementStageError(f"Анонс не готов к публикации: {reason}")
+        raise AnnouncementStageError(f"Анонс не готов к выдаче: {reason}")
     now = utcnow()
     photos = preview.draft.photos
+    # Прогресс новой версии: step/ids/total заполнит отправитель, а
+    # `previous_ids` — адреса уже доставленной версии, которую нужно
+    # заменить. Никакой «неизменяемой истории»: при следующей пересборке
+    # этот payload перезаписывается.
+    progress: dict[str, object] = {}
+    if previous_ids:
+        progress["previous_ids"] = previous_ids
     try:
         _cas_update_draft(
             session,
@@ -1546,7 +1643,9 @@ def begin_announcement_publication(
                 "publication_status": PUBLICATION_STATUS_SENDING,
                 "publication_text": preview.html,
                 "publication_photos": json.dumps(list(photos), ensure_ascii=False),
-                "publication_progress": None,
+                "publication_progress": (
+                    _publication_progress_to_json(progress) if progress else None
+                ),
                 "publication_error": None,
                 "publication_started_at": now,
                 "published_at": None,
@@ -1678,8 +1777,17 @@ def mark_announcement_publication_sent(
     *,
     actor_telegram_user_id: int | None,
     draft_id: int,
+    message_ids: Sequence[object] | None = None,
+    fingerprint: str | None = None,
 ) -> AnnouncementDraftDetails:
-    """Переводит анонс в `sent` только после успешного ответа Telegram."""
+    """
+    Переводит анонс в `sent` только после успешного ответа Telegram.
+
+    `message_ids` — id ТЕКУЩЕЙ отправки: они сохраняются в прогрессе как
+    `ids` и остаются адресами доставленной версии. `fingerprint` позволяет
+    не отправлять повторно неизменившийся анонс. `previous_ids` из прогресса
+    сохраняются как есть — это адреса прошлой версии, отдельные от `ids`.
+    """
     actor = _require_actor(session, actor_telegram_user_id)
     row = _load_owned_draft(session, actor, draft_id)
     if row.publication_status == PUBLICATION_STATUS_SENT:
@@ -1689,6 +1797,21 @@ def mark_announcement_publication_sent(
             "Успех можно зафиксировать только после текущей отправки; "
             "сначала продолжите замороженный payload."
         )
+    progress = dict(_publication_progress_from_json(row.publication_progress))
+    if message_ids is not None:
+        checked = _progress_ids({"ids": list(message_ids)}, "ids")
+        if not checked:
+            raise AnnouncementValueError(
+                "Нельзя зафиксировать доставку без message_id."
+            )
+        progress["ids"] = list(checked)
+    if fingerprint is not None:
+        if not fingerprint.strip():
+            raise AnnouncementValueError("Отпечаток доставки не может быть пустым.")
+        progress["fingerprint"] = fingerprint.strip()
+    # Без id доставка считается неподтверждённой: анонс можно показать, но
+    # заменить/удалить прошлую копию нельзя, поэтому правка не разрешается
+    # (`_ensure_content_editable`). Вызывающий мастер всегда передаёт id.
     try:
         _cas_update_draft(
             session,
@@ -1696,6 +1819,7 @@ def mark_announcement_publication_sent(
             revision=row.revision,
             fields={
                 "publication_status": PUBLICATION_STATUS_SENT,
+                "publication_progress": _publication_progress_to_json(progress),
                 "publication_error": None,
                 "published_at": utcnow(),
                 "stage": WizardStage.COMPLETED.value,
@@ -1729,6 +1853,11 @@ def reset_failed_announcement_publication(
             "Вернуться к правке можно только после полного отказа отправки."
         )
     progress = _publication_progress_from_json(row.publication_progress)
+    if _progress_ids(progress, "previous_ids"):
+        raise AnnouncementPublicationError(
+            "Это замена уже доставленного анонса: адреса прошлой версии "
+            "нельзя потерять. Повторите отправку или оставьте анонс как есть."
+        )
     step = progress.get("step")
     ids = progress.get("ids")
     if (isinstance(step, int) and not isinstance(step, bool) and step > 0) or (
@@ -1750,6 +1879,7 @@ def reset_failed_announcement_publication(
                 "publication_error": None,
                 "publication_started_at": None,
                 "published_at": None,
+                "stage": WizardStage.PREVIEW.value,
             },
         )
         _commit(session)
@@ -1777,15 +1907,28 @@ def _validated_publication_progress(
     if step > total:
         raise AnnouncementValueError("Шаг публикации больше общего числа операций.")
     if not isinstance(ids, list) or any(
-        isinstance(item, bool) or not isinstance(item, int) for item in ids
+        isinstance(item, bool) or not isinstance(item, int) or item <= 0 for item in ids
     ):
         raise AnnouncementValueError("В прогрессе публикации некорректные message_id.")
-    return {
+    result: dict[str, object] = {
         "fingerprint": fingerprint,
         "step": step,
         "ids": list(ids),
         "total": total,
     }
+    # Адреса ПРЕДЫДУЩЕЙ доставленной версии не смешиваются с `ids` текущей
+    # отправки: по ним удаляется прошлая копия после успешной замены.
+    if "previous_ids" in progress:
+        previous = progress.get("previous_ids")
+        if not isinstance(previous, list) or any(
+            isinstance(item, bool) or not isinstance(item, int) or item <= 0
+            for item in previous
+        ):
+            raise AnnouncementValueError(
+                "В прогрессе доставки некорректные message_id прошлой версии."
+            )
+        result["previous_ids"] = list(previous)
+    return result
 
 
 # --- Чтение и восстановление ------------------------------------------------

@@ -1832,6 +1832,57 @@ MIGRATION_13_ANNOUNCEMENT_PUBLICATION = Migration(
 )
 
 
+# --- Версия 14: правка доставленного анонса (Stage 28) ----------------------
+#
+# Готовый анонс теперь автоматически выдаётся в личный чат автора, а после
+# правки данных заменяется новой версией. Миграция НЕ меняет схему данных:
+# адреса уже доставленных сообщений и отпечаток содержимого живут в
+# `publication_progress` (ключи `ids`/`fingerprint`), время — в `published_at`.
+# Единственное изменение — разрешить ровно один проверяемый переход
+# `sent -> sending` (новая заморозка того же анонса). Миграции 1–13 не
+# меняются; DDL выполняется в общей транзакции `run_migrations`.
+
+MIGRATION_14_ANNOUNCEMENT_REDELIVERY = Migration(
+    version=14,
+    name="announcement_redelivery",
+    statements=(
+        "DROP TRIGGER trg_announcement_drafts_published_immutable",
+        # Переход из `sent` возможен только в `sending` и только с явным
+        # переносом прошлых message_id в `previous_ids`: адреса прежней
+        # версии нельзя потерять (иначе её не заменить и не удалить) и нельзя
+        # выдать за адреса новой отправки. Всё остальное (правка payload
+        # идущей отправки, `sent -> failed`, повторный `sent`) по-прежнему
+        # запрещено. Прежний payload при этом перезаписывается — это не
+        # неизменяемая история, а последняя доставленная версия.
+        """
+        CREATE TRIGGER trg_announcement_drafts_published_immutable
+        BEFORE UPDATE OF
+            publication_status, publication_text, publication_photos,
+            publication_progress, publication_error,
+            publication_started_at, published_at
+        ON announcement_drafts
+        FOR EACH ROW
+        WHEN OLD.publication_status = 'sent'
+            AND NOT (
+                NEW.publication_status = 'sending'
+                AND NEW.published_at IS NULL
+                AND NEW.publication_started_at IS NOT NULL
+                AND NEW.publication_text IS NOT NULL
+                AND length(trim(NEW.publication_text)) > 0
+                AND NEW.publication_photos IS NOT NULL
+                AND NEW.publication_error IS NULL
+                AND NEW.publication_progress IS NOT NULL
+                AND (NEW.publication_progress -> '$.previous_ids')
+                    IS (OLD.publication_progress -> '$.ids')
+            )
+        BEGIN
+            SELECT RAISE(ABORT, 'announcement already delivered');
+        END
+        """,
+    ),
+)
+
+
 DEFAULT_MIGRATIONS: tuple[Migration, ...] = (
     MIGRATION_1_USERS_PLACES,
     MIGRATION_2_PLACE_CONTACTS_UI,
@@ -1846,6 +1897,7 @@ DEFAULT_MIGRATIONS: tuple[Migration, ...] = (
     MIGRATION_11_BRICK_PROPOSALS,
     MIGRATION_12_ANNOUNCEMENT_WIZARD,
     MIGRATION_13_ANNOUNCEMENT_PUBLICATION,
+    MIGRATION_14_ANNOUNCEMENT_REDELIVERY,
 )
 
 LATEST_VERSION = DEFAULT_MIGRATIONS[-1].version if DEFAULT_MIGRATIONS else 0

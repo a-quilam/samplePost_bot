@@ -1864,7 +1864,7 @@ async def send_rendered_post(
                 )
                 sent.clear()
                 done = 0
-        elif progress:
+        elif progress.get("fingerprint"):
             # прежние id относятся к другому содержимому — начинаем заново
             logger.warning(
                 "Частичная отправка прервана изменением поста — отправка заново."

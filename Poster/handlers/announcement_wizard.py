@@ -27,10 +27,12 @@ from __future__ import annotations
 
 import logging
 import uuid
+from collections.abc import Sequence
 from datetime import date
 from typing import Any
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
+from telegram.constants import ChatType
 from telegram.ext import (
     BaseHandler,
     CallbackQueryHandler,
@@ -167,10 +169,29 @@ EXPIRED_TEXT = (
     "Кнопка устарела после перезапуска. Откройте «📝 Новый мастер» и "
     "продолжите сохранённый черновик."
 )
+PRIVATE_CHAT_ONLY = (
+    "Готовый анонс отправляется только в личный чат автора. "
+    "Откройте мастер в личном чате с ботом — черновик сохранён."
+)
 
 
 def _user_id(update: Update) -> int:
     return ctx.user(update).id
+
+
+def _is_private_chat(update: Update) -> bool:
+    """
+    Анонс доставляется только в личный чат автора.
+
+    Мастер можно открыть и в группе (`/new_wizard`), но автоматическая
+    выдача готового текста туда превратила бы личный анонс в сообщение для
+    посторонних. Проверка стоит на каждом пути отправки, а не только на
+    входе: callback может прийти из чата, где диалог начинался иначе.
+    """
+    chat = update.effective_chat
+    if chat is None:
+        return False
+    return chat.type == ChatType.PRIVATE
 
 
 def _ui(context: ContextTypes.DEFAULT_TYPE) -> dict[str, Any]:
@@ -369,6 +390,20 @@ def _main_menu_keyboard() -> InlineKeyboardMarkup:
     return main_menu_keyboard()
 
 
+def _edit_blocked(details) -> bool:
+    """
+    Идёт отправка: данные менять нельзя, пока она не завершилась.
+
+    Доставленный анонс (`sent`) редактируем: следующая сборка заменит
+    прошлую версию.
+    """
+    return details.publication_status in {
+        PUBLICATION_STATUS_SENDING,
+        PUBLICATION_STATUS_PARTIAL,
+        PUBLICATION_STATUS_FAILED,
+    }
+
+
 def _draft_status_label(draft) -> str:
     status = getattr(draft, "publication_status", None)
     if status == PUBLICATION_STATUS_SENDING:
@@ -378,7 +413,7 @@ def _draft_status_label(draft) -> str:
     if status == PUBLICATION_STATUS_FAILED:
         return "ошибка отправки"
     if status == PUBLICATION_STATUS_SENT:
-        return "опубликован"
+        return "готовый анонс отправлен"
     return STAGE_LABELS.get(str(getattr(draft, "stage", "")), "черновик")
 
 
@@ -400,8 +435,9 @@ def _home_content(user_id: int, page: int) -> tuple[str, InlineKeyboardMarkup, i
         "📝 Новый мастер",
         "",
         "Адаптивный мастер сам определит недостающие поля по выбранному "
-        "шаблону. Фотографии можно добавить отдельно. Публикация выполняется "
-        "только после явного подтверждения и только по кнопке.",
+        "шаблону. Фотографии можно добавить отдельно. Готовый анонс "
+        "автоматически приходит в этот личный чат отдельным сообщением — "
+        "ни в каналы, ни другим людям он не отправляется.",
     ]
     if shown:
         lines.extend(["", "Незавершённые анонсы:"])
@@ -882,7 +918,7 @@ async def _open_draft(
         return await _enter_questions(update, context, details)
     if stage == WizardStage.EXTRAS:
         return await _render_extras(update, context, details)
-    if details.publication_status is not None:
+    if details.publication_status not in {None, PUBLICATION_STATUS_SENT}:
         return await _render_publish_status(update, context, details)
     return await _render_preview(update, context, details)
 
@@ -1548,12 +1584,47 @@ async def _advance_question(
     if not fields:
         return await _enter_extras(update, context, details, notice=notice)
     if next_index >= len(fields):
-        return await _enter_extras(update, context, details, notice=notice)
+        return await _after_questions(update, context, details, notice=notice)
     if next_index < 0:
         next_index = 0
     return await _render_question(
         update, context, details, fields, next_index, notice=notice
     )
+
+
+async def _after_questions(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+    details,
+    *,
+    notice: str | None = None,
+) -> int:
+    """
+    Последний ответ (или осознанный пропуск) завершает сбор автоматически.
+
+    Отдельного шага подтверждения нет: готовый анонс сразу собирается и
+    уходит в личный чат автора. Дополнительные кирпичики и фотографии
+    добавляются уже после доставки — кнопками на экране управления.
+    """
+    try:
+        updated = _ensure_stage(update, context, details, WizardStage.PREVIEW)
+    except AnnouncementError as exc:
+        await _answer(update, str(exc), alert=True)
+        return await _resume_current(update, context, notice=str(exc))
+    if updated.publication_sent:
+        # Анонс уже доставлен. Правка через «Изменить данные» может состоять
+        # из нескольких шагов: новую версию отправляет явное «Применить
+        # изменения», иначе каждая правка создавала бы отдельное сообщение.
+        return await _render_delivered(
+            update,
+            context,
+            updated,
+            notice=notice,
+            pending=_has_pending_changes(update, updated),
+        )
+    # Ответы закончились — последний шаг первого заполнения: анонс сразу
+    # собирается и уходит в личный чат автора. Кнопки «Готово» нет.
+    return await _finish_and_deliver(update, context, updated, notice=notice)
 
 
 async def _save_question_value(
@@ -2293,6 +2364,8 @@ async def _render_extras(
         "",
         "Дополнительные поля влияют только на этот анонс. Исходный шаблон "
         "не меняется.",
+        "Если анонс уже отправлен, изменения применяются по кнопке "
+        "«Применить изменения»: новая версия заменит прошлую.",
     ]
     if items:
         for number, (extra, definition) in enumerate(items, start=1):
@@ -2341,14 +2414,24 @@ async def _render_extras(
             )
         ]
     )
-    rows.append(
-        [
-            InlineKeyboardButton(
-                "👁 Обзор анонса",
-                callback_data=(f"aw_preview:{details.draft_id}:{details.revision}"),
-            )
-        ]
-    )
+    if details.publication_sent:
+        rows.append(
+            [
+                InlineKeyboardButton(
+                    "🔄 Применить изменения",
+                    callback_data=(f"aw_apply:{details.draft_id}:{details.revision}"),
+                )
+            ]
+        )
+    else:
+        rows.append(
+            [
+                InlineKeyboardButton(
+                    "👁 Обзор анонса",
+                    callback_data=(f"aw_preview:{details.draft_id}:{details.revision}"),
+                )
+            ]
+        )
     rows.append(
         [
             InlineKeyboardButton(
@@ -2879,7 +2962,10 @@ def _preview_summary_lines(
 
 def _preview_block(preview: AnnouncementPreview) -> list[str]:
     if preview.ready:
-        lines = ["", "✅ Анонс можно передать к публикации."]
+        lines = [
+            "",
+            "✅ Анонс готов: он собирается и приходит в этот чат автоматически.",
+        ]
         if preview.warnings:
             lines.append(_h(preview.warnings[0]))
         lines.extend(["", "📄 Предпросмотр:"])
@@ -2892,7 +2978,7 @@ def _preview_block(preview: AnnouncementPreview) -> list[str]:
             lines.append(preview.html)
         return lines
 
-    lines = ["", "⚠️ Анонс пока не готов к следующему этапу."]
+    lines = ["", "⚠️ Анонс пока не готов."]
     for issue in preview.issues:
         lines.append(f"• {_h(issue)}")
     if preview.missing:
@@ -2903,7 +2989,7 @@ def _preview_block(preview: AnnouncementPreview) -> list[str]:
             "поле из шаблона."
         )
     if preview.visible_text:
-        lines.extend(["", "Черновой фрагмент (не готов к публикации):"])
+        lines.extend(["", "Черновой фрагмент (анонс ещё не готов):"])
         fragment = preview.visible_text[:PREVIEW_VISIBLE_LIMIT].rstrip()
         if len(preview.visible_text) > PREVIEW_VISIBLE_LIMIT:
             fragment += "…"
@@ -2916,32 +3002,44 @@ def _preview_keyboard(
 ) -> InlineKeyboardMarkup:
     draft_id = details.draft_id
     revision = details.revision
-    rows: list[list[InlineKeyboardButton]] = [
+    delivered = bool(details.publication_sent)
+    rows: list[list[InlineKeyboardButton]] = []
+    rows.append(
         [
             InlineKeyboardButton(
-                "✅ Черновик сохранён" if saved else "✅ Сохранить черновик",
+                (
+                    "💾 Сохранить и выйти"
+                    if delivered
+                    else ("✅ Черновик сохранён" if saved else "✅ Сохранить черновик")
+                ),
                 callback_data=f"aw_save:{draft_id}:{revision}",
             )
-        ],
+        ]
+    )
+    rows.append(
         [
             InlineKeyboardButton(
                 "✏️ Изменить поля",
                 callback_data=f"aw_qmanage:{draft_id}:{revision}",
             )
         ],
+    )
+    rows.append(
         [
             InlineKeyboardButton(
                 "➕ Дополнительные кирпичики",
                 callback_data=f"aw_extras:{draft_id}:{revision}",
             )
-        ],
+        ]
+    )
+    rows.append(
         [
             InlineKeyboardButton(
                 f"📷 Фотографии ({len(details.photos)})",
                 callback_data=f"aw_photos:{draft_id}:{revision}:0",
             )
-        ],
-    ]
+        ]
+    )
     if details.photos:
         rows.append(
             [
@@ -2951,23 +3049,48 @@ def _preview_keyboard(
                 )
             ]
         )
-    if ready:
+    if ready and details.publication_sent:
+        # В обзоре доставленного анонса единственное действие отправки —
+        # применение правок: новая версия заменит прошлую.
         rows.append(
             [
                 InlineKeyboardButton(
-                    "🚀 Опубликовать анонс",
-                    callback_data=f"aw_pub_start:{draft_id}:{revision}",
+                    "🔄 Применить изменения",
+                    callback_data=f"aw_apply:{draft_id}:{revision}",
                 )
             ]
         )
-    rows.append(
-        [
-            InlineKeyboardButton(
-                "🔄 Обновить",
-                callback_data=f"aw_preview:{draft_id}:{revision}",
-            )
-        ]
-    )
+    if ready and not details.publication_sent:
+        # Обычный путь доставляет анонс автоматически после последнего ответа.
+        # Эта кнопка нужна только черновикам, остановленным на обзоре
+        # (сохранённый черновик, рестарт, возврат после полного отказа
+        # отправки): без неё их нельзя было бы завершить.
+        rows.append(
+            [
+                InlineKeyboardButton(
+                    "📨 Отправить в этот чат",
+                    callback_data=f"aw_send:{draft_id}:{revision}",
+                )
+            ]
+        )
+    if delivered:
+        rows.append(
+            [
+                InlineKeyboardButton(
+                    "◀️ К управлению",
+                    callback_data=f"aw_panel:{draft_id}:{revision}",
+                )
+            ]
+        )
+    else:
+        rows.append(
+            [
+                InlineKeyboardButton(
+                    "🔄 Обновить",
+                    callback_data=f"aw_preview:{draft_id}:{revision}",
+                )
+            ]
+        )
     rows.append([InlineKeyboardButton("🏠 Главное меню", callback_data="main_menu")])
     return InlineKeyboardMarkup(rows)
 
@@ -2979,14 +3102,38 @@ async def _render_preview(
     *,
     notice: str | None = None,
     saved: bool = False,
+    preview_only: bool = False,
 ) -> int:
+    """
+    Обзор анонса; для уже доставленного — экран управления без отправки.
+
+    Просмотр и повторное открытие черновика никогда не отправляют сообщения
+    сами: новую версию создаёт либо последний ответ в мастере, либо явное
+    «Применить изменения». `preview_only` показывает сам текст обзора (для
+    проверки длинного текста и вложений) и не меняет данные.
+    """
     ui = _ui(context)
     _clear_active(ui)
-    if details.publication_status is not None:
+    if details.publication_status not in {None, PUBLICATION_STATUS_SENT}:
         return await _render_publish_status(update, context, details, notice=notice)
+    if details.publication_sent and not preview_only:
+        pending = _has_pending_changes(update, details)
+        if saved:
+            notice = (
+                "✅ Черновик сохранён. Есть неприменённые изменения: "
+                "нажмите «Применить изменения»."
+                if pending
+                else "✅ Черновик сохранён. Отправленный анонс не менялся."
+            )
+        return await _render_delivered(
+            update, context, details, notice=notice, pending=pending
+        )
     updated = details
     try:
-        updated = _ensure_stage(update, context, details, WizardStage.PREVIEW)
+        if not details.publication_sent:
+            # Обзор доставленного анонса не возвращает его на этап правки:
+            # иначе сохранённый черновик терял бы статус готового.
+            updated = _ensure_stage(update, context, details, WizardStage.PREVIEW)
         with SessionLocal() as session:
             preview = build_announcement_preview(
                 session,
@@ -2996,7 +3143,7 @@ async def _render_preview(
             )
     except (AnnouncementError, TemplateError, TemplateCompileError, BrickError) as exc:
         return await _render_preview_error(update, context, updated, str(exc))
-    if preview.draft.publication_status is not None:
+    if preview.draft.publication_status not in {None, PUBLICATION_STATUS_SENT}:
         return await _render_publish_status(
             update, context, preview.draft, notice=notice
         )
@@ -3033,11 +3180,14 @@ async def _render_preview_error(
     )
     rows = []
     if details is not None:
+        retry_action = "aw_apply" if details.publication_sent else "aw_preview"
         rows.append(
             [
                 InlineKeyboardButton(
                     "🔄 Обновить",
-                    callback_data=(f"aw_preview:{details.draft_id}:{details.revision}"),
+                    callback_data=(
+                        f"{retry_action}:{details.draft_id}:{details.revision}"
+                    ),
                 )
             ]
         )
@@ -3099,7 +3249,7 @@ async def _resume_current(
         return await _enter_questions(update, context, details, notice=notice)
     if stage == WizardStage.EXTRAS:
         return await _render_extras(update, context, details, notice=notice)
-    if details.publication_status is not None:
+    if details.publication_status not in {None, PUBLICATION_STATUS_SENT}:
         return await _render_publish_status(update, context, details, notice=notice)
     return await _render_preview(update, context, details, notice=notice)
 
@@ -3190,19 +3340,27 @@ async def _render_photos(
         lines.extend(
             [
                 "",
-                "Фотографий пока нет — анонс можно опубликовать и без них.",
+                "Фотографий пока нет — анонс придёт без вложений.",
             ]
         )
-    if details.publication_status is not None:
+    if details.publication_sent:
         lines.extend(
             [
                 "",
-                "⚠️ Публикация уже начата: коллекция фотографий заморожена.",
+                "Изменения применятся по кнопке «Применить изменения»: "
+                "анонс соберётся заново и заменит прошлую версию в чате.",
+            ]
+        )
+    if _edit_blocked(details):
+        lines.extend(
+            [
+                "",
+                "⚠️ Отправка уже начата: коллекция фотографий заморожена.",
             ]
         )
 
     rows: list[list[InlineKeyboardButton]] = []
-    if details.publication_status is None:
+    if not _edit_blocked(details):
         rows.append(
             [
                 InlineKeyboardButton(
@@ -3214,7 +3372,7 @@ async def _render_photos(
             ]
         )
     start = page * PHOTO_PAGE_SIZE
-    if details.publication_status is None:
+    if not _edit_blocked(details):
         for offset in range(min(PHOTO_PAGE_SIZE, max(0, total - start))):
             index = start + offset
             rows.append(
@@ -3228,7 +3386,7 @@ async def _render_photos(
                     )
                 ]
             )
-    if total and details.publication_status is None:
+    if total and not _edit_blocked(details):
         rows.append(
             [
                 InlineKeyboardButton(
@@ -3260,7 +3418,7 @@ async def _render_photos(
         )
     if nav:
         rows.append(nav)
-    if total and details.publication_status is None:
+    if total and not _edit_blocked(details):
         rows.append(
             [
                 InlineKeyboardButton(
@@ -3268,6 +3426,15 @@ async def _render_photos(
                     callback_data=(
                         f"aw_photo_clear:{details.draft_id}:{details.revision}"
                     ),
+                )
+            ]
+        )
+    if details.publication_sent:
+        rows.append(
+            [
+                InlineKeyboardButton(
+                    "🔄 Применить изменения",
+                    callback_data=(f"aw_apply:{details.draft_id}:{details.revision}"),
                 )
             ]
         )
@@ -3296,6 +3463,10 @@ async def _show_media_preview(
     успешной отправки/смены фото. При сбое уже ушедшая часть запоминается
     для очистки, а данные анонса не меняются.
     """
+    if not _is_private_chat(update):
+        # Временный предпросмотр — тоже реальные фото от имени бота:
+        # в группе/канале он недопустим по тем же причинам, что и анонс.
+        return False, PRIVATE_CHAT_ONLY
     try:
         with SessionLocal() as session:
             preview = build_announcement_preview(
@@ -3338,77 +3509,6 @@ async def _show_media_preview(
     )
 
 
-async def _render_publish_confirm(
-    update: Update,
-    context: ContextTypes.DEFAULT_TYPE,
-    details,
-    preview: AnnouncementPreview,
-) -> int:
-    """Второй явный шаг: подтверждение отправки в текущий чат."""
-    ui = _ui(context)
-    _set_details(ui, details)
-    _clear_active(ui)
-    photos = len(details.photos)
-    excerpt = preview.visible_text[:1200].rstrip()
-    if len(preview.visible_text) > 1200:
-        excerpt += "…"
-    lines = [
-        "🚀 Публикация анонса",
-        "",
-        f"Место: {_h(details.place_display_name)}",
-        f"Вложений: {photos}.",
-        "",
-        "Telegram отправит готовый текст и фотографии в этот чат. "
-        "Это финальное действие; отдельного согласования в Poster нет.",
-    ]
-    if photos > 10:
-        lines.append(
-            "Фото уйдут несколькими альбомами: Telegram принимает не более "
-            "10 снимков в одной медиагруппе."
-        )
-    lines.extend(
-        [
-            "",
-            "Фрагмент текста:",
-            _h(excerpt),
-            "",
-            "⚠️ После подтверждения текст и фотографии фиксируются. "
-            "Изменить их можно будет только до первого подтверждённого "
-            "сообщения Telegram; после частичной отправки доступно лишь "
-            "продолжение.",
-            "Если Telegram принял сообщение, но ответ потерялся, повтор "
-            "может создать дубль — бот честно предупредит об этом.",
-        ]
-    )
-    await _render(
-        update,
-        context,
-        "\n".join(lines),
-        InlineKeyboardMarkup(
-            [
-                [
-                    InlineKeyboardButton(
-                        "✅ Подтвердить публикацию",
-                        callback_data=(
-                            f"aw_pub_confirm:{details.draft_id}:{details.revision}"
-                        ),
-                    )
-                ],
-                [
-                    InlineKeyboardButton(
-                        "◀️ Назад к обзору",
-                        callback_data=(
-                            f"aw_preview:{details.draft_id}:{details.revision}"
-                        ),
-                    )
-                ],
-                [InlineKeyboardButton("🏠 Главное меню", callback_data="main_menu")],
-            ]
-        ),
-    )
-    return AW_PREVIEW
-
-
 async def _render_publish_status(
     update: Update,
     context: ContextTypes.DEFAULT_TYPE,
@@ -3416,9 +3516,9 @@ async def _render_publish_status(
     *,
     notice: str | None = None,
 ) -> int:
-    """Экран начатой/частичной/неудачной публикации без права правки."""
+    """Экран начатой/частичной/неудачной отправки без права правки."""
     if details.publication_status == PUBLICATION_STATUS_SENT:
-        return await _render_published(update, context, details, notice=notice)
+        return await _render_delivered(update, context, details, notice=notice)
     if details.publication_status is None:
         return await _render_preview(update, context, details, notice=notice)
     ui = _ui(context)
@@ -3428,7 +3528,7 @@ async def _render_publish_status(
     step = details.publication_step
     total = details.publication_total
     lines = [
-        "🚀 Публикация анонса",
+        "📨 Отправка готового анонса в этот чат",
         "",
         f"Место: {_h(details.place_display_name)}",
         f"Фотографий: {len(details.publication_photos)}.",
@@ -3467,14 +3567,23 @@ async def _render_publish_status(
             "Сохранённого прогресса нет: первая операция могла быть принята "
             "Telegram до сбоя, поэтому повтор может создать дубль."
         )
+    if details.previous_message_ids:
+        lines.extend(
+            [
+                "",
+                "В чате остаётся прошлая доставленная версия анонса: она не "
+                "удаляется, пока новая не подтверждена полностью.",
+            ]
+        )
     if details.publication_error:
         lines.extend(["", f"Причина: {_h(details.publication_error)}"])
     lines.extend(
         [
             "",
-            "Текст, значения кирпичиков и фотографии заморожены. Если "
-            "Telegram принял последнюю группу, но ответ потерялся, повтор "
-            "может создать дубль — это ограничение Telegram API.",
+            "Текст, значения кирпичиков и фотографии зафиксированы на момент "
+            "начала отправки. Если Telegram принял последнюю часть, но ответ "
+            "потерялся, повтор может создать дубль — это ограничение "
+            "Telegram API. Адреса подтверждённых сообщений сохранены.",
         ]
     )
     rows: list[list[InlineKeyboardButton]] = []
@@ -3512,43 +3621,239 @@ async def _render_publish_status(
     return AW_PREVIEW
 
 
-async def _render_published(
+def _delivery_fingerprint(text: str, photos: Sequence[str]) -> str:
+    from handlers.post_creation import _delivery_fingerprint as fingerprint
+
+    return fingerprint(text, list(photos))
+
+
+def _has_pending_changes(update: Update, details) -> bool:
+    """
+    Отличается ли текущий анонс от последней доставленной версии.
+
+    Сравнивается только отпечаток текста и фото — то, что реально видит
+    автор. При ошибке сборки считаем, что изменения есть: пусть явное
+    действие покажет причину, а не «всё отправлено».
+    """
+    if not details.publication_sent:
+        return False
+    if not details.delivery_fingerprint:
+        return True
+    try:
+        with SessionLocal() as session:
+            preview = build_announcement_preview(
+                session,
+                actor_telegram_user_id=_user_id(update),
+                draft_id=details.draft_id,
+                today=app_today(),
+            )
+    except (AnnouncementError, TemplateError, TemplateCompileError, BrickError):
+        return True
+    return (
+        _delivery_fingerprint(preview.html, preview.draft.photos)
+        != details.delivery_fingerprint
+    )
+
+
+async def _finish_and_deliver(
     update: Update,
     context: ContextTypes.DEFAULT_TYPE,
     details,
     *,
     notice: str | None = None,
 ) -> int:
+    """
+    Собирает анонс из текущих данных и сразу доставляет его в этот чат.
+
+    Это финальный шаг мастера: отдельного подтверждения и кнопки
+    «опубликовать» нет. Повторный вызов с тем же содержимым не отправляет
+    дубль: если такая версия уже доставлена, показывается экран действий.
+    """
+    user_id = _user_id(update)
+    if not _is_private_chat(update):
+        await _answer(update, PRIVATE_CHAT_ONLY, alert=True)
+        return await _render_private_chat_refusal(update, context, details)
+    if details.publication_status in {
+        PUBLICATION_STATUS_SENDING,
+        PUBLICATION_STATUS_PARTIAL,
+        PUBLICATION_STATUS_FAILED,
+    }:
+        # Незавершённая отправка продолжается отдельной кнопкой — новая
+        # версия поверх неё создала бы дубли.
+        return await _render_publish_status(update, context, details, notice=notice)
+    if details.stage != WizardStage.PREVIEW:
+        # Сборка всегда начинается из обзора: extras/вопросы уже применены.
+        try:
+            details = _ensure_stage(update, context, details, WizardStage.PREVIEW)
+        except AnnouncementError as exc:
+            await _answer(update, str(exc), alert=True)
+            return await _resume_current(update, context, notice=str(exc))
+    try:
+        with SessionLocal() as session:
+            preview = build_announcement_preview(
+                session,
+                actor_telegram_user_id=user_id,
+                draft_id=details.draft_id,
+                today=app_today(),
+            )
+    except (
+        AnnouncementError,
+        TemplateError,
+        TemplateCompileError,
+        BrickError,
+    ) as exc:
+        return await _render_preview_error(update, context, details, str(exc))
+    if not preview.ready:
+        reason = preview.issues[0] if preview.issues else "анонс не готов"
+        return await _render_preview_error(
+            update,
+            context,
+            preview.draft,
+            f"{reason}. Заполните поля и попробуйте снова.",
+        )
+    if details.publication_status == PUBLICATION_STATUS_SENT:
+        current = _delivery_fingerprint(preview.html, preview.draft.photos)
+        if (
+            details.delivery_fingerprint == current
+            and preview.draft.delivered_message_ids
+        ):
+            # Ничего не изменилось: дубль не отправляем.
+            return await _render_delivered(
+                update,
+                context,
+                details,
+                notice=notice or "✅ Эта версия анонса уже отправлена.",
+            )
+    try:
+        with SessionLocal() as session:
+            publication = begin_announcement_publication(
+                session,
+                actor_telegram_user_id=user_id,
+                draft_id=details.draft_id,
+                expected_revision=details.revision,
+                today=app_today(),
+            )
+    except (
+        AnnouncementError,
+        TemplateError,
+        TemplateCompileError,
+        BrickError,
+    ) as exc:
+        return await _render_preview_error(update, context, details, str(exc))
+    _set_details(_ui(context), publication.draft)
+    return await _run_announcement_publication(update, context, publication)
+
+
+async def _render_delivered(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+    details,
+    *,
+    notice: str | None = None,
+    pending: bool = False,
+) -> int:
+    """
+    Экран после доставки: готовый анонс уже отдельным сообщением выше.
+
+    Здесь только управление: правка данных/фото/extras. Кнопки отделены от
+    поста, чтобы готовый текст можно было скопировать, не задев служебное.
+    """
     ui = _ui(context)
     _set_details(ui, details)
     _clear_active(ui)
-    photos = len(details.publication_photos)
+    delivered_photos = len(details.publication_photos)
+    current_photos = len(details.photos)
     moment = ""
     if details.published_at is not None:
         moment = details.published_at.strftime("%d.%m.%Y %H:%M UTC")
     lines = [
-        "✅ Анонс опубликован",
+        "✅ Готовый анонс отправлен в этот чат",
         "",
         f"Место: {_h(details.place_display_name)}",
-        f"Фотографий: {photos}.",
+        # В доставленной версии столько фото; текущая коллекция может уже
+        # отличаться — тогда об этом честно сказано ниже.
+        f"В отправленной версии фотографий: {delivered_photos}.",
     ]
+    if pending and current_photos != delivered_photos:
+        lines.append(f"Сейчас в черновике фотографий: {current_photos}.")
     if moment:
-        lines.append(f"Telegram подтвердил отправку: {moment}.")
+        lines.append(f"Доставлено: {moment}.")
     if notice:
         lines.insert(1, notice)
     lines.extend(
         [
             "",
-            "Текст и вложения остались в этом чате выше. Повторная "
-            "публикация этого анонса заблокирована, чтобы не создавать дубль.",
+            "Анонс выше — отдельное сообщение: его можно скопировать или "
+            "переслать. Кнопки ниже управляют только черновиком и не входят "
+            "в текст анонса.",
         ]
     )
+    if pending:
+        lines.extend(
+            [
+                "",
+                "✏️ Есть изменения, ещё не отправленные в чат. Нажмите "
+                "«Применить изменения»: новая версия придёт в чат, а прошлая "
+                "будет заменена (удаление — best-effort: Telegram не удаляет "
+                "сообщения старше 48 часов).",
+            ]
+        )
+    else:
+        lines.append(
+            "Правка данных, фото или дополнительных кирпичиков не отправляет "
+            "копию сразу: когда всё готово, нажмите «🔄 Применить изменения» — "
+            "новая версия придёт в чат и заменит прошлую."
+        )
+    draft_id = details.draft_id
+    revision = details.revision
     await _render(
         update,
         context,
         "\n".join(lines),
         InlineKeyboardMarkup(
             [
+                [
+                    InlineKeyboardButton(
+                        "✏️ Изменить данные",
+                        callback_data=f"aw_qmanage:{draft_id}:{revision}",
+                    )
+                ],
+                [
+                    InlineKeyboardButton(
+                        "👁 Обзор анонса",
+                        callback_data=f"aw_preview:{draft_id}:{revision}",
+                    )
+                ],
+                [
+                    InlineKeyboardButton(
+                        "📷 Изменить фотографии",
+                        callback_data=f"aw_photos:{draft_id}:{revision}:0",
+                    )
+                ],
+                [
+                    InlineKeyboardButton(
+                        "➕ Дополнительные кирпичики",
+                        callback_data=f"aw_extras:{draft_id}:{revision}",
+                    )
+                ],
+                *(
+                    [
+                        [
+                            InlineKeyboardButton(
+                                "🔄 Применить изменения",
+                                callback_data=f"aw_apply:{draft_id}:{revision}",
+                            )
+                        ]
+                    ]
+                    if pending
+                    else []
+                ),
+                [
+                    InlineKeyboardButton(
+                        "💾 Сохранить и выйти",
+                        callback_data=f"aw_save:{draft_id}:{revision}",
+                    )
+                ],
                 [InlineKeyboardButton("➕ Новый анонс", callback_data="aw_new")],
                 [InlineKeyboardButton("📝 Мои анонсы", callback_data="aw_start")],
                 [InlineKeyboardButton("🏠 Главное меню", callback_data="main_menu")],
@@ -3564,6 +3869,50 @@ def _publication_error_text(exc: BaseException) -> str:
     return f"{name}: {detail}" if detail else name
 
 
+async def _render_private_chat_refusal(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+    details,
+) -> int:
+    """
+    Отказ от выдачи в неличный чат: данные не теряются, отправки нет.
+
+    Экран остаётся рабочим, чтобы автор мог открыть тот же черновик в
+    личном чате и завершить его. Ничего не удаляется и не замораживается.
+    """
+    ui = _ui(context)
+    if details is not None:
+        _set_details(ui, details)
+    _clear_active(ui)
+    lines = [
+        "⚠️ Готовый анонс не отправлен",
+        "",
+        PRIVATE_CHAT_ONLY,
+    ]
+    if details is not None:
+        lines.extend(
+            [
+                "",
+                f"Место: {_h(details.place_display_name)}",
+                "Данные и фотографии сохранены в черновике.",
+            ]
+        )
+    rows: list[list[InlineKeyboardButton]] = []
+    if details is not None:
+        rows.append(
+            [
+                InlineKeyboardButton(
+                    "👁 Обзор анонса",
+                    callback_data=f"aw_preview:{details.draft_id}:{details.revision}",
+                )
+            ]
+        )
+    rows.append([InlineKeyboardButton("📝 Мои анонсы", callback_data="aw_start")])
+    rows.append([InlineKeyboardButton("🏠 Главное меню", callback_data="main_menu")])
+    await _render(update, context, "\n".join(lines), InlineKeyboardMarkup(rows))
+    return AW_PREVIEW
+
+
 async def _render_publish_status_safely(
     update: Update,
     context: ContextTypes.DEFAULT_TYPE,
@@ -3575,7 +3924,7 @@ async def _render_publish_status_safely(
     try:
         return await _render_publish_status(update, context, details, notice=notice)
     except Exception:  # noqa: BLE001 — экран можно обновить следующим действием
-        logger.exception("Не удалось перерисовать экран статуса публикации.")
+        logger.exception("Не удалось перерисовать экран статуса отправки.")
         return AW_PREVIEW
 
 
@@ -3604,8 +3953,12 @@ async def _run_announcement_publication(
 
     from handlers.post_creation import send_rendered_post
 
+    # Адреса ПРОШЛОЙ доставленной версии. Их нельзя путать с id текущей
+    # отправки: удалять можно только прошлую копию и только после того, как
+    # новая версия подтверждена целиком.
+    previous_ids = tuple(publication.draft.previous_message_ids)
     try:
-        await send_rendered_post(
+        sent_ids = await send_rendered_post(
             context.bot,
             chat_id,
             publication.text,
@@ -3614,7 +3967,7 @@ async def _run_announcement_publication(
             on_progress=_persist_progress,
         )
     except Exception as exc:  # noqa: BLE001 — сбой Telegram/БД должен быть виден
-        logger.exception("Публикация анонса #%s не завершена: %s", draft_id, exc)
+        logger.exception("Отправка анонса #%s не завершена: %s", draft_id, exc)
         error_text = _publication_error_text(exc)
         try:
             with SessionLocal() as session:
@@ -3626,7 +3979,7 @@ async def _run_announcement_publication(
                 )
         except Exception:  # noqa: BLE001 — сохраняем исходную ошибку отправки
             logger.exception(
-                "Не удалось сохранить статус сбоя публикации анонса #%s",
+                "Не удалось сохранить статус сбоя отправки анонса #%s",
                 draft_id,
             )
             try:
@@ -3651,6 +4004,8 @@ async def _run_announcement_publication(
                 session,
                 actor_telegram_user_id=user_id,
                 draft_id=draft_id,
+                message_ids=sent_ids,
+                fingerprint=_delivery_fingerprint(publication.text, publication.photos),
             )
     except Exception as exc:  # noqa: BLE001 — сообщения могли уже уйти
         logger.exception(
@@ -3677,11 +4032,21 @@ async def _run_announcement_publication(
             ),
         )
     await screen.cleanup_preview(context, chat_id, ctx.data(context))
-    return await _render_published(
+    # Прошлую доставленную версию удаляем только после успешной новой
+    # отправки: до этого она — единственная полная копия анонса. Telegram
+    # не удаляет сообщения старше 48 часов, поэтому ошибка удаления не
+    # считается ошибкой доставки: анонс уже доступен в этом чате.
+    if previous_ids:
+        replaced = [
+            message_id for message_id in previous_ids if message_id not in sent_ids
+        ]
+        if replaced:
+            await screen.cleanup_messages(context.bot, chat_id, replaced)
+    return await _render_delivered(
         update,
         context,
         details,
-        notice="✅ Telegram подтвердил публикацию.",
+        notice="✅ Анонс отправлен в этот чат. Можно изменить данные.",
     )
 
 
@@ -3844,7 +4209,10 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> in
         return await _render_home(
             update, context, notice="Черновик не найден или больше недоступен."
         )
-    if details.stage != WizardStage.PREVIEW:
+    photos_allowed = details.stage == WizardStage.PREVIEW or (
+        details.publication_sent and details.stage == WizardStage.COMPLETED
+    )
+    if not photos_allowed:
         await _reanchor(update, context)
         return await _resume_current(
             update,
@@ -3854,13 +4222,13 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> in
                 "сохранены — завершите текущие шаги."
             ),
         )
-    if details.publication_status is not None:
+    if _edit_blocked(details):
         return await _render_publish_status(
             update,
             context,
             details,
             notice=(
-                "Публикация уже начата: новые фотографии не принимаются. "
+                "Отправка уже начата: новые фотографии не принимаются. "
                 "Анонс и прогресс сохранены."
             ),
         )
@@ -4484,6 +4852,10 @@ async def handle_extras_callback(
         "aw_choice_done",
     }:
         return await handle_question_callback(update, context)
+    if action in {"aw_apply", "aw_send", "aw_panel", "aw_save"}:
+        # Эти действия живут на экране обзора/управления, но доступны и с
+        # экрана доп. кирпичиков — иначе правку нельзя было бы применить.
+        return await handle_preview_callback(update, context)
 
     if action == "aw_extras" and len(parts) == 3:
         if not all(item.isdigit() for item in parts[1:]):
@@ -4715,9 +5087,26 @@ async def handle_preview_callback(
         if guarded is None:
             return await _stale(update, context)
         _ui_data, details = guarded
-        if details.publication_status is not None:
-            await _answer(update, "Публикация уже начата.", alert=True)
+        if _edit_blocked(details):
+            await _answer(update, "Отправка уже начата.", alert=True)
             return await _render_publish_status(update, context, details)
+        if details.publication_sent:
+            # Анонс уже доставлен: «сохранить» здесь означает выйти, не
+            # трогая отправленную версию. Этап и снимок не меняются.
+            await _answer(update, "Сохранено.")
+            pending = _has_pending_changes(update, details)
+            return await _render_delivered(
+                update,
+                context,
+                details,
+                notice=(
+                    "✅ Черновик сохранён. Есть неприменённые изменения: "
+                    "нажмите «Применить изменения»."
+                    if pending
+                    else "✅ Черновик сохранён. Отправленный анонс не менялся."
+                ),
+                pending=pending,
+            )
         try:
             updated = _ensure_stage(update, context, details, WizardStage.PREVIEW)
         except AnnouncementError as exc:
@@ -4728,23 +5117,55 @@ async def handle_preview_callback(
             update,
             context,
             updated,
-            notice="✅ Черновик сохранён. Публикация не выполнялась.",
+            notice="✅ Черновик сохранён. Анонс в чат не отправлялся.",
             saved=True,
         )
+    if action == "aw_send" and len(parts) == 3:
+        guarded = _guided()
+        if guarded is None:
+            return await _stale(update, context)
+        _ui_data, details = guarded
+        if _edit_blocked(details):
+            await _answer(update, "Отправка уже начата.", alert=True)
+            return await _render_publish_status(update, context, details)
+        await _answer(update, "Отправляю анонс…")
+        return await _finish_and_deliver(update, context, details)
+    if action == "aw_apply" and len(parts) == 3:
+        guarded = _guided()
+        if guarded is None:
+            return await _stale(update, context)
+        _ui_data, details = guarded
+        if _edit_blocked(details):
+            await _answer(update, "Отправка уже начата.", alert=True)
+            return await _render_publish_status(update, context, details)
+        await _answer(update, "Применяю изменения…")
+        return await _finish_and_deliver(update, context, details)
     if action == "aw_preview" and len(parts) == 3:
         guarded = _guided()
         if guarded is None:
             return await _stale(update, context)
         _ui_data, details = guarded
         await _answer(update)
-        return await _render_preview(update, context, details)
+        return await _render_preview(update, context, details, preview_only=True)
+    if action == "aw_panel" and len(parts) == 3:
+        guarded = _guided()
+        if guarded is None:
+            return await _stale(update, context)
+        _ui_data, details = guarded
+        await _answer(update)
+        return await _render_delivered(
+            update,
+            context,
+            details,
+            pending=_has_pending_changes(update, details),
+        )
     if action == "aw_qmanage" and len(parts) == 3:
         guarded = _guided()
         if guarded is None:
             return await _stale(update, context)
         _ui_data, details = guarded
-        if details.publication_status is not None:
-            await _answer(update, "Публикация уже начата.", alert=True)
+        if _edit_blocked(details):
+            await _answer(update, "Отправка уже начата.", alert=True)
             return await _render_publish_status(update, context, details)
         return await handle_question_callback(update, context)
     if action == "aw_extras" and len(parts) == 3:
@@ -4752,8 +5173,8 @@ async def handle_preview_callback(
         if guarded is None:
             return await _stale(update, context)
         _ui_data, details = guarded
-        if details.publication_status is not None:
-            await _answer(update, "Публикация уже начата.", alert=True)
+        if _edit_blocked(details):
+            await _answer(update, "Отправка уже начата.", alert=True)
             return await _render_publish_status(update, context, details)
         await _answer(update)
         return await _enter_extras(update, context, details)
@@ -4773,8 +5194,8 @@ async def handle_preview_callback(
         if guarded is None:
             return await _stale(update, context)
         _ui_data, details = guarded
-        if details.publication_status is not None:
-            await _answer(update, "Публикация уже начата.", alert=True)
+        if _edit_blocked(details):
+            await _answer(update, "Отправка уже начата.", alert=True)
             return await _render_publish_status(update, context, details)
         await _answer(update)
         return await _render_photos(
@@ -4793,7 +5214,7 @@ async def handle_preview_callback(
         if guarded is None:
             return await _stale(update, context)
         _ui_data, details = guarded
-        if details.publication_status is not None:
+        if _edit_blocked(details):
             await _answer(update, "Коллекция фото заморожена.", alert=True)
             return await _render_publish_status(update, context, details)
         index = int(parts[3])
@@ -4826,7 +5247,7 @@ async def handle_preview_callback(
         if guarded is None:
             return await _stale(update, context)
         _ui_data, details = guarded
-        if details.publication_status is not None:
+        if _edit_blocked(details):
             await _answer(update, "Коллекция фото заморожена.", alert=True)
             return await _render_publish_status(update, context, details)
         await _answer(update)
@@ -4836,7 +5257,7 @@ async def handle_preview_callback(
         if guarded is None:
             return await _stale(update, context)
         _ui_data, details = guarded
-        if details.publication_status is not None:
+        if _edit_blocked(details):
             await _answer(update, "Коллекция фото заморожена.", alert=True)
             return await _render_publish_status(update, context, details)
         try:
@@ -4863,8 +5284,8 @@ async def handle_preview_callback(
         if guarded is None:
             return await _stale(update, context)
         _ui_data, details = guarded
-        if details.publication_status is not None:
-            await _answer(update, "Публикация уже начата.", alert=True)
+        if _edit_blocked(details):
+            await _answer(update, "Отправка уже начата.", alert=True)
             return await _render_publish_status(update, context, details)
         await _answer(update)
         ok, notice = await _show_media_preview(update, context, details)
@@ -4879,8 +5300,8 @@ async def handle_preview_callback(
         if guarded is None:
             return await _stale(update, context)
         _ui_data, details = guarded
-        if details.publication_status is not None:
-            await _answer(update, "Публикация уже начата.", alert=True)
+        if _edit_blocked(details):
+            await _answer(update, "Отправка уже начата.", alert=True)
             return await _render_publish_status(update, context, details)
         await _answer(update)
         ok, notice = await _show_media_preview(update, context, details)
@@ -4891,78 +5312,15 @@ async def handle_preview_callback(
             notice=notice if ok else f"⚠️ {notice}",
         )
 
-    # --- публикация ------------------------------------------------------
-    if action == "aw_pub_start" and len(parts) == 3:
-        guarded = _guided()
-        if guarded is None:
-            return await _stale(update, context)
-        _ui_data, details = guarded
-        if details.publication_status is not None:
-            await _answer(update, "Публикация уже начата.", alert=True)
-            return await _render_publish_status(update, context, details)
-        try:
-            with SessionLocal() as session:
-                preview = build_announcement_preview(
-                    session,
-                    actor_telegram_user_id=_user_id(update),
-                    draft_id=details.draft_id,
-                    today=app_today(),
-                )
-        except (
-            AnnouncementError,
-            TemplateError,
-            TemplateCompileError,
-            BrickError,
-        ) as exc:
-            await _answer(update, str(exc), alert=True)
-            return await _render_preview_error(update, context, details, str(exc))
-        if not preview.ready:
-            reason = preview.issues[0] if preview.issues else "анонс не готов"
-            await _answer(update, "Анонс пока не готов к публикации.", alert=True)
-            return await _render_preview(
-                update,
-                context,
-                preview.draft,
-                notice=f"⚠️ Публикация недоступна: {_short(reason, 300)}",
-            )
-        await _answer(update)
-        return await _render_publish_confirm(update, context, preview.draft, preview)
-    if action == "aw_pub_confirm" and len(parts) == 3:
-        guarded = _guided()
-        if guarded is None:
-            return await _stale(update, context)
-        _ui_data, details = guarded
-        if details.publication_status is not None:
-            # Повторный/запоздавший callback: ничего не отправляем.
-            await _answer(
-                update, "Публикация уже начата; повтор не выполняется.", alert=True
-            )
-            return await _render_publish_status(update, context, details)
-        try:
-            with SessionLocal() as session:
-                publication = begin_announcement_publication(
-                    session,
-                    actor_telegram_user_id=_user_id(update),
-                    draft_id=details.draft_id,
-                    expected_revision=details.revision,
-                    today=app_today(),
-                )
-        except (
-            AnnouncementError,
-            TemplateError,
-            TemplateCompileError,
-            BrickError,
-        ) as exc:
-            await _answer(update, str(exc), alert=True)
-            return await _render_preview_error(update, context, details, str(exc))
-        _set_details(_ui(context), publication.draft)
-        await _answer(update, "Отправляю анонс…")
-        return await _run_announcement_publication(update, context, publication)
+    # --- отправка готового анонса ---------------------------------------
     if action == "aw_pub_resume" and len(parts) == 3:
         guarded = _guided()
         if guarded is None:
             return await _stale(update, context)
         _ui_data, details = guarded
+        if not _is_private_chat(update):
+            await _answer(update, PRIVATE_CHAT_ONLY, alert=True)
+            return await _render_private_chat_refusal(update, context, details)
         try:
             with SessionLocal() as session:
                 publication = resume_announcement_publication(
