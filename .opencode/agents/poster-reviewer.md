@@ -1,7 +1,7 @@
 ---
 description: "Ревизор Poster: независимая проверка безопасности, прав, регрессий, качества и архитектуры (только чтение)"
 mode: subagent
-model: routerai/deepseek/deepseek-v4.1-flash-1017
+model: routerai/z-ai/glm-5.3-flash
 color: "#ff5c5c"
 steps: 60
 permissions:
@@ -252,6 +252,31 @@ permissions:
     effect: deny
   - action: shell
     resource: 'node -e*'
+    effect: deny
+  # Инлайн-скрипты через stdin/heredoc и конвейер — тот же способ записи.
+  - action: shell
+    resource: '*python*<<*'
+    effect: deny
+  - action: shell
+    resource: '*node*<<*'
+    effect: deny
+  - action: shell
+    resource: '*perl*<<*'
+    effect: deny
+  - action: shell
+    resource: '*ruby*<<*'
+    effect: deny
+  - action: shell
+    resource: '*ruby -e*'
+    effect: deny
+  - action: shell
+    resource: '*tee*<<*'
+    effect: deny
+  - action: shell
+    resource: '*| python*'
+    effect: deny
+  - action: shell
+    resource: '*|python*'
     effect: deny
 
   # === ЗАЩИТА: приоритет над общим allow ===
@@ -541,6 +566,10 @@ permissions:
 
 Если замечаний нет — явно напиши это и перечисли, что именно проверил.
 Не выдумывай проблемы ради объёма отчёта.
+
+Отчёт короткий и фактический: конкретные места, воспроизведение, ожидание.
+Не пересказывай проект заново и не проводи повторный полный аудит того, что
+уже проверено в этом этапе.
 
 ## Автономная работа
 

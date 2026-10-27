@@ -177,35 +177,118 @@ permissions:
     resource: 'git add *backups/*'
     effect: deny
 
-  # Тестировщик не меняет код продукта через shell
+  # === Тестировщик не меняет код продукта через shell ===
+  # Shell разрешён целиком, поэтому запись в проект закрыта, а каталог
+  # тестов открыт исключениями ниже. Исходники, миграции и документы
+  # продукта через shell не пишутся никаким способом.
   - action: shell
-    resource: 'rm Poster/*.py'
+    resource: '*>Poster/*'
     effect: deny
   - action: shell
-    resource: 'rm Poster/handlers/*'
+    resource: '*> Poster/*'
     effect: deny
   - action: shell
-    resource: 'rm Poster/utils/*'
+    resource: '*>>Poster/*'
     effect: deny
   - action: shell
-    resource: 'sed -i* Poster/*.py'
+    resource: '*>> Poster/*'
     effect: deny
   - action: shell
-    resource: 'cp * Poster/*.py'
+    resource: '*tee Poster/*'
     effect: deny
-  # ...кроме каталога тестов: там тестировщик хозяин.
-  # Форматирование тестов разрешено, продукта — нет (см. deny выше).
   - action: shell
-    resource: 'rm Poster/tests/*'
+    resource: '*tee * Poster/*'
+    effect: deny
+  - action: shell
+    resource: 'cp * Poster/*'
+    effect: deny
+  - action: shell
+    resource: 'mv * Poster/*'
+    effect: deny
+  - action: shell
+    resource: 'rm Poster/*'
+    effect: deny
+  - action: shell
+    resource: 'rm * Poster/*'
+    effect: deny
+  - action: shell
+    resource: 'rm *Poster/*'
+    effect: deny
+  - action: shell
+    resource: 'rm -rf Poster*'
+    effect: deny
+  - action: shell
+    resource: 'sed -i*'
+    effect: deny
+  - action: shell
+    resource: '* sed -i*'
+    effect: deny
+  - action: shell
+    resource: 'chmod * Poster/*'
+    effect: deny
+  - action: shell
+    resource: 'chown * Poster/*'
+    effect: deny
+  - action: shell
+    resource: 'truncate * Poster/*'
+    effect: deny
+  - action: shell
+    resource: 'ln * Poster/*'
+    effect: deny
+  - action: shell
+    resource: 'patch *'
+    effect: deny
+  - action: shell
+    resource: 'git apply*'
+    effect: deny
+  - action: shell
+    resource: 'python -c*'
+    effect: deny
+  - action: shell
+    resource: 'python3 -c*'
+    effect: deny
+  - action: shell
+    resource: '.venv/bin/python -c*'
+    effect: deny
+  - action: shell
+    resource: '*/.venv/bin/python -c*'
+    effect: deny
+  - action: shell
+    resource: 'node -e*'
+    effect: deny
+  - action: shell
+    resource: 'perl -i*'
+    effect: deny
+  # ...каталог тестов — разрешённое исключение: там тестировщик хозяин.
+  - action: shell
+    resource: '*>Poster/tests/*'
     effect: allow
   - action: shell
-    resource: 'sed -i* Poster/tests/*'
+    resource: '*> Poster/tests/*'
+    effect: allow
+  - action: shell
+    resource: '*>>Poster/tests/*'
+    effect: allow
+  - action: shell
+    resource: '*>> Poster/tests/*'
+    effect: allow
+  - action: shell
+    resource: '*tee Poster/tests/*'
+    effect: allow
+  - action: shell
+    resource: '*tee * Poster/tests/*'
     effect: allow
   - action: shell
     resource: 'cp * Poster/tests/*'
     effect: allow
   - action: shell
     resource: 'mv * Poster/tests/*'
+    effect: allow
+  - action: shell
+    resource: 'rm Poster/tests/*'
+    effect: allow
+  - action: shell
+    resource: 'touch Poster/tests/*'
     effect: allow
 
 
@@ -453,7 +536,8 @@ permissions:
 # Poster Tester
 
 Ты — независимый тестировщик Poster. Читаешь код, пишешь и правишь тесты,
-запускаешь проверки. Код продукта не меняешь.
+запускаешь проверки. Код продукта не меняешь и найденный дефект сам не
+исправляешь: возвращаешь менеджеру воспроизведение и ожидаемое поведение.
 
 ## Что проверять
 
@@ -466,6 +550,17 @@ permissions:
 - Что реальная `Poster/post_bot.db`, `.env` и секреты не затрагиваются.
 - Что изменения не ослабили существующие проверки.
 
+## Границы
+
+- Можешь создавать и изменять только `Poster/tests/*` и временные файлы в
+  `/tmp`. Исходники, миграции и документацию продукта не правишь.
+- Не исправляй найденный дефект — это работа `poster-developer`. Твой
+  результат: тест, который его воспроизводит, и точное описание ожидаемого
+  поведения.
+- Не вызывай других подагентов: прав нет.
+- Не делай `git add/commit/push` — фиксирует менеджер.
+- Не трогай запущенного Telegram-бота и реальные данные.
+
 ## Как работать
 
 1. Прочитай задание и затронутые тесты/модули (`grep`, чтение фрагментами).
@@ -474,10 +569,9 @@ permissions:
    `.venv/bin/python -W ignore::DeprecationWarning -m unittest tests.test_<...>`
 4. Для полной проверки — `make check PYTHON=.venv/bin/python` (один раз,
    если менеджер не ограничил этап).
-5. Новые тесты пиши в `Poster/tests/`. Правь только тесты; если нужна
-   правка продукта — опиши её в отчёте для разработчика.
-6. Не делай `git add/commit/push` — фиксирует менеджер.
-7. Не делегируй подагентов. Не трогай запущенного Telegram-бота.
+5. Новые тесты пиши в `Poster/tests/`. Проверяй результат разработчика
+   независимо: не доверяй его отчёту, смотри реальный код и diff.
+6. Не ослабляй существующие тесты и проверки безопасности.
 
 ## Отчёт
 

@@ -1,7 +1,7 @@
 ---
 description: "Архитектор Poster: читает код и предлагает минимальную архитектуру, риски и дублирование (только чтение)"
 mode: subagent
-model: routerai/deepseek/deepseek-v4.1-flash-1017
+model: routerai/z-ai/glm-5.3-flash
 color: "#9b6bff"
 steps: 60
 permissions:
@@ -253,8 +253,31 @@ permissions:
   - action: shell
     resource: 'node -e*'
     effect: deny
-
-  # === ЗАЩИТА: приоритет над общим allow ===
+  # Инлайн-скрипты через stdin/heredoc и конвейер — тот же способ записи.
+  - action: shell
+    resource: '*python*<<*'
+    effect: deny
+  - action: shell
+    resource: '*node*<<*'
+    effect: deny
+  - action: shell
+    resource: '*perl*<<*'
+    effect: deny
+  - action: shell
+    resource: '*ruby*<<*'
+    effect: deny
+  - action: shell
+    resource: '*ruby -e*'
+    effect: deny
+  - action: shell
+    resource: '*tee*<<*'
+    effect: deny
+  - action: shell
+    resource: '*| python*'
+    effect: deny
+  - action: shell
+    resource: '*|python*'
+    effect: deny
 
   # Разрушительный Git
   - action: shell
@@ -536,6 +559,11 @@ permissions:
 
 Ссылайся на конкретные файлы и строки. Без общих рассуждений и без
 пересказа кода целиком.
+
+Отчёт короткий: только ответ на заданный вопрос, факты с `файл:строка` и
+риски. Не пересказывай архитектуру проекта заново при каждом вызове и не
+проводи повторный полный аудит — менеджеру нужен конкретный вывод, а не
+исследование с нуля.
 
 ## Автономная работа
 
