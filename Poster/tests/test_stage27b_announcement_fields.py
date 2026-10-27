@@ -119,16 +119,24 @@ class FieldStateTests(AnnouncementDatabaseTestCase):
 
 
 class ReadinessTests(unittest.TestCase):
-    """Готовность текста отделена от права пропустить отдельное поле."""
+    """
+    Готовность после S3: пропуск кирпичика не блокирует переход.
 
-    def test_empty_text_is_not_ready(self) -> None:
+    Решение владельца (§5.6, S3 п.8): анонс, где пропущены **все**
+    кирпичики, готов — заглушка `.` подставляется при сборке сообщения.
+    `ready` теперь означает «можно идти дальше», а не «текст непустой»;
+    видимый текст остаётся доступным вызывающему слою.
+    """
+
+    def test_empty_text_is_ready_and_has_no_visible_text(self) -> None:
         result = evaluate_announcement_readiness(
             " <b></b> ",
             snapshot_brick_count=0,
             filled_value_count=0,
         )
-        self.assertFalse(result.ready)
-        self.assertTrue(result.issues)
+        self.assertTrue(result.ready)
+        self.assertEqual(result.visible_text, "")
+        self.assertEqual(result.issues, ())
 
     def test_static_template_without_bricks_can_be_ready(self) -> None:
         result = evaluate_announcement_readiness(
@@ -140,14 +148,14 @@ class ReadinessTests(unittest.TestCase):
         self.assertEqual(result.visible_text, "Постоянный текст")
         self.assertEqual(result.issues, ())
 
-    def test_template_without_any_filled_value_is_not_ready(self) -> None:
+    def test_template_without_any_filled_value_is_ready(self) -> None:
         result = evaluate_announcement_readiness(
             "",
             snapshot_brick_count=2,
             filled_value_count=0,
         )
-        self.assertFalse(result.ready)
-        self.assertEqual(len(result.issues), 2)
+        self.assertTrue(result.ready)
+        self.assertEqual(result.issues, ())
 
     def test_one_filled_value_is_enough_for_optional_fields(self) -> None:
         result = evaluate_announcement_readiness(
@@ -156,7 +164,6 @@ class ReadinessTests(unittest.TestCase):
             filled_value_count=1,
         )
         self.assertTrue(result.ready)
-        self.assertTrue(result.warnings)
         self.assertEqual(visible_announcement_text("<i>Текст</i>"), "Текст")
 
 
@@ -182,8 +189,10 @@ class PreviewTests(AnnouncementDatabaseTestCase):
             draft_id=draft.draft_id,
             today=TODAY,
         )
-        self.assertFalse(preview.ready)
-        self.assertTrue(preview.issues)
+        # S3: анонс с пропущенным (но предусмотренным шаблоном) полем готов;
+        # диагностика остаётся в `missing`, а не блокирует переход.
+        self.assertTrue(preview.ready)
+        self.assertEqual(preview.issues, ())
         self.assertEqual(
             [question.brick_id for question in preview.missing], [brick_id]
         )

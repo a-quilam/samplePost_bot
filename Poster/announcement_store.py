@@ -73,7 +73,7 @@ from models import (
     utcnow,
 )
 from place_store import get_place_details, get_place_name
-from template_compiler import render_template
+from template_compiler import render_announcement, render_template
 from template_parser import BrickNode
 from template_store import (
     TemplateError,
@@ -1668,6 +1668,56 @@ def set_announcement_stage(
     return _details_by_id(session, actor, row.id)
 
 
+# --- Живой блок анонса (Poster 2.0 S3) -------------------------------------
+
+
+def set_announcement_live_message_ids(
+    session: Session,
+    *,
+    actor_telegram_user_id: int | None,
+    draft_id: int,
+    message_ids: Sequence[int],
+    expected_revision: int | None = None,
+) -> AnnouncementDraftDetails:
+    """
+    Сохраняет упорядоченные адреса сообщений живого верхнего блока.
+
+    Живой блок — это UI-состояние, а не содержимое анонса: адреса сообщений
+    **не увеличивают `revision`**. Иначе каждая перерисовка вопроса делала бы
+    кнопки на экране устаревшими и ломала optimistic locking ответов.
+
+    `expected_revision`, если задан, проверяется как защита от записи в
+    чужую/устаревшую сессию, но сам revision не меняется. Список пишется
+    после подтверждённой отправки, поэтому при сбое Telegram остаётся
+    прошлая версия. Дубли и неположительные ID отклоняются, `[]` очищает.
+    """
+    actor = _require_actor(session, actor_telegram_user_id)
+    row = _load_owned_draft(session, actor, draft_id)
+    _expected_revision(row, expected_revision)
+    cleaned: list[int] = []
+    for message_id in message_ids:
+        if not _valid_positive_id(message_id):
+            raise AnnouncementError(
+                "Адрес живого блока должен быть положительным message_id."
+            )
+        value = int(message_id)
+        if value not in cleaned:
+            cleaned.append(value)
+    session.execute(
+        sqlalchemy_update(AnnouncementDraft)
+        .where(AnnouncementDraft.id == row.id)
+        .values(
+            live_message_ids_json=(
+                json.dumps(cleaned, ensure_ascii=False) if cleaned else None
+            ),
+            updated_at=utcnow(),
+        )
+        .execution_options(synchronize_session=False)
+    )
+    _commit(session)
+    return _details_by_id(session, actor, row.id)
+
+
 # --- Фотографии анонса ------------------------------------------------------
 
 
@@ -2440,10 +2490,19 @@ def build_announcement_preview(
         actor_telegram_user_id=actor_telegram_user_id,
         draft_id=draft_id,
     )
-    html = render_template(
+    # `html` — то, что реально уйдёт в Telegram (пустой анонс → `.`,
+    # §5.6). Готовность считается по тексту БЕЗ заглушки: иначе пустой
+    # анонс выглядел бы непустым для шутки в служебном экране.
+    raw_html = render_template(
         payload.tokens_by_section,
         payload.values_by_id,
         payload.definitions_by_id,
+    )
+    html = render_announcement(
+        payload.tokens_by_section,
+        payload.values_by_id,
+        payload.definitions_by_id,
+        has_photos=bool(details.photos),
     )
     snapshot_brick_count = (
         len(details.template_snapshot.brick_ids)
@@ -2458,7 +2517,7 @@ def build_announcement_preview(
         1 for brick_id in relevant_brick_ids if brick_id in payload.values_by_id
     )
     readiness = evaluate_announcement_readiness(
-        html,
+        raw_html,
         snapshot_brick_count=snapshot_brick_count,
         filled_value_count=filled_value_count,
     )

@@ -54,6 +54,7 @@ try:
     import handlers.post_creation as post_creation_module
     import handlers.templates as templates_module
     import handlers.user_tracking as user_tracking_module
+    import handlers.wizard_live as wizard_live_module
     import place_state as place_state_module
     import template_state as template_state_module
     import utils.parsers as parsers_module
@@ -469,6 +470,7 @@ class Harness:
             template_state_module.SessionLocal,
             templates_module.SessionLocal,
             announcement_wizard_module.SessionLocal,
+            wizard_live_module.SessionLocal,
         )
         post_creation_module.SessionLocal = self.session_factory
         drafts_module.SessionLocal = self.session_factory
@@ -484,6 +486,7 @@ class Harness:
         template_state_module.SessionLocal = self.session_factory
         templates_module.SessionLocal = self.session_factory
         announcement_wizard_module.SessionLocal = self.session_factory
+        wizard_live_module.SessionLocal = self.session_factory
 
         # Уведомления об ошибках троттлятся по (chat_id, time.monotonic) —
         # без сброса тесты «повторно заметили бы» чужие уведомления
@@ -546,6 +549,7 @@ class Harness:
         template_state_module.SessionLocal = self._orig_session_local[11]
         templates_module.SessionLocal = self._orig_session_local[12]
         announcement_wizard_module.SessionLocal = self._orig_session_local[13]
+        wizard_live_module.SessionLocal = self._orig_session_local[14]
         errors_module._last_error_notice.clear()
         errors_module._last_error_notice.update(self._orig_error_notice)
         self.engine.dispose()

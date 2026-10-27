@@ -174,13 +174,23 @@ def _alert(h):
 
 
 async def _skip_all_questions(h, limit=25):
-    """Проходит вопросы пропусками: последний пропуск доставляет анонс."""
+    """
+    Проходит вопросы пропусками и завершает шаг фотографий.
+
+    Poster 2.0 S3 п.6: последний кирпичик ведёт на шаг фото, а не к доставке;
+    анонс завершает «Без фотографий» (кнопки «Готово» нет).
+    """
     for _ in range(limit):
         skips = [d for _l, d in _btns(h) if d and d.startswith("aw_qskip")]
         if not skips:
-            return
+            break
         await h.callback(skips[0])
-    raise AssertionError(f"вопросы не закончились: {h.screen_text()[:300]}")
+    else:
+        raise AssertionError(f"вопросы не закончились: {h.screen_text()[:300]}")
+    no_photos = [d for _l, d in _btns(h) if d and d.startswith("aw_photo_none")]
+    if not no_photos:
+        raise AssertionError(f"нет шага фото: {h.screen_text()[:300]}")
+    await h.callback(no_photos[0])
 
 
 @unittest.skipIf(
@@ -506,7 +516,9 @@ class PersonalPlaceholderTests(unittest.TestCase):
 
         await h.text("/start")
         await h.callback(f"tp_pick:{template_id}")
-        await h.text("Значение")  # последний ответ сразу доставляет анонс
+        await h.text("Значение")
+        # S3 п.6: сначала шаг фото, доставка — по «Без фотографий».
+        await h.callback(_cb(h, "aw_photo_none"))
         delivered = h.screen_text()
         self.assertIn("Готовый анонс отправлен", delivered)
 
@@ -607,6 +619,9 @@ class PersonalNoPlaceAllScreensTests(unittest.TestCase):
         await h.callback("pick_template", **group)
         await h.callback(f"tp_pick:{template_id}", **group)
         await h.text("Значение", **group)
+        # S3 п.6: отказ в неличном чате — на финале шага фото.
+        self.assertIn("Фотографии анонса", h.screen_text())
+        await h.callback(_cb(h, "aw_photo_none"), **group)
 
         refusal = h.screen_text()
         self.assertIn("Готовый анонс не отправлен", refusal)

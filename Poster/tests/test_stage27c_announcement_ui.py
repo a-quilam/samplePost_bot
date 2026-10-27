@@ -38,6 +38,7 @@ try:
         _choose_personal,
         _draft_by_id,
         _latest_draft,
+        _no_photos,
         _seed_personal_template,
         _seed_place,
         _start_to_template,
@@ -64,6 +65,9 @@ async def _personal_delivered(
     await _start_to_template(h, place_id)
     await _choose_personal(h, template_id)
     await h.text("Значение")
+    # Poster 2.0 S3 п.6: последний кирпичик ведёт на шаг фото; доставка —
+    # по «Без фотографий» (доставка как функция не менялась).
+    await _no_photos(h)
     if "Готовый анонс отправлен в этот чат" not in h.screen_text():
         raise AssertionError(f"Анонс не доставлен: {h.screen_text()}")
     draft = _latest_draft(h)
@@ -84,6 +88,7 @@ async def _standard_delivered(h):
         if not skips:
             break
         await h.callback(skips[0])
+    await _no_photos(h)
     if "Готовый анонс отправлен в этот чат" not in h.screen_text():
         raise AssertionError(f"Анонс не доставлен: {h.screen_text()}")
     return _latest_draft(h)
@@ -331,9 +336,13 @@ class AnnouncementAutoDeliveryFailureTests(unittest.TestCase):
         await _start_to_template(h, place_id)
         await _choose_personal(h, template_id)
 
+        await h.text("Значение")
+        # S3 п.6: сначала шаг фотографий; доставку запускает «Без фотографий».
+        self.assertIn("Фотографии анонса", h.screen_text())
+
         # Сбой Telegram на самой первой отправке: данные и черновик целы.
         h.bot.fail_after["message"] = 0
-        await h.text("Значение")
+        await h.callback(_callback(h, "aw_photo_none"))
 
         draft = _latest_draft(h)
         failed = _stored(h, draft.id)
@@ -447,6 +456,12 @@ class AnnouncementAutoDeliveryFailureTests(unittest.TestCase):
             chat_type="group",
         )
         await h.text("Секретное значение", chat_id=group_id, chat_type="group")
+        # S3 п.6: последний кирпичик ведёт на шаг фото; попытка завершить
+        # анонс в группе отклоняется до вызова Telegram.
+        self.assertIn("Фотографии анонса", h.screen_text())
+        await h.callback(
+            _callback(h, "aw_photo_none"), chat_id=group_id, chat_type="group"
+        )
 
         # Ни одного поста: отказ до вызова Telegram.
         self.assertEqual(h.posts(), [])

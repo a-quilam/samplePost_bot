@@ -573,6 +573,14 @@ class PersonalPlaceLineTests(unittest.TestCase):
         self._assert_no_empty_place(self, "вопрос", h.screen_text())
 
         await h.text("Значение")
+        # Poster 2.0 S3 п.6: последний кирпичик ведёт на шаг фотографий, а не
+        # к доставке; там проверяем отсутствие пустого «Место:», затем
+        # завершаем шаг фото и смотрим экран доставки.
+        photo_step = h.screen_text()
+        self.assertIn("Фотографии анонса", photo_step)
+        self._assert_no_empty_place(self, "шаг фото", photo_step)
+
+        await h.callback(_callback(h, "aw_photo_none"))
         delivered = h.screen_text()
         self.assertIn("Готовый анонс отправлен", delivered)
         self._assert_no_empty_place(self, "доставлено", delivered)
@@ -632,6 +640,11 @@ class PersonalPlaceLineTests(unittest.TestCase):
         group_id = 900_002
         await h.callback(f"tp_pick:{template_id}", chat_id=group_id, chat_type="group")
         await h.text("Значение", chat_id=group_id, chat_type="group")
+        # S3 п.6: отказ в неличном чате происходит на финале шага фото.
+        self.assertIn("Фотографии анонса", h.screen_text())
+        await h.callback(
+            _callback(h, "aw_photo_none"), chat_id=group_id, chat_type="group"
+        )
         refusal = h.screen_text()
         self.assertIn("только в личный чат", refusal)
         self._assert_no_empty_place(self, "отказ в неличном чате", refusal)
@@ -647,6 +660,9 @@ class PersonalPlaceLineTests(unittest.TestCase):
             if not skips:
                 break
             await h.callback(skips[0])
+        # S3 п.6: сначала шаг фото, доставка — по «Без фотографий».
+        self.assertIn("Фотографии анонса", h.screen_text())
+        await h.callback(_callback(h, "aw_photo_none"))
         delivered = h.screen_text()
         self.assertIn("Готовый анонс отправлен", delivered)
         self.assertIn("Место: Дом культуры", delivered)

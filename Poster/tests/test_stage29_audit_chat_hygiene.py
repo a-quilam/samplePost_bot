@@ -27,7 +27,11 @@ try:
         _seed_personal_template,
         _seed_place,
     )
-    from tests.test_stage27c_announcement_ui import _personal_delivered, _stored
+    from tests.test_stage27c_announcement_ui import (
+        _no_photos,
+        _personal_delivered,
+        _stored,
+    )
 
     INTEGRATION_IMPORT_ERROR = HARNESS_IMPORT_ERROR
 except Exception as exc:  # noqa: BLE001 — причина попадает в skip-сообщение
@@ -56,6 +60,24 @@ def _live_ids(h) -> set[int]:
     for mid in h.deleted_ids():
         sent.discard(int(mid))
     return sent
+
+
+def _details_ids(h, draft_id: int) -> tuple[int, ...]:
+    """Сохранённые адреса живого блока конкретного черновика."""
+    return tuple(_stored(h, draft_id).live_message_ids)
+
+
+def _screen_send_ids(h) -> set[int]:
+    """message_id сообщений, отправленных как служебный экран (не анонс/пост)."""
+    out: set[int] = set()
+    index = 0
+    for call in h.calls:
+        if call["type"] not in {"message", "photo", "media_group"}:
+            continue
+        index += 1
+        if call.get("disable_web_page_preview") is True:
+            out.add(100 + index)
+    return out
 
 
 def _edited_message_ids(h) -> set[int]:
@@ -123,6 +145,8 @@ class ChatHygieneSecondAnnouncementTests(unittest.TestCase):
         await h.callback(_callback(h, "aw_place_confirm"))
         await _choose_personal(h, template_id)
         await h.text("Второе значение")
+        # S3 п.6: последний кирпичик ведёт на шаг фото; доставка — по нему.
+        await _no_photos(h)
 
         # — результат второго анонса —
         from tests.test_stage27b_announcement_ui import _latest_draft
@@ -145,8 +169,20 @@ class ChatHygieneSecondAnnouncementTests(unittest.TestCase):
         for mid in second_result_ids:
             self.assertIn(mid, _live_ids(h))
 
-        # 3. Служебное сообщение по-прежнему одно и то же.
-        self.assertEqual(h.screen_message_id(), screen_after_first)
+        # 3. Служебное сообщение по-прежнему ОДНО. Poster 2.0 S3 §4 требует,
+        # чтобы анонс был выше экрана; Telegram не переставляет сообщения,
+        # поэтому при первом показе анонса экран пересоздаётся ниже — старый
+        # удаляется, второго живого экрана не появляется.
+        alive = _live_ids(h)
+        alive_screens = _screen_send_ids(h) & alive
+        self.assertEqual(len(alive_screens), 1, f"живых экранов: {alive_screens}")
+        self.assertEqual(alive_screens, {h.screen_message_id()})
+        self.assertNotIn(screen_after_first, alive, "старый экран остался в чате")
+        self.assertLess(
+            max(tuple(_details_ids(h, draft2.id)) or (0,)),
+            h.screen_message_id(),
+            "анонс второго черновика оказался ниже экрана",
+        )
 
         # 5. Никаких чужих сообщений третьим лицам: все отправки — в этот чат.
         self.assertEqual(_sends_outside_chat(h), [])
@@ -203,7 +239,9 @@ class ScreenHtmlEscapingTests(unittest.TestCase):
         )
         await _start_to_template(h, place_id)
         await _choose_personal(h, template_id)
-        await h.text("Значение")  # доставка готового анонса
+        await h.text("Значение")
+        # S3 п.6: доставка — после шага фотографий.
+        await _no_photos(h)
         with h.session_factory() as session:
             brick = create_personal_brick(
                 session,
@@ -312,6 +350,8 @@ class ScreenHtmlEscapingTests(unittest.TestCase):
         self.assertIn("Поле &lt;u&gt;с тегом&lt;/u&gt;", raw)
         self.assertNotIn("<u>с тегом", raw)
         await h.text("<b>ответ</b>")
+        # S3 п.6: сначала шаг фото, доставка — по «Без фотографий».
+        await _no_photos(h)
         # Значение ушло в готовый анонс экранированным (теги — как текст).
         stored = _stored(h, _latest_draft(h).id)
         self.assertIn("&lt;b&gt;ответ&lt;/b&gt;", stored.publication_text)

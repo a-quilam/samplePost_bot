@@ -214,6 +214,19 @@ async def _choose_personal(h, template_id: int) -> None:
     await h.callback(_callback(h, "aw_template", f":{template_id}"))
 
 
+async def _no_photos(h) -> None:
+    """
+    Завершает шаг фотографий (Poster 2.0 S3 п.6).
+
+    Последний кирпичик ведёт на шаг фото, а не к доставке; «Без фотографий»
+    — единственный финал этого шага (кнопки «Готово» нет). Доставка как
+    функция не менялась: её покрытие остаётся в тестах ниже.
+    """
+    if "Фотографии анонса" not in h.screen_text():
+        raise AssertionError(f"Не шаг фото: {h.screen_text()}")
+    await h.callback(_callback(h, "aw_photo_none"))
+
+
 async def _preview(h) -> None:
     """
     Открывает обзор, если он есть.
@@ -398,7 +411,11 @@ class AnnouncementWizardTemplateTests(unittest.TestCase):
             )
 
         await h.text("Значение")
-        # Stage 28: последний ответ сразу доставляет готовый анонс.
+        # Poster 2.0 S3 п.6: последний кирпичик ведёт на шаг фотографий.
+        self.assertIn("Фотографии анонса", h.screen_text())
+        self.assertTrue(_callbacks(h, "aw_photo_none"))
+        self.assertFalse(_callbacks(h, "aw_send"))
+        await _no_photos(h)
         self.assertIn("Готовый анонс отправлен в этот чат", h.screen_text())
         delivered = h.posts()[-1] or ""
         self.assertIn("СТАРЫЙ ТЕКСТ", delivered)
@@ -497,7 +514,12 @@ class AnnouncementWizardQuestionTests(unittest.TestCase):
         await h.callback(_callback(h, "aw_choice", ":0"))
         await h.callback(_callback(h, "aw_choice", ":1"))
         await h.callback(_callback(h, "aw_choice_done"))
-        # Stage 28: последний ответ автоматически доставляет анонс.
+        # Poster 2.0 S3 п.6: после последнего кирпичика — шаг фото.
+        self.assertIn("Фотографии анонса", h.screen_text())
+        self.assertTrue(_callbacks(h, "aw_photo_none"))
+        self.assertFalse(_callbacks(h, "aw_send"))
+        self.assertEqual(h.posts(), [])
+        await _no_photos(h)
         self.assertIn("Готовый анонс отправлен в этот чат", h.screen_text())
         posts_after_delivery = h.posts()
         self.assertEqual(len(posts_after_delivery), 1)
@@ -570,7 +592,11 @@ class AnnouncementWizardExtrasTests(unittest.TestCase):
         await _start_to_template(h, place_id)
         await _choose_personal(h, template_id)
         await h.text("Главное")
-        # Stage 28: последний ответ доставляет анонс, extras — уже после.
+        # Poster 2.0 S3 п.6: последний ответ ведёт на шаг фото; extras —
+        # уже после доставки, с экрана управления.
+        self.assertIn("Фотографии анонса", h.screen_text())
+        self.assertEqual(h.posts(), [])
+        await _no_photos(h)
         self.assertEqual(h.dialog_state(name=CONVERSATION_NAME), AW_PREVIEW)
         self.assertIn("Готовый анонс отправлен в этот чат", h.screen_text())
         self.assertEqual(len(h.posts()), 1)
@@ -693,6 +719,9 @@ class AnnouncementWizardPersistenceTests(unittest.TestCase):
         await _start_to_template(h, place_id)
         await _choose_personal(h, template_id)
         await h.text("Исходное")
+        # S3 п.6: последний кирпичик ведёт на шаг фото; доставка — по
+        # «Без фотографий».
+        await _no_photos(h)
         self.assertIn("Исходное", h.posts()[-1] or "")
 
         await h.callback(_callback(h, "aw_qmanage"))
@@ -768,6 +797,8 @@ class AnnouncementWizardPersistenceTests(unittest.TestCase):
         await _start_to_template(h, place_id)
         await _choose_personal(h, template_id)
         await h.text(long_value)
+        # S3 п.6: сначала шаг фото, доставка — по «Без фотографий».
+        await _no_photos(h)
         self.assertIn("Готовый анонс отправлен в этот чат", h.screen_text())
         await _preview(h)
         self.assertIn("Предпросмотр сокращён", h.screen_text())
@@ -798,6 +829,8 @@ class AnnouncementWizardSafetyTests(unittest.TestCase):
         await _choose_personal(h, template_id)
         stale_skip = _callback(h, "aw_qskip")
         await h.text("Значение")
+        # S3 п.6: сначала шаг фотографий, затем доставка.
+        await _no_photos(h)
         self.assertEqual(h.dialog_state(name=CONVERSATION_NAME), AW_PREVIEW)
         self.assertEqual(len(h.posts()), 1)
         draft = _latest_draft(h)
@@ -863,6 +896,7 @@ class AnnouncementWizardSafetyTests(unittest.TestCase):
         await _start_to_template(h, place_id)
         await _choose_personal(h, template_id)
         await h.text("Значение")
+        await _no_photos(h)
 
         with h.session_factory() as session:
             archive_personal_brick(
@@ -934,7 +968,12 @@ class AnnouncementWizardStandardTemplateTests(unittest.TestCase):
             self.assertIn("Пропустить", str(h.screen_buttons()))
             await h.callback(_callback(h, "aw_qskip"))
 
-        # Последний пропуск — последний шаг: анонс уходит автоматически.
+        # Poster 2.0 S3 п.6: последний пропуск ведёт на шаг фото, и уже
+        # «Без фотографий» завершает анонс.
+        self.assertIn("Фотографии анонса", h.screen_text())
+        self.assertTrue(_callbacks(h, "aw_photo_none"))
+        self.assertFalse(_callbacks(h, "aw_send"))
+        await _no_photos(h)
         self.assertIn("Готовый анонс отправлен в этот чат", h.screen_text())
         posts = h.posts()
         self.assertEqual(len(posts), 1)

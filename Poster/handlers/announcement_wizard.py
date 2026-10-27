@@ -92,16 +92,13 @@ from brick_types import (
     BRICK_SCOPE_SYSTEM,
     BRICK_TYPE_CHOICE,
     BRICK_TYPE_DATE,
-    BRICK_TYPE_LONG_TEXT,
-    BRICK_TYPE_NUMBER,
-    BRICK_TYPE_SHORT_TEXT,
     BRICK_TYPE_TIME,
     BRICK_TYPE_TITLES,
-    BRICK_TYPE_URL,
     BrickValueResult,
     BrickValueStatus,
 )
 from database import SessionLocal
+from handlers import wizard_live, wizard_questions
 from place_store import (
     get_place_details,
     list_places,
@@ -118,10 +115,28 @@ from template_types import (
     TEMPLATE_SECTION_FOOTER,
     TEMPLATE_SECTION_HEADER,
 )
-from utils import calendar_view, screen
+from utils import calendar_view, screen, ui_humor
 from utils import tg_context as ctx
 from utils.parsers import app_today
 from utils.tg_html import escape_html
+
+# Poster 2.0 S3 п.1: вид вопроса/календаря вынесен в `wizard_questions`,
+# поведение прежнее. Имена с подчёркиванием сохранены как локальные
+# адаптеры: оркестратор диалога не переписывается целиком, а тесты и
+# соседние экраны продолжают работать без изменений.
+_question_text = wizard_questions.question_text
+_type_hint = wizard_questions.type_hint
+_date_rules_hint = wizard_questions.date_rules_hint
+_number_rules_hint = wizard_questions.number_rules_hint
+_choice_options = wizard_questions.choice_options
+_selected_choices = wizard_questions.selected_choices
+_field_status_text = wizard_questions.field_status_text
+_field_value_text = wizard_questions.field_value_text
+_parse_rule_date = wizard_questions.parse_rule_date
+_calendar_bounds = wizard_questions.calendar_bounds
+_clip_range = wizard_questions.clip_range
+_calendar_title = wizard_questions.calendar_title
+_day_rows = wizard_questions.day_rows
 
 logger = logging.getLogger(__name__)
 
@@ -311,6 +326,86 @@ async def _render(
 
 async def _reanchor(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await screen.reanchor_screen(update, context)
+
+
+async def _sync_live(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+    details,
+) -> None:
+    """
+    Обновляет живой верхний блок ПЕРЕД отрисовкой нижнего экрана (S3 п.2).
+
+    Вызывается на всех нижних экранах конструктора (вопрос, extras, шаг
+    фото, обзор): иначе при шаблоне без кирпичиков верхний блок не появился
+    бы вовсе, а после последнего ответа остался бы устаревшим. Уже
+    доставленный анонс не трогаем: там верхний блок — сама доставка.
+    """
+    if details is None or details.publication_status is not None:
+        return
+    try:
+        block = await wizard_live.sync_live_block(
+            context.bot,
+            ctx.chat(update).id,
+            telegram_user_id=_user_id(update),
+            draft_id=details.draft_id,
+            revision=details.revision,
+            known_ids=wizard_live.current_live_ids(details),
+            has_photos=bool(details.photos),
+        )
+    except Exception as exc:  # noqa: BLE001 — живой блок не должен ломать диалог
+        logger.info("Живой блок #%s не обновлён: %s", details.draft_id, exc)
+        return
+    await _keep_live_above_screen(update, context, block)
+
+
+async def _keep_live_above_screen(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+    block,
+) -> None:
+    """
+    Гарантирует порядок «анонс сверху, служебный экран снизу» (S3 §4).
+
+    Telegram не умеет переставлять сообщения, поэтому исправляется только
+    хронология: если живой блок оказался НИЖЕ служебного экрана (первый вход
+    `pl_pick`/`tp_pick`, пересоздание живого блока после потери сообщения),
+    наш собственный экран удаляется, и следующий `_render` создаёт его заново
+    уже под анонсом.
+
+    Удаляется только своё сообщение-экран из `screen_ref` (`user_data` или
+    БД) и только в этом же чате: чужие сообщения и посты это не затрагивает.
+    Отказ Telegram на удаление не прерывает сценарий (экран остаётся) — тогда
+    порядок сохранить нельзя, и это единственное известное ограничение
+    fallback'а; при первом входе сообщение свежее и удаляется штатно.
+    """
+    ids = tuple(getattr(block, "message_ids", ()) or ())
+    if not ids:
+        return
+    user_data = ctx.data(context)
+    ref = screen.screen_ref(user_data)
+    if ref is None:
+        ref = screen.hydrate_screen_ref(user_data, _user_id(update))
+    if ref is None:
+        return
+    chat_id = ctx.chat(update).id
+    if int(ref.get("chat_id") or 0) != int(chat_id):
+        return
+    # Живой блок выше экрана — порядок уже правильный, трогать нечего.
+    if int(ref.get("message_id") or 0) > min(ids):
+        return
+    try:
+        await context.bot.delete_message(chat_id, ref["message_id"])
+    except Exception as exc:  # noqa: BLE001 — удаление best-effort
+        logger.info(
+            "Служебный экран %s не удалён (%s): живой блок останется ниже.",
+            ref["message_id"],
+            exc,
+        )
+        return
+    user_data.pop("screen", None)
+    screen.save_screen_ref(_user_id(update), user_data, chat_id)
+    logger.info("Служебный экран пересоздаётся ниже живого блока анонса.")
 
 
 def _end_foreign_conversations(
@@ -1286,140 +1381,6 @@ def _load_fields(user_id: int, draft_id: int):
         )
 
 
-def _field_status_text(field: AnnouncementFieldState) -> str:
-    if field.status == FIELD_STATUS_VALID:
-        return "заполнено"
-    if field.status == FIELD_STATUS_SKIPPED:
-        return "пропущено"
-    if field.status == FIELD_STATUS_MISSING:
-        return "не заполнено"
-    return "из справочника"
-
-
-def _format_value(value: object | None, *, limit: int = 800) -> str:
-    if value is None:
-        return ""
-    if isinstance(value, (list, tuple)):
-        text = ", ".join(str(item) for item in value)
-    else:
-        text = str(value)
-    if len(text) > limit:
-        text = text[: limit - 1].rstrip() + "…"
-    return text
-
-
-def _field_value_text(field: AnnouncementFieldState) -> str:
-    raw = _format_value(field.raw_value)
-    if (
-        field.value_type == BRICK_TYPE_NUMBER
-        and raw
-        and isinstance(field.rules.get("suffix"), str)
-        and field.rules["suffix"]
-    ):
-        return f"{raw} {field.rules['suffix']}"
-    return raw
-
-
-def _number_rules_hint(rules: dict[str, Any]) -> str:
-    parts = []
-    if rules.get("integer"):
-        parts.append("целое число")
-    if rules.get("min") is not None and rules.get("max") is not None:
-        parts.append(f"от {rules['min']} до {rules['max']}")
-    elif rules.get("min") is not None:
-        parts.append(f"не меньше {rules['min']}")
-    elif rules.get("max") is not None:
-        parts.append(f"не больше {rules['max']}")
-    if isinstance(rules.get("suffix"), str) and rules["suffix"]:
-        parts.append(f"суффикс «{rules['suffix']}»")
-    return "; ".join(parts)
-
-
-def _date_rules_hint(rules: dict[str, Any]) -> str:
-    parts = []
-    if rules.get("min_date"):
-        parts.append(f"не раньше {rules['min_date']}")
-    if rules.get("max_date"):
-        parts.append(f"не позже {rules['max_date']}")
-    if rules.get("horizon_months") is not None:
-        parts.append(f"горизонт {rules['horizon_months']} мес.")
-    return "; ".join(parts)
-
-
-def _type_hint(field: AnnouncementFieldState) -> str:
-    value_type = field.value_type
-    rules = dict(field.rules or {})
-    if value_type == BRICK_TYPE_SHORT_TEXT:
-        return "Ожидается короткий текст одним сообщением."
-    if value_type == BRICK_TYPE_LONG_TEXT:
-        return "Можно отправить несколько строк одним сообщением."
-    if value_type == BRICK_TYPE_DATE:
-        extra = _date_rules_hint(rules)
-        base = "Выберите дату календарём или отправьте её текстом, например 31.12.2026."
-        return f"{base} Ограничения: {extra}" if extra else base
-    if value_type == BRICK_TYPE_TIME:
-        return "Отправьте время, например 18:30 или 9:00."
-    if value_type == BRICK_TYPE_URL:
-        return (
-            "Отправьте ссылку: https://…, t.me/… или домен. Опасные схемы "
-            "не принимаются."
-        )
-    if value_type == BRICK_TYPE_NUMBER:
-        extra = _number_rules_hint(rules)
-        base = "Отправьте число цифрами, например 12."
-        return f"{base} Ограничения: {extra}." if extra else base
-    if value_type == BRICK_TYPE_CHOICE:
-        if rules.get("multiple"):
-            return "Отметьте один или несколько вариантов кнопками, затем «Готово»."
-        return "Выберите один вариант кнопкой."
-    title = BRICK_TYPE_TITLES.get(value_type, value_type)
-    return f"Введите значение типа «{title}»."
-
-
-def _choice_options(field: AnnouncementFieldState) -> list[str]:
-    raw = field.rules.get("choices")
-    if not isinstance(raw, (list, tuple)):
-        return []
-    return [str(item) for item in raw]
-
-
-def _selected_choices(field: AnnouncementFieldState) -> list[str]:
-    raw = field.raw_value
-    if isinstance(raw, (list, tuple)):
-        return [str(item) for item in raw]
-    if isinstance(raw, str) and raw:
-        return [raw]
-    return []
-
-
-def _question_text(
-    field: AnnouncementFieldState,
-    index: int,
-    total: int,
-    *,
-    editing: bool = False,
-    error: str | None = None,
-    notice: str | None = None,
-) -> str:
-    blocks = [
-        f"🧱 Вопрос {index + 1} из {total}: {_h(field.title)}",
-        _type_hint(field),
-        "Поле необязательное: его можно пропустить.",
-    ]
-    if field.status == FIELD_STATUS_VALID:
-        value = _field_value_text(field)
-        blocks.append(f"Текущее значение: {_h(value)}")
-    elif field.status == FIELD_STATUS_SKIPPED:
-        blocks.append("Сейчас поле пропущено. Можно заполнить его или перейти дальше.")
-    elif field.status == FIELD_STATUS_MISSING:
-        blocks.append("Значение пока не задано.")
-    if error:
-        blocks.append(f"⚠️ {_h(error)}")
-    if notice:
-        blocks.append(_h(notice))
-    return "\n\n".join(blocks)
-
-
 async def _render_question(
     update: Update,
     context: ContextTypes.DEFAULT_TYPE,
@@ -1441,7 +1402,11 @@ async def _render_question(
     ui["active_brick_id"] = field.brick_id
     ui["active_source"] = "question"
     ui["editing"] = editing
-    text = _question_text(
+    # Poster 2.0 S3 п.2: сначала настоящий анонс сверху, затем служебный
+    # экран. Порядок в чате фиксирован хронологией сообщений, поэтому
+    # верхний блок синхронизируется ДО отрисовки нижнего вопроса.
+    await _sync_live(update, context, details)
+    text = wizard_questions.question_text(
         field, index, len(fields), editing=editing, error=error, notice=notice
     )
     rows: list[list[InlineKeyboardButton]] = []
@@ -1475,16 +1440,20 @@ async def _render_question(
                 ]
             )
     elif field.value_type == BRICK_TYPE_DATE:
-        rows.append(
-            [
-                InlineKeyboardButton(
-                    "📅 Календарь",
-                    callback_data=(
-                        f"aw_calroot:{details.draft_id}:"
-                        f"{details.revision}:{field.brick_id}"
-                    ),
-                )
-            ]
+        # Poster 2.0 S3 п.4: календарь показывается сразу на вопросе даты —
+        # отдельной кнопки «📅 Календарь» больше нет. Callback'и прежние,
+        # поэтому ручная навигация по неделям/месяцам не изменилась.
+        rows.extend(
+            wizard_questions.calendar_shortcut_rows(
+                field, f"{details.draft_id}:{details.revision}:{field.brick_id}"
+            )
+        )
+    elif field.value_type == BRICK_TYPE_TIME:
+        # S3 п.5: быстрые кнопки времени рядом с ручным вводом.
+        rows.extend(
+            wizard_questions.time_preset_rows(
+                f"{details.draft_id}:{details.revision}:{field.brick_id}"
+            )
         )
 
     if field.status in {FIELD_STATUS_VALID, FIELD_STATUS_SKIPPED}:
@@ -1633,11 +1602,11 @@ async def _after_questions(
     notice: str | None = None,
 ) -> int:
     """
-    Последний ответ (или осознанный пропуск) завершает сбор автоматически.
+    Последний кирпичик ведёт на шаг фотографий, а не к готовому посту.
 
-    Отдельного шага подтверждения нет: готовый анонс сразу собирается и
-    уходит в личный чат автора. Дополнительные кирпичики и фотографии
-    добавляются уже после доставки — кнопками на экране управления.
+    Poster 2.0 S3 п.6: после всех кирпичиков обязательно спрашиваются
+    фотографии; завершает анонс «Без фотографий» или готовая партия фото.
+    Кнопки «Готово»/«Сформировать» нет ни на одном шаге.
     """
     try:
         updated = _ensure_stage(update, context, details, WizardStage.PREVIEW)
@@ -1655,9 +1624,7 @@ async def _after_questions(
             notice=notice,
             pending=_has_pending_changes(update, updated),
         )
-    # Ответы закончились — последний шаг первого заполнения: анонс сразу
-    # собирается и уходит в личный чат автора. Кнопки «Готово» нет.
-    return await _finish_and_deliver(update, context, updated, notice=notice)
+    return await _render_photo_step(update, context, updated, notice=notice)
 
 
 async def _save_question_value(
@@ -1959,52 +1926,18 @@ async def _handle_choice_done(
     return await _advance_question(update, context, details, index + 1)
 
 
-def _parse_rule_date(value: object) -> date | None:
-    try:
-        from datetime import datetime
-
-        return datetime.strptime(str(value), "%d.%m.%Y").date()
-    except (TypeError, ValueError):
-        return None
-
-
-def _calendar_bounds(rules: dict[str, Any]) -> tuple[date, date]:
-    today = app_today()
-    months = rules.get("horizon_months")
-    try:
-        horizon = calendar_view.add_months(
-            today, int(months) if months is not None else 12
-        )
-    except (TypeError, ValueError):
-        horizon = calendar_view.add_months(today, 12)
-    start = today
-    end = horizon
-    minimum = _parse_rule_date(rules.get("min_date"))
-    maximum = _parse_rule_date(rules.get("max_date"))
-    if minimum is not None:
-        start = max(start, minimum)
-    if maximum is not None:
-        end = min(end, maximum)
-    return start, end
-
-
-def _clip_range(
-    value: calendar_view.DateRange, allowed: calendar_view.DateRange
-) -> calendar_view.DateRange | None:
-    start = max(value[0], allowed[0])
-    end = min(value[1], allowed[1])
-    if start > end:
-        return None
-    return start, end
-
-
-def _calendar_context(
+def _active_field(
     update: Update,
     context: ContextTypes.DEFAULT_TYPE,
     draft_id: int,
     revision: int,
     brick_id: int,
 ):
+    """
+    Поле активного вопроса по callback-адресу (общий путь для даты/времени).
+
+    Устаревший revision или чужой brick_id → None: экран уже перерисован.
+    """
     guarded = _guard_details(update, context, draft_id, revision)
     if guarded is None:
         return None
@@ -2030,25 +1963,23 @@ def _calendar_context(
         index = -1
     else:
         return None
+    return details, field, index, source
+
+
+def _calendar_context(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+    draft_id: int,
+    revision: int,
+    brick_id: int,
+):
+    found = _active_field(update, context, draft_id, revision, brick_id)
+    if found is None:
+        return None
+    details, field, index, source = found
     if field.value_type != BRICK_TYPE_DATE:
         return None
     return details, field, index, source, _calendar_bounds(dict(field.rules))
-
-
-def _calendar_title(field: AnnouncementFieldState) -> str:
-    value = _field_value_text(field)
-    lines = [
-        # Заголовок кирпичика задаёт человек (автор/админ места) и попадает
-        # в экран с parse_mode=HTML — экранируем, как в вопросах (_question_text).
-        f"📅 {_h(field.title)}",
-        "Выберите дату кнопками. Дату также можно отправить текстом.",
-    ]
-    if value:
-        lines.append(f"Текущее значение: {_h(value)}")
-    hint = _date_rules_hint(dict(field.rules))
-    if hint:
-        lines.append(f"Ограничения: {hint}.")
-    return "\n\n".join(lines)
 
 
 async def _render_calendar_value(
@@ -2159,26 +2090,6 @@ async def _render_calendar_root(
     )
     await _render(update, context, _calendar_title(field), InlineKeyboardMarkup(rows))
     return AW_QUESTIONS
-
-
-def _day_rows(
-    days: list[date],
-    prefix: str,
-    *,
-    per_row: int = 4,
-) -> list[list[InlineKeyboardButton]]:
-    rows: list[list[InlineKeyboardButton]] = []
-    for start in range(0, len(days), per_row):
-        rows.append(
-            [
-                InlineKeyboardButton(
-                    calendar_view.format_day(day),
-                    callback_data=(f"aw_calday:{prefix}:{day.strftime('%Y-%m-%d')}"),
-                )
-                for day in days[start : start + per_row]
-            ]
-        )
-    return rows
 
 
 async def _render_calendar_days(
@@ -2393,6 +2304,7 @@ async def _render_extras(
     ui = _ui(context)
     _set_details(ui, details)
     _clear_active(ui)
+    await _sync_live(update, context, details)
     items = _extras_with_definitions(details, _user_id(update))
     lines = [
         "➕ Дополнительные кирпичики",
@@ -3189,6 +3101,12 @@ async def _render_preview(
     _set_details(ui, preview.draft)
     lines = _preview_summary_lines(preview, _user_id(update))
     lines.extend(_preview_block(preview))
+    # S3 п.11: шутка пустого анонса — только в нижнем служебном экране,
+    # никогда внутри самого текста анонса выше.
+    if not preview.visible_text and not preview.draft.photos:
+        humor = ui_humor.get_humor_line(announcement_is_empty=True)
+        if humor:
+            lines.extend(["", humor])
     if notice:
         lines.insert(1, notice)
     await _render(
@@ -3664,6 +3582,112 @@ def _delivery_fingerprint(text: str, photos: Sequence[str]) -> str:
     from handlers.post_creation import _delivery_fingerprint as fingerprint
 
     return fingerprint(text, list(photos))
+
+
+def _announcement_is_empty(update: Update, details) -> bool:
+    """
+    Пуст ли анонс по видимому тексту (для заглушки/шутки в нижнем экране).
+
+    Использует тот же рендер, что live-блок и итоговая отправка; ошибка
+    сборки не считается пустотой — иначе шутка появлялась бы вместо
+    диагностики. Фото учитываются: текст с фото не «пустой анонс».
+    """
+    try:
+        with SessionLocal() as session:
+            preview = build_announcement_preview(
+                session,
+                actor_telegram_user_id=_user_id(update),
+                draft_id=details.draft_id,
+                today=app_today(),
+            )
+    except (AnnouncementError, TemplateError, TemplateCompileError, BrickError):
+        return False
+    return not preview.visible_text and not details.photos
+
+
+async def _render_photo_step(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+    details,
+    *,
+    notice: str | None = None,
+) -> int:
+    """
+    Шаг фотографий после последнего кирпичика (Poster 2.0 S3 п.6).
+
+    Последний ответ больше **не** доставляет анонс: сначала спрашиваются
+    фотографии. Кнопки «Готово»/«Сформировать» здесь нет — завершает
+    «Без фотографий» (или партия фото в S4). Текст верхнего блока уже
+    показан выше и не пересылается повторно.
+    """
+    ui = _ui(context)
+    _set_details(ui, details)
+    _clear_active(ui)
+    await _sync_live(update, context, details)
+    total = len(details.photos)
+    lines = [
+        "📷 Фотографии анонса",
+        "",
+        "Пришлите одно фото или альбом — они уйдут отдельными вложениями "
+        "после текста. Можно отправить несколько сообщений подряд или "
+        "продолжить без фотографий.",
+        f"Добавлено фотографий: {total}.",
+    ]
+    # S3 п.11: шутка — только в нижнем служебном экране и только пока
+    # анонс пуст. В живой блок и в отправленный текст она не попадает.
+    if _announcement_is_empty(update, details):
+        humor = ui_humor.get_humor_line(announcement_is_empty=True)
+        if humor:
+            lines.extend(["", humor])
+    if notice:
+        lines.insert(1, notice)
+    rows: list[list[InlineKeyboardButton]] = [
+        [
+            InlineKeyboardButton(
+                "📎 Добавить фото",
+                callback_data=f"aw_photo_add:{details.draft_id}:{details.revision}",
+            )
+        ],
+        [
+            InlineKeyboardButton(
+                "🚫 Без фотографий",
+                callback_data=f"aw_photo_none:{details.draft_id}:{details.revision}",
+            )
+        ],
+    ]
+    if total:
+        rows.insert(
+            1,
+            [
+                InlineKeyboardButton(
+                    "📷 Показать добавленные",
+                    callback_data=(
+                        f"aw_photos:{details.draft_id}:{details.revision}:0"
+                    ),
+                )
+            ],
+        )
+    rows.append(
+        [
+            InlineKeyboardButton(
+                "🧱 К вопросам",
+                callback_data=f"aw_qmanage:{details.draft_id}:{details.revision}",
+            )
+        ]
+    )
+    rows.append(
+        [
+            InlineKeyboardButton(
+                "👁 Обзор анонса",
+                callback_data=f"aw_preview:{details.draft_id}:{details.revision}",
+            )
+        ]
+    )
+    rows.append([InlineKeyboardButton("🏠 Главное меню", callback_data="main_menu")])
+    await _render(update, context, "\n".join(lines), InlineKeyboardMarkup(rows))
+    # Шаг фото живёт в состоянии обзора: там же обрабатываются aw_photo_*,
+    # aw_preview и aw_qmanage — отдельного состояния диалога не заводим.
+    return AW_PREVIEW
 
 
 def _has_pending_changes(update: Update, details) -> bool:
@@ -4782,6 +4806,38 @@ async def handle_question_callback(
             update, context, int(parts[1]), int(parts[2]), int(parts[3])
         )
 
+    if action == "aw_timeset" and len(parts) >= 5:
+        # S3 п.5: быстрая кнопка времени. Путь сохранения тот же, что у
+        # ручного ввода: CAS по revision, drop_user_input, перерисовка
+        # вопроса с уже обновлённым верхним блоком.
+        # Значение содержит двоеточие («18:00»), поэтому callback разбит
+        # больше чем на пять частей — остаток склеиваем обратно.
+        if not all(item.isdigit() for item in parts[1:4]):
+            return await _stale(update, context)
+        guarded = _guard_details(update, context, int(parts[1]), int(parts[2]))
+        if guarded is None:
+            return await _stale(update, context)
+        _ui_data, details = guarded
+        found = _active_field(
+            update, context, int(parts[1]), int(parts[2]), int(parts[3])
+        )
+        if found is None:
+            return await _stale(update, context)
+        _owned, field, index, _source = found
+        if field.value_type != BRICK_TYPE_TIME:
+            return await _stale(update, context)
+        preset = ":".join(parts[4:])
+        await _answer(update, preset)
+        return await _save_question_value(
+            update,
+            context,
+            details,
+            field,
+            preset,
+            index=index,
+            drop_input=True,
+        )
+
     if action == "aw_qmanage" and len(parts) == 3:
         if not all(item.isdigit() for item in parts[1:]):
             return await _stale(update, context)
@@ -5228,6 +5284,26 @@ async def handle_preview_callback(
         _ui_data, details = guarded
         await _answer(update)
         return await _render_photos(update, context, details, page=int(parts[3]))
+    if action == "aw_photo_none" and len(parts) == 3:
+        # S3 п.6: «Без фотографий» — это и есть финал шага фото, кнопки
+        # «Готово» нет. Используется существующая доставка без изменений:
+        # расширенная работа с альбомами и лимитами — S4.
+        if not all(item.isdigit() for item in parts[1:]):
+            return await _stale(update, context)
+        guarded = _guard_details(update, context, int(parts[1]), int(parts[2]))
+        if guarded is None:
+            return await _stale(update, context)
+        _ui_data, details = guarded
+        if _edit_blocked(details):
+            await _answer(update, "Отправка уже начата.", alert=True)
+            return await _render_publish_status(update, context, details)
+        await _answer(update, "Продолжаем без фотографий.")
+        return await _finish_and_deliver(
+            update,
+            context,
+            details,
+            notice="📷 Анонс останется без вложений.",
+        )
     if action == "aw_photo_add" and len(parts) == 3:
         guarded = _guided()
         if guarded is None:

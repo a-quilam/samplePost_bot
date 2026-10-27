@@ -13,11 +13,22 @@ Stage 24: компилятор шаблонов анонсов.
     связанной версии или snapshot'а и значений кирпичиков. Обозначения не
     разрешаются заново: используются сохранённые brick_id.
 
+3.  **Единый рендер анонса** (`render_announcement`): тот же результат плюс
+    решение о технической заглушке `.`. Poster 2.0 использует его и для
+    живого верхнего блока (S3), и для итоговой отправки (S4): один сборщик,
+    одно поведение.
+
+Статический текст шаблона выводится буквально: никакой постобработки,
+«чистки сирот» и удаления литералов (`//` остаётся `//`, даже если обе
+подстановки пусты). Техническая `.` — это решение уровня сообщения, а не
+значения кирпичика, поэтому она добавляется здесь, а не в `values_by_id`.
+
 Границы этапа:
 
 - Telegram-редактор шаблонов — Stage 25;
 - согласование новых кирпичиков — Stage 26;
-- подключение снимков к мастеру постов — Stage 27.
+- подключение снимков к мастеру постов — Stage 27;
+- живой/итоговый рендер Poster 2.0 — S3.
 """
 
 from __future__ import annotations
@@ -28,6 +39,7 @@ from typing import Any
 
 from sqlalchemy.orm import Session
 
+from announcement_wizard import visible_announcement_text
 from brick_store import BrickDefinition, resolve_brick_code_candidates
 from brick_types import (
     validate_brick_value,
@@ -435,6 +447,8 @@ def render_template(
     Собирает итоговый HTML-анонс из уже связанных секций.
 
     Не выполняет повторного разбора: привязки и структура уже сохранены.
+    Статический текст секций выводится буквально — сиротские литералы
+    (`//`, разделители) не удаляются и не «чистятся».
     """
     sections: list[str] = []
     for section in _SECTION_ORDER:
@@ -449,3 +463,36 @@ def render_template(
         if html:
             sections.append(html)
     return "\n".join(sections)
+
+
+# Техническая заглушка Telegram: пустое сообщение отправить нельзя.
+PLACEHOLDER_TEXT = "."
+
+
+def render_announcement(
+    tokens_by_section: Mapping[str, Sequence[Any]],
+    values_by_id: Mapping[int, Any],
+    definitions_by_id: Mapping[int, BrickDefinition],
+    *,
+    has_photos: bool = False,
+) -> str:
+    """
+    Единый рендер анонса для живого блока и итоговой отправки.
+
+    Отличие от `render_template` — только техническая заглушка:
+
+    - видимый текст непустой → рендер как есть (статика буквальна);
+    - видимый текст пуст и фото нет → ровно ``.``;
+    - видимый текст пуст, но есть фото → пустая строка: фото уходит без
+      подписи, точка не нужна.
+
+    Заглушка не является значением кирпичика: `values_by_id` не меняется,
+    поэтому `.` не попадает в `announcement_values` и исчезает при правке.
+    Анонс из одного литерального `//` непустой и заглушку не получает.
+    """
+    html = render_template(tokens_by_section, values_by_id, definitions_by_id)
+    if visible_announcement_text(html):
+        return html
+    if has_photos:
+        return ""
+    return PLACEHOLDER_TEXT
