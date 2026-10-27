@@ -229,7 +229,7 @@ class TemplatesUiTests(unittest.TestCase):
         self.assertEqual(rows[0].revision, 2)
         # Контент сброшен к встроенному.
         v2 = get_template_version_direct(h, rows[0].id, 2)
-        self.assertEqual(v2.header, "[название]")
+        self.assertEqual(v2.header, "**[название]**")
 
     @scenario_test
     async def test_other_user_cannot_access_foreign_template(self, h) -> None:
@@ -342,7 +342,7 @@ class TemplatesUiTests(unittest.TestCase):
         self.assertEqual(versions[1].body, "Своё тело [название]")
         builtin = get_builtin_template()
         self.assertEqual(versions[2].body, builtin.body)
-        self.assertEqual(versions[2].builtin_version, 1)
+        self.assertEqual(versions[2].builtin_version, builtin.version)
         with h.session_factory() as session:
             snapshot_row = session.get(TemplateSnapshot, snapshot.snapshot_id)
         assert snapshot_row is not None

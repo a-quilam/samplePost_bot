@@ -706,12 +706,16 @@ def check_code_availability(
         )
     )
     if scope != BRICK_SCOPE_SYSTEM and (system_reserved or system_row is not None):
-        # Stage 26: личный кирпичик, чей код был одобрен как системный,
-        # остаётся доступен для редактирования. Исключение действует только
-        # для того же кирпичика и только пока его код не меняется; новый
-        # кирпичик или смена кода на системный по-прежнему запрещены.
+        # Stage 26 и Poster 2.0 S1: существующая несистемная строка сохраняет
+        # право на собственный текущий код, даже если он объявлен системным.
+        # Исключение действует только для того же кирпичика и только пока его
+        # код не меняется; новый кирпичик или смена кода на системный
+        # по-прежнему запрещены. Проверка `system_row is not None` важна:
+        # легаси-строка `адрес` сосуществует с реальным системным кирпичиком
+        # миграции 15, и без неё владелец не смог бы даже переименовать своё
+        # определение (расхождение с docs/migrations.md, S1).
         unchanged_promoted_source = False
-        if not system_reserved and system_row is not None and exclude_brick_id:
+        if system_row is not None and exclude_brick_id:
             own = session.get(Brick, exclude_brick_id)
             if own is not None and own.code == canonical and own.scope == scope:
                 if scope == BRICK_SCOPE_PERSONAL:

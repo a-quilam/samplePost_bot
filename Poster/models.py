@@ -558,6 +558,9 @@ class Brick(Base):
         nullable=True,
     )
     rules_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # Необязательное пояснение автора кирпичика (Poster 2.0 S1). NULL = нет
+    # описания; текст не является частью шаблона и не подставляется в анонс.
+    description: Mapped[str | None] = mapped_column(Text, nullable=True)
     status: Mapped[str] = mapped_column(Text, nullable=False, default="active")
     # Оптимистическая блокировка Stage 22B: увеличивается только сервисом при
     # успешном изменении/архивировании/восстановлении. Идентификатор brick_id
@@ -1128,19 +1131,24 @@ class AnnouncementDraft(Base):
         ForeignKey("users.id", ondelete="RESTRICT"),
         nullable=False,
     )
-    place_id: Mapped[int] = mapped_column(
+    place_id: Mapped[int | None] = mapped_column(
         Integer,
         ForeignKey("places.id", ondelete="RESTRICT"),
-        nullable=False,
+        nullable=True,
     )
     place_name_id: Mapped[int | None] = mapped_column(
         Integer,
         ForeignKey("place_names.id", ondelete="SET NULL"),
         nullable=True,
     )
-    place_display_name: Mapped[str] = mapped_column(Text, nullable=False)
+    place_display_name: Mapped[str | None] = mapped_column(Text, nullable=True)
     place_address: Mapped[str | None] = mapped_column(Text, nullable=True)
     place_url: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # Источник шаблона, а не место: 'place' — стандарт площадки (place_id
+    # обязателен), 'personal' — личный шаблон (площадки в черновике нет).
+    origin: Mapped[str] = mapped_column(
+        Text, nullable=False, default="place", server_default=text("'place'")
+    )
     template_id: Mapped[int | None] = mapped_column(
         Integer,
         ForeignKey("templates.id", ondelete="RESTRICT"),
@@ -1174,6 +1182,9 @@ class AnnouncementDraft(Base):
         DateTime, nullable=True
     )
     published_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    # Адреса всех сообщений живого медиаблока (альбом — несколько сообщений).
+    # JSON-массив; NULL/[] = живого блока нет.
+    live_message_ids_json: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime, default=utcnow, nullable=False
     )
@@ -1208,8 +1219,21 @@ class AnnouncementDraft(Base):
         ),
         CheckConstraint("revision >= 1", name="ck_announcement_drafts_revision"),
         CheckConstraint(
-            "length(trim(place_display_name)) > 0",
-            name="ck_announcement_drafts_display_name",
+            "origin IN ('place', 'personal')",
+            name="ck_announcement_drafts_origin",
+        ),
+        CheckConstraint(
+            "(origin = 'place' AND place_id IS NOT NULL "
+            "AND place_display_name IS NOT NULL "
+            "AND length(trim(place_display_name)) > 0) "
+            "OR (origin = 'personal' AND place_id IS NULL "
+            "AND place_display_name IS NULL)",
+            name="ck_announcement_drafts_origin_place",
+        ),
+        CheckConstraint(
+            "live_message_ids_json IS NULL OR (json_valid(live_message_ids_json) "
+            "AND json_type(live_message_ids_json) = 'array')",
+            name="ck_announcement_drafts_live_ids",
         ),
         CheckConstraint(
             "place_address IS NULL OR length(trim(place_address)) > 0",

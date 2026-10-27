@@ -187,6 +187,17 @@ SYSTEM_BRICKS: tuple[SystemBrickDefinition, ...] = (
         BRICK_SOURCE_ASK,
         {},
     ),
+    # Poster 2.0 S1 (миграция 15): пользовательский код эталона `[адрес]`.
+    # Старый `адрес_места` (id 6) остаётся: он используется в уже сохранённых
+    # снимках и шаблонах. Оба кирпичика берут значение из `places.address`.
+    SystemBrickDefinition(
+        10,
+        "адрес",
+        "Адрес",
+        BRICK_TYPE_SHORT_TEXT,
+        BRICK_SOURCE_PLACE,
+        {},
+    ),
 )
 
 SYSTEM_BRICK_CODES = tuple(item.code for item in SYSTEM_BRICKS)

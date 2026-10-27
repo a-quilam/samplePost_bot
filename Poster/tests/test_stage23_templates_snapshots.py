@@ -23,6 +23,7 @@ from template_store import (
     update_template_body,
     update_template_header,
 )
+from template_types import BUILTIN_TEMPLATE_VERSION
 from tests.stage23_helpers import (
     OTHER_TG,
     OWNER_TG,
@@ -78,7 +79,7 @@ class TemplateSnapshotTests(TemplateDatabaseTestCase):
         self.assertEqual(snapshot.source_place_id, place.id)
         self.assertIsNone(snapshot.source_name)
         self.assertEqual(snapshot.brick_ids, standard.current_version.brick_ids)
-        self.assertEqual(snapshot.builtin_version, 1)
+        self.assertEqual(snapshot.builtin_version, BUILTIN_TEMPLATE_VERSION)
         del standard
 
     def test_snapshot_is_immutable_after_template_edits(self) -> None:

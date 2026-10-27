@@ -58,6 +58,7 @@ from permissions import can_manage_place
 from template_types import (
     BUILTIN_TEMPLATE,
     BUILTIN_TEMPLATE_VERSION,
+    INITIAL_PERSONAL_TEMPLATE_NAME,
     STANDARD_TEMPLATE_DISPLAY_NAME,
     TEMPLATE_KIND_PERSONAL,
     TEMPLATE_KIND_STANDARD,
@@ -1422,6 +1423,41 @@ def _reset_to_builtin(
         footer=BUILTIN_TEMPLATE.footer,
         bindings=binding_pairs,
         builtin_version=BUILTIN_TEMPLATE_VERSION,
+    )
+
+
+def ensure_initial_personal_template(
+    session: Session,
+    *,
+    actor_telegram_user_id: int | None,
+) -> TemplateDetails:
+    """
+    Первый личный шаблон нового пользователя — копия встроенного стандарта.
+
+    Poster 2.0: каждый новый пользователь получает независимую копию
+    стандартного шаблона, чтобы сразу работать с «Создать по личному
+    шаблону». Копия — обычный `kind='personal'`-шаблон с именем
+    «Мой шаблон» и текстом `BUILTIN_TEMPLATE`; последующие правки эталона
+    его не меняют.
+
+    Идемпотентность: повторный вызов возвращает существующий первый личный
+    шаблон и второй не создаёт. Осознанное удаление всех личных шаблонов
+    пользователем **не** восстанавливается самовольно: вызывающий слой
+    (S2) использует функцию только при создании профиля, поэтому удаление
+    остаётся удалением. Если личных шаблонов несколько, возвращается самый
+    ранний — новых не появляется.
+    """
+    actor = _require_actor_user(session, actor_telegram_user_id)
+    existing = list_personal_templates(session, actor.telegram_user_id)
+    if existing:
+        return existing[0]
+    return create_personal_template(
+        session,
+        actor_telegram_user_id=actor.telegram_user_id,
+        name=INITIAL_PERSONAL_TEMPLATE_NAME,
+        header=BUILTIN_TEMPLATE.header,
+        body=BUILTIN_TEMPLATE.body,
+        footer=BUILTIN_TEMPLATE.footer,
     )
 
 

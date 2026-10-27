@@ -34,7 +34,7 @@ from template_store import (
     update_template_header,
     update_template_section,
 )
-from template_types import TemplateValidationError
+from template_types import BUILTIN_TEMPLATE_VERSION, TemplateValidationError
 from tests.stage23_helpers import (
     OTHER_TG,
     OWNER_TG,
@@ -242,7 +242,7 @@ class StandardTemplateServiceTests(TemplateDatabaseTestCase):
         # Историческая версия читается отдельно.
         first = get_template_version(self.session, OTHER_TG, self.template_id, 1)
         assert first is not None
-        self.assertEqual(first.header, "[название]")
+        self.assertEqual(first.header, "**[название]**")
 
     def test_not_found_and_invalid_input(self) -> None:
         self.make_place_admin(self.place, self.admin)
@@ -281,7 +281,9 @@ class StandardTemplateServiceTests(TemplateDatabaseTestCase):
 
         self.assertEqual(
             list_template_brick_ids(self.session, OWNER_TG, self.template_id),
-            (2, 3, 4, 5, 6, 7, 8, 9),
+            # Эталон §6.1.1: без «время_окончания» (4) и
+            # «адрес_места» (6), но с `[адрес]` (10).
+            (2, 3, 5, 7, 8, 9, 10),
         )
 
     def test_read_access_for_any_registered_user(self) -> None:
@@ -362,11 +364,11 @@ class StandardTemplateServiceTests(TemplateDatabaseTestCase):
         assert done.template is not None
         self.assertEqual(done.template.revision, 3)
         latest = done.template.current_version
-        self.assertEqual(latest.header, "[название]")
-        self.assertEqual(latest.builtin_version, 1)
+        self.assertEqual(latest.header, "**[название]**")
+        self.assertEqual(latest.builtin_version, BUILTIN_TEMPLATE_VERSION)
         versions = list_template_versions(self.session, OTHER_TG, self.template_id)
         self.assertEqual([item.version for item in versions], [1, 2, 3])
-        self.assertEqual(versions[0].builtin_version, 1)
+        self.assertEqual(versions[0].builtin_version, BUILTIN_TEMPLATE_VERSION)
         self.assertIsNone(versions[1].builtin_version)
 
     def test_version_history_is_readable_but_not_writable(self) -> None:
@@ -382,7 +384,7 @@ class StandardTemplateServiceTests(TemplateDatabaseTestCase):
         self.assertEqual(len(versions), 2)
         first = get_template_version(self.session, OWNER_TG, self.template_id, 1)
         assert first is not None
-        self.assertEqual(first.header, "[название]")
+        self.assertEqual(first.header, "**[название]**")
         missing = get_template_version(self.session, OWNER_TG, self.template_id, 5)
         self.assertIsNone(missing)
         wrong_version = get_template_version(

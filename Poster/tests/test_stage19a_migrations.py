@@ -97,6 +97,8 @@ class MigrationMechanismTests(unittest.TestCase):
                 (12, "announcement_wizard"),
                 (13, "announcement_photos_publication"),
                 (14, "announcement_redelivery"),
+                (15, "brick_description_and_address"),
+                (16, "announcement_draft_origin"),
             ],
         )
 
@@ -190,12 +192,14 @@ class MigrationMechanismTests(unittest.TestCase):
                 (12, "announcement_wizard"),
                 (13, "announcement_photos_publication"),
                 (14, "announcement_redelivery"),
+                (15, "brick_description_and_address"),
+                (16, "announcement_draft_origin"),
             ],
         )
 
         # Повторный старт (как рестарт процесса) не переприменяет миграции.
         run_init_db_subprocess(self.path)
-        self.assertEqual(len(_journal(self.path)), 14)
+        self.assertEqual(len(_journal(self.path)), LATEST_VERSION)
 
     def test_full_init_upgrades_ancient_drafts_columns(self) -> None:
         create_old_schema(self.path, ancient=True)

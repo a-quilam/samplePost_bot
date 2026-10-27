@@ -29,9 +29,11 @@ class BrickManagementSchemaTests(BrickDatabaseTestCase):
         finally:
             connection.close()
 
-    def test_migration_seven_is_latest_and_has_revision_and_sessions(self) -> None:
-        self.assertEqual(LATEST_VERSION, 14)
-        self.assertEqual(self.journal()[-1], (14, "announcement_redelivery"))
+    def test_migration_seven_has_revision_and_sessions(self) -> None:
+        # Миграции 7 — эпоха управления кирпичиками; 15/16 добавлены этапом
+        # Poster 2.0 S1, поэтому «последняя» проверяется по LATEST_VERSION.
+        self.assertEqual(LATEST_VERSION, 16)
+        self.assertEqual(self.journal()[-1], (16, "announcement_draft_origin"))
         connection = connect(self.path)
         try:
             brick_columns = {
@@ -118,8 +120,8 @@ class BrickManagementSchemaTests(BrickDatabaseTestCase):
     def test_restart_and_repeated_migration_are_idempotent(self) -> None:
         self.assertEqual(run_migrations(self.engine), LATEST_VERSION)
         self.assertEqual(run_migrations(self.engine), LATEST_VERSION)
-        self.assertEqual(len(self.journal()), 14)
-        self.assertEqual(self.journal()[-1], (14, "announcement_redelivery"))
+        self.assertEqual(len(self.journal()), LATEST_VERSION)
+        self.assertEqual(self.journal()[-1], (16, "announcement_draft_origin"))
 
 
 if __name__ == "__main__":

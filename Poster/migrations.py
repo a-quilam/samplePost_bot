@@ -1883,6 +1883,525 @@ MIGRATION_14_ANNOUNCEMENT_REDELIVERY = Migration(
 )
 
 
+# --- Версия 15: описание кирпичика и системный код `адрес` (Poster 2.0 S1) --
+#
+# Новый системный кирпичик `[адрес]` — пользовательский код эталона Poster
+# 2.0. Старый `адрес_места` (id=6) НЕ переименовывается и не удаляется: он
+# остаётся в уже сохранённых снимках и шаблонах. Оба кирпичика берут значение
+# из `places.address`.
+#
+# `description` — необязательное пояснение автора кирпичика (NULL = нет
+# описания). Колонка добавляется добавочным ALTER TABLE: существующие строки
+# и триггеры миграции 6 не затрагиваются.
+#
+# Коллизия кода `адрес` (дефект найден независимым тестировщиком S1). До
+# Poster 2.0 кода `адрес` в `SYSTEM_BRICK_CODES` не было, поэтому в работающей
+# базе версии 14 уже мог существовать личный или местный кирпичик с этим
+# кодом — активный или архивный. Триггер `trg_bricks_reserve_codes_insert`
+# запрещает сосуществование системного и несистемного кода, поэтому обычный
+# INSERT системного `адрес` падал с `system brick code is reserved` и блокировал
+# обновление приложения целиком.
+#
+# Решение: на время одной вставки триггер резервирования снимается и сразу
+# восстанавливается дословно тем же определением, что действует после
+# миграции 11 (включая исключение Stage 26 для одобрения предложения). DDL и
+# DML выполняются одной транзакцией `run_migrations`, поэтому окна без
+# триггера для других писателей нет.
+#
+# Легаси-кирпичик при этом НЕ переписывается: его `id`, код, название, тип,
+# область, статус и владелец остаются прежними. Сохранённые версии и снимки
+# ссылаются на `brick_id`, а не на код, поэтому старые шаблоны продолжают
+# рендериться. Сосуществование системного и несистемного носителя одного кода
+# уже допущено проектом в Stage 26 («повышенный» личный кирпичик сохраняет
+# свой код рядом с системным), и разбор кода сохраняет тот же приоритет:
+# `resolve_brick_code_*` отдаёт system, поэтому новые `[адрес]` указывают на
+# системный кирпичик, а `check_code_availability` считает код занятым для
+# новых определений. Для уже существующей строки владелец по-прежнему может
+# менять название/настройки, не меняя код (см. `check_code_availability`:
+# исключение «собственный неизменный код» действует и при `system_reserved`).
+#
+# Инвариант для будущих записей не ослаблен: восстановленный триггер идентичен
+# действовавшему, и никакой новый системный код не может быть создан поверх
+# несистемного.
+
+# Дословное определение `trg_bricks_reserve_codes_insert` из миграции 11.
+# Хранится отдельной константой, чтобы миграция 15 восстанавливала ровно то
+# состояние, которое сменила, и не зависела от форматирования.
+_RESERVE_CODES_INSERT_TRIGGER = """
+        CREATE TRIGGER trg_bricks_reserve_codes_insert
+        BEFORE INSERT ON bricks
+        FOR EACH ROW
+        WHEN EXISTS (
+            SELECT 1 FROM bricks b
+            WHERE b.code = NEW.code
+              AND (
+                  (NEW.scope = 'system' AND b.scope <> 'system')
+                  OR (NEW.scope <> 'system' AND b.scope = 'system')
+              )
+        )
+        AND NOT (
+            NEW.scope = 'system'
+            AND EXISTS (
+                SELECT 1
+                FROM brick_proposals p
+                JOIN bricks src ON src.id = p.source_brick_id
+                WHERE p.scope = 'system'
+                  AND p.status = 'pending'
+                  AND p.code = NEW.code
+                  AND p.title = NEW.title
+                  AND p.type = NEW.type
+                  AND p.source = NEW.source
+                  AND p.rules_json IS NEW.rules_json
+                  AND src.code = NEW.code
+                  AND (
+                      SELECT count(*) FROM bricks b2
+                      WHERE b2.code = NEW.code AND b2.scope <> 'system'
+                  ) = 1
+            )
+        )
+        BEGIN
+            SELECT RAISE(ABORT, 'system brick code is reserved');
+        END
+        """
+
+MIGRATION_15_BRICK_DESCRIPTION_AND_ADDRESS = Migration(
+    version=15,
+    name="brick_description_and_address",
+    statements=(
+        "ALTER TABLE bricks ADD COLUMN description TEXT",
+        # Временное снятие триггера резервирования: без него вставка системного
+        # `адрес` невозможна в базе, где код уже занят несистемным кирпичиком.
+        "DROP TRIGGER IF EXISTS trg_bricks_reserve_codes_insert",
+        # Системный код `[адрес]` (Poster 2.0). ID не хардкодится: миграция 6
+        # создала таблицу без резерва ID, поэтому пользовательские/местные
+        # кирпичики в существующей базе могли занять 10 и далее, и жёсткий
+        # `id=10` даёт UNIQUE constraint failed. Системность задаётся
+        # `scope='system'` и неизменяемостью кода (триггеры миграции 6), а
+        # каталог `SYSTEM_BRICKS[].id` сверяется с БД по коду при чтении, не
+        # по номеру. `MAX(id)+1` сохраняет все прежние ID без изменений.
+        """
+        INSERT INTO bricks
+            (id, code, title, type, scope, source, rules_json, status,
+             created_by_user_id, created_at, updated_at, description)
+        SELECT
+            COALESCE(MAX(id), 0) + 1, 'адрес', 'Адрес', 'short_text',
+            'system', 'place', NULL, 'active', NULL, CURRENT_TIMESTAMP,
+            NULL, NULL
+        FROM bricks
+        """,
+        _RESERVE_CODES_INSERT_TRIGGER,
+    ),
+)
+
+
+# --- Версия 16: черновик без площадки (Poster 2.0 S1) -----------------------
+#
+# Личный шаблон может не содержать кирпичика «Место», поэтому
+# `announcement_drafts.place_id` и снимок названия места становятся
+# необязательными. `origin` фиксирует источник шаблона (place/personal), а не
+# место, выбранное позже в кирпичике. `live_message_ids_json` хранит адреса
+# всех сообщений живого медиаблока (мультимедиа — несколько сообщений).
+#
+# SQLite не умеет снимать NOT NULL/CHECK через ALTER TABLE, поэтому таблица
+# перестраивается. `PRAGMA foreign_keys=OFF` внутри транзакции
+# `run_migrations` — no-op, поэтому используется безопасная схема с копиями:
+# DROP TABLE при включённых FK делает неявный DELETE и каскадно удаляет
+# детей, но их строки уже сохранены в *_backup. Порядок шагов:
+#   1-3) копии детей и черновиков;
+#   4)   DROP старой таблицы (каскад удаляет детей);
+#   5)   новая схема;
+#   6)   индексы и триггеры (до вставки, чтобы вставка проверила данные);
+#   7)   черновики с origin='place';
+#   8)   значения и дополнительные кирпичики;
+#   9)   удаление копий.
+# Всё выполняется одной транзакцией: сбой любого шага откатывает миграцию.
+
+MIGRATION_16_ANNOUNCEMENT_DRAFT_ORIGIN = Migration(
+    version=16,
+    name="announcement_draft_origin",
+    statements=(
+        "CREATE TABLE announcement_values_backup AS SELECT * FROM announcement_values",
+        "CREATE TABLE announcement_extras_backup AS SELECT * FROM announcement_extras",
+        "CREATE TABLE announcement_drafts_backup AS SELECT * FROM announcement_drafts",
+        # Каскадное удаление детей — ожидаемо: их строки уже в *_backup.
+        "DROP TABLE announcement_drafts",
+        # Триггеры детей принадлежат их собственным таблицам: DROP родителя
+        # их не снимает, а имена заняты. Сами таблицы и данные (в *_backup)
+        # не меняются — снимаем только триггеры, чтобы пересоздать их ниже.
+        "DROP TRIGGER IF EXISTS trg_announcement_values_identity_immutable",
+        "DROP TRIGGER IF EXISTS trg_announcement_extras_identity_immutable",
+        """
+        CREATE TABLE announcement_drafts (
+            id INTEGER NOT NULL PRIMARY KEY,
+            author_user_id INTEGER NOT NULL,
+            place_id INTEGER,
+            place_name_id INTEGER,
+            place_display_name TEXT,
+            place_address TEXT,
+            place_url TEXT,
+            origin TEXT NOT NULL DEFAULT 'place',
+            template_id INTEGER,
+            template_version INTEGER,
+            template_snapshot_id INTEGER,
+            stage TEXT NOT NULL DEFAULT 'place',
+            revision INTEGER NOT NULL DEFAULT 1,
+            idempotency_key TEXT,
+            photos TEXT,
+            publication_status TEXT,
+            publication_text TEXT,
+            publication_photos TEXT,
+            publication_progress TEXT,
+            publication_error TEXT,
+            publication_started_at DATETIME,
+            published_at DATETIME,
+            live_message_ids_json TEXT,
+            created_at DATETIME NOT NULL,
+            updated_at DATETIME NOT NULL,
+            CONSTRAINT ck_announcement_drafts_stage
+                CHECK (stage IN (
+                    'place', 'template', 'questions', 'extras',
+                    'preview', 'completed'
+                )),
+            CONSTRAINT ck_announcement_drafts_revision
+                CHECK (revision >= 1),
+            CONSTRAINT ck_announcement_drafts_origin
+                CHECK (origin IN ('place', 'personal')),
+            CONSTRAINT ck_announcement_drafts_origin_place
+                CHECK (
+                    (origin = 'place'
+                        AND place_id IS NOT NULL
+                        AND place_display_name IS NOT NULL
+                        AND length(trim(place_display_name)) > 0)
+                    OR (origin = 'personal'
+                        AND place_id IS NULL
+                        AND place_display_name IS NULL)
+                ),
+            CONSTRAINT ck_announcement_drafts_address
+                CHECK (place_address IS NULL OR length(trim(place_address)) > 0),
+            CONSTRAINT ck_announcement_drafts_url
+                CHECK (place_url IS NULL OR length(trim(place_url)) > 0),
+            CONSTRAINT ck_announcement_drafts_idempotency
+                CHECK (
+                    idempotency_key IS NULL
+                    OR length(trim(idempotency_key)) > 0
+                ),
+            CONSTRAINT ck_announcement_drafts_template_shape
+                CHECK (
+                    (template_id IS NULL
+                        AND template_version IS NULL
+                        AND template_snapshot_id IS NULL)
+                    OR (template_id IS NOT NULL
+                        AND template_version IS NOT NULL
+                        AND template_version >= 1
+                        AND template_snapshot_id IS NOT NULL)
+                ),
+            CONSTRAINT ck_announcement_drafts_live_ids
+                CHECK (
+                    live_message_ids_json IS NULL
+                    OR (json_valid(live_message_ids_json)
+                        AND json_type(live_message_ids_json) = 'array')
+                ),
+            CONSTRAINT fk_announcement_drafts_author
+                FOREIGN KEY (author_user_id) REFERENCES users (id)
+                ON DELETE RESTRICT,
+            CONSTRAINT fk_announcement_drafts_place
+                FOREIGN KEY (place_id) REFERENCES places (id)
+                ON DELETE RESTRICT,
+            CONSTRAINT fk_announcement_drafts_place_name
+                FOREIGN KEY (place_name_id) REFERENCES place_names (id)
+                ON DELETE SET NULL,
+            CONSTRAINT fk_announcement_drafts_template
+                FOREIGN KEY (template_id) REFERENCES templates (id)
+                ON DELETE RESTRICT,
+            CONSTRAINT fk_announcement_drafts_snapshot
+                FOREIGN KEY (template_snapshot_id) REFERENCES template_snapshots (id)
+                ON DELETE RESTRICT
+        )
+        """,
+        """
+        CREATE INDEX ix_announcement_drafts_author_updated
+            ON announcement_drafts (author_user_id, updated_at)
+        """,
+        """
+        CREATE UNIQUE INDEX ux_announcement_drafts_snapshot
+            ON announcement_drafts (template_snapshot_id)
+            WHERE template_snapshot_id IS NOT NULL
+        """,
+        """
+        CREATE UNIQUE INDEX ux_announcement_drafts_idempotency
+            ON announcement_drafts (author_user_id, idempotency_key)
+            WHERE idempotency_key IS NOT NULL
+        """,
+        """
+        CREATE INDEX ix_announcement_drafts_publication_status
+            ON announcement_drafts (publication_status)
+        """,
+        # --- Триггеры: копия миграций 12-14 плюс неизменяемость origin ------
+        """
+        CREATE TRIGGER trg_announcement_drafts_revision_increases
+        BEFORE UPDATE OF revision ON announcement_drafts
+        FOR EACH ROW
+        WHEN NEW.revision <= OLD.revision
+        BEGIN
+            SELECT RAISE(ABORT, 'announcement draft revision must increase');
+        END
+        """,
+        # Источник шаблона тоже неизменяем: personal-черновик нельзя выдать за
+        # анонс площадки (и наоборот) подменой одной колонки.
+        """
+        CREATE TRIGGER trg_announcement_drafts_identity_immutable
+        BEFORE UPDATE OF
+            author_user_id, place_id, idempotency_key, created_at, origin
+        ON announcement_drafts
+        FOR EACH ROW
+        WHEN NEW.author_user_id IS NOT OLD.author_user_id
+            OR NEW.place_id IS NOT OLD.place_id
+            OR NEW.idempotency_key IS NOT OLD.idempotency_key
+            OR NEW.created_at IS NOT OLD.created_at
+            OR NEW.origin IS NOT OLD.origin
+        BEGIN
+            SELECT RAISE(ABORT, 'announcement draft identity is immutable');
+        END
+        """,
+        """
+        CREATE TRIGGER trg_announcement_drafts_template_immutable
+        BEFORE UPDATE OF template_id, template_version, template_snapshot_id
+        ON announcement_drafts
+        FOR EACH ROW
+        WHEN OLD.template_snapshot_id IS NOT NULL
+            AND (
+                NEW.template_id IS NOT OLD.template_id
+                OR NEW.template_version IS NOT OLD.template_version
+                OR NEW.template_snapshot_id IS NOT OLD.template_snapshot_id
+            )
+        BEGIN
+            SELECT RAISE(ABORT, 'announcement template snapshot is immutable');
+        END
+        """,
+        """
+        CREATE TRIGGER trg_announcement_values_identity_immutable
+        BEFORE UPDATE OF draft_id, brick_id, created_at ON announcement_values
+        FOR EACH ROW
+        WHEN NEW.draft_id IS NOT OLD.draft_id
+            OR NEW.brick_id IS NOT OLD.brick_id
+            OR NEW.created_at IS NOT OLD.created_at
+        BEGIN
+            SELECT RAISE(ABORT, 'announcement value identity is immutable');
+        END
+        """,
+        """
+        CREATE TRIGGER trg_announcement_extras_identity_immutable
+        BEFORE UPDATE OF draft_id, brick_id, occurrence, created_at
+        ON announcement_extras
+        FOR EACH ROW
+        WHEN NEW.draft_id IS NOT OLD.draft_id
+            OR NEW.brick_id IS NOT OLD.brick_id
+            OR NEW.occurrence IS NOT OLD.occurrence
+            OR NEW.created_at IS NOT OLD.created_at
+        BEGIN
+            SELECT RAISE(ABORT, 'announcement extra identity is immutable');
+        END
+        """,
+        # JSON-ограничения фото/прогресса (миграция 13): CHECK на ALTER TABLE
+        # в SQLite не добавить, поэтому те же правила держат триггеры.
+        """
+        CREATE TRIGGER trg_announcement_drafts_media_json_insert
+        BEFORE INSERT ON announcement_drafts
+        FOR EACH ROW
+        WHEN (NEW.photos IS NOT NULL AND (
+                json_valid(NEW.photos) = 0
+                OR CASE WHEN json_valid(NEW.photos) = 1
+                        THEN json_type(NEW.photos) END <> 'array'
+            ))
+            OR (NEW.publication_photos IS NOT NULL AND (
+                json_valid(NEW.publication_photos) = 0
+                OR CASE WHEN json_valid(NEW.publication_photos) = 1
+                        THEN json_type(NEW.publication_photos) END <> 'array'
+            ))
+            OR (NEW.publication_progress IS NOT NULL AND (
+                json_valid(NEW.publication_progress) = 0
+                OR CASE WHEN json_valid(NEW.publication_progress) = 1
+                        THEN json_type(NEW.publication_progress) END <> 'object'
+            ))
+        BEGIN
+            SELECT RAISE(ABORT, 'announcement media must be valid JSON');
+        END
+        """,
+        """
+        CREATE TRIGGER trg_announcement_drafts_media_json_update
+        BEFORE UPDATE OF photos, publication_photos, publication_progress
+        ON announcement_drafts
+        FOR EACH ROW
+        WHEN (NEW.photos IS NOT NULL AND (
+                json_valid(NEW.photos) = 0
+                OR CASE WHEN json_valid(NEW.photos) = 1
+                        THEN json_type(NEW.photos) END <> 'array'
+            ))
+            OR (NEW.publication_photos IS NOT NULL AND (
+                json_valid(NEW.publication_photos) = 0
+                OR CASE WHEN json_valid(NEW.publication_photos) = 1
+                        THEN json_type(NEW.publication_photos) END <> 'array'
+            ))
+            OR (NEW.publication_progress IS NOT NULL AND (
+                json_valid(NEW.publication_progress) = 0
+                OR CASE WHEN json_valid(NEW.publication_progress) = 1
+                        THEN json_type(NEW.publication_progress) END <> 'object'
+            ))
+        BEGIN
+            SELECT RAISE(ABORT, 'announcement media must be valid JSON');
+        END
+        """,
+        """
+        CREATE TRIGGER trg_announcement_drafts_publication_status_insert
+        BEFORE INSERT ON announcement_drafts
+        FOR EACH ROW
+        WHEN NEW.publication_status IS NOT NULL
+            AND NEW.publication_status NOT IN
+                ('sending', 'partial', 'failed', 'sent')
+        BEGIN
+            SELECT RAISE(ABORT, 'unknown announcement publication status');
+        END
+        """,
+        """
+        CREATE TRIGGER trg_announcement_drafts_publication_status_update
+        BEFORE UPDATE OF publication_status ON announcement_drafts
+        FOR EACH ROW
+        WHEN NEW.publication_status IS NOT NULL
+            AND NEW.publication_status NOT IN
+                ('sending', 'partial', 'failed', 'sent')
+        BEGIN
+            SELECT RAISE(ABORT, 'unknown announcement publication status');
+        END
+        """,
+        """
+        CREATE TRIGGER trg_announcement_drafts_publication_shape_insert
+        BEFORE INSERT ON announcement_drafts
+        FOR EACH ROW
+        WHEN (
+            NEW.publication_status IS NULL
+            AND (
+                NEW.publication_text IS NOT NULL
+                OR NEW.publication_photos IS NOT NULL
+                OR NEW.publication_progress IS NOT NULL
+                OR NEW.publication_error IS NOT NULL
+                OR NEW.publication_started_at IS NOT NULL
+                OR NEW.published_at IS NOT NULL
+            )
+        ) OR (
+            NEW.publication_status IS NOT NULL
+            AND (
+                NEW.publication_text IS NULL
+                OR length(trim(NEW.publication_text)) = 0
+                OR NEW.publication_photos IS NULL
+                OR NEW.publication_started_at IS NULL
+                OR (
+                    NEW.publication_status IN ('sending', 'partial', 'failed')
+                    AND NEW.published_at IS NOT NULL
+                )
+                OR (
+                    NEW.publication_status = 'sent'
+                    AND NEW.published_at IS NULL
+                )
+            )
+        )
+        BEGIN
+            SELECT RAISE(ABORT, 'invalid announcement publication shape');
+        END
+        """,
+        """
+        CREATE TRIGGER trg_announcement_drafts_publication_shape
+        BEFORE UPDATE OF
+            publication_status, publication_text, publication_photos,
+            publication_progress, publication_error,
+            publication_started_at, published_at
+        ON announcement_drafts
+        FOR EACH ROW
+        WHEN (
+            NEW.publication_status IS NULL
+            AND (
+                NEW.publication_text IS NOT NULL
+                OR NEW.publication_photos IS NOT NULL
+                OR NEW.publication_progress IS NOT NULL
+                OR NEW.publication_error IS NOT NULL
+                OR NEW.publication_started_at IS NOT NULL
+                OR NEW.published_at IS NOT NULL
+            )
+        ) OR (
+            NEW.publication_status IS NOT NULL
+            AND (
+                NEW.publication_text IS NULL
+                OR length(trim(NEW.publication_text)) = 0
+                OR NEW.publication_photos IS NULL
+                OR NEW.publication_started_at IS NULL
+                OR (
+                    NEW.publication_status IN ('sending', 'partial', 'failed')
+                    AND NEW.published_at IS NOT NULL
+                )
+                OR (
+                    NEW.publication_status = 'sent'
+                    AND NEW.published_at IS NULL
+                )
+            )
+        )
+        BEGIN
+            SELECT RAISE(ABORT, 'invalid announcement publication shape');
+        END
+        """,
+        # Точная редакция миграции 14: разрешён ровно проверяемый переход
+        # sent -> sending с переносом адресов прошлой версии в previous_ids.
+        """
+        CREATE TRIGGER trg_announcement_drafts_published_immutable
+        BEFORE UPDATE OF
+            publication_status, publication_text, publication_photos,
+            publication_progress, publication_error,
+            publication_started_at, published_at
+        ON announcement_drafts
+        FOR EACH ROW
+        WHEN OLD.publication_status = 'sent'
+            AND NOT (
+                NEW.publication_status = 'sending'
+                AND NEW.published_at IS NULL
+                AND NEW.publication_started_at IS NOT NULL
+                AND NEW.publication_text IS NOT NULL
+                AND length(trim(NEW.publication_text)) > 0
+                AND NEW.publication_photos IS NOT NULL
+                AND NEW.publication_error IS NULL
+                AND NEW.publication_progress IS NOT NULL
+                AND (NEW.publication_progress -> '$.previous_ids')
+                    IS (OLD.publication_progress -> '$.ids')
+            )
+        BEGIN
+            SELECT RAISE(ABORT, 'announcement already delivered');
+        END
+        """,
+        # Прежние черновики получали площадку до появления origin.
+        """
+        INSERT INTO announcement_drafts (
+            id, author_user_id, place_id, place_name_id, place_display_name,
+            place_address, place_url, origin, template_id, template_version,
+            template_snapshot_id, stage, revision, idempotency_key, photos,
+            publication_status, publication_text, publication_photos,
+            publication_progress, publication_error, publication_started_at,
+            published_at, live_message_ids_json, created_at, updated_at
+        )
+        SELECT
+            id, author_user_id, place_id, place_name_id, place_display_name,
+            place_address, place_url, 'place', template_id, template_version,
+            template_snapshot_id, stage, revision, idempotency_key, photos,
+            publication_status, publication_text, publication_photos,
+            publication_progress, publication_error, publication_started_at,
+            published_at, NULL, created_at, updated_at
+        FROM announcement_drafts_backup
+        """,
+        "INSERT INTO announcement_values SELECT * FROM announcement_values_backup",
+        "INSERT INTO announcement_extras SELECT * FROM announcement_extras_backup",
+        "DROP TABLE announcement_values_backup",
+        "DROP TABLE announcement_extras_backup",
+        "DROP TABLE announcement_drafts_backup",
+    ),
+)
+
+
 DEFAULT_MIGRATIONS: tuple[Migration, ...] = (
     MIGRATION_1_USERS_PLACES,
     MIGRATION_2_PLACE_CONTACTS_UI,
@@ -1898,6 +2417,8 @@ DEFAULT_MIGRATIONS: tuple[Migration, ...] = (
     MIGRATION_12_ANNOUNCEMENT_WIZARD,
     MIGRATION_13_ANNOUNCEMENT_PUBLICATION,
     MIGRATION_14_ANNOUNCEMENT_REDELIVERY,
+    MIGRATION_15_BRICK_DESCRIPTION_AND_ADDRESS,
+    MIGRATION_16_ANNOUNCEMENT_DRAFT_ORIGIN,
 )
 
 LATEST_VERSION = DEFAULT_MIGRATIONS[-1].version if DEFAULT_MIGRATIONS else 0

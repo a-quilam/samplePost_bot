@@ -54,13 +54,15 @@ class TemplateSchemaTests(TemplateDatabaseTestCase):
 
     def test_template_migrations_apply_and_are_idempotent(self) -> None:
         self.assertEqual(self.migrations_applied, LATEST_VERSION)
-        self.assertEqual(LATEST_VERSION, 14)
+        self.assertEqual(LATEST_VERSION, 16)
         self.assertIn((12, "announcement_wizard"), self.journal())
         self.assertIn((13, "announcement_photos_publication"), self.journal())
         self.assertIn((8, "templates_versions_snapshots"), self.journal())
         self.assertIn((9, "template_binding_codes"), self.journal())
         self.assertIn((10, "template_sessions"), self.journal())
         self.assertIn((11, "brick_proposals"), self.journal())
+        self.assertIn((15, "brick_description_and_address"), self.journal())
+        self.assertIn((16, "announcement_draft_origin"), self.journal())
 
         tables = set(self.engine.dialect.get_table_names(self.engine.connect()))
         self.assertTrue(
@@ -116,10 +118,12 @@ class TemplateSchemaTests(TemplateDatabaseTestCase):
             ),
             {"tid": template_id},
         ).one()
-        self.assertEqual(row[0], "[название]")
+        # Poster 2.0 S1: точный эталон §6.1.1 — жирная шапка, `//`,
+        # гиперссылка на названии и отдельный `[адрес]`.
+        self.assertEqual(row[0], "**[название]**")
         self.assertIn("[дата]", str(row[1]))
         self.assertIn("[описание]", str(row[1]))
-        self.assertEqual(row[3], 1)
+        self.assertEqual(row[3], 2)
 
         bricks = self.session.execute(
             text(
@@ -130,7 +134,9 @@ class TemplateSchemaTests(TemplateDatabaseTestCase):
             ),
             {"tid": template_id},
         ).fetchall()
-        self.assertEqual([int(item[0]) for item in bricks], [1, 2, 3, 4, 5, 6, 7, 8, 9])
+        # Эталон не содержит кирпичиков «время_окончания» (4) и
+        # «адрес_места» (6), зато содержит `[адрес]` (10).
+        self.assertEqual([int(item[0]) for item in bricks], [1, 2, 3, 5, 7, 8, 9, 10])
 
     # --- ограничения формы шаблона ----------------------------------------
 

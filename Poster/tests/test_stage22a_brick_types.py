@@ -61,9 +61,10 @@ class BrickTypeCatalogTests(unittest.TestCase):
             with self.assertRaises(BrickValidationError):
                 ensure_brick_type(forbidden)
 
-    def test_system_registry_has_nine_stable_ids_and_codes(self) -> None:
-        self.assertEqual(len(SYSTEM_BRICKS), 9)
-        self.assertEqual([item.id for item in SYSTEM_BRICKS], list(range(1, 10)))
+    def test_system_registry_has_ten_stable_ids_and_codes(self) -> None:
+        # 9 кирпичиков миграции 6 + `[адрес]` миграции 15 (Poster 2.0 S1).
+        self.assertEqual(len(SYSTEM_BRICKS), 10)
+        self.assertEqual([item.id for item in SYSTEM_BRICKS], list(range(1, 11)))
         self.assertEqual(
             [item.code for item in SYSTEM_BRICKS],
             [
@@ -76,6 +77,7 @@ class BrickTypeCatalogTests(unittest.TestCase):
                 "ссылка_места",
                 "описание",
                 "контакт",
+                "адрес",
             ],
         )
         by_code = {item.code: item for item in SYSTEM_BRICKS}
@@ -86,6 +88,9 @@ class BrickTypeCatalogTests(unittest.TestCase):
         self.assertEqual(by_code["время_окончания"].value_type, BRICK_TYPE_TIME)
         self.assertEqual(by_code["место"].source, BRICK_SOURCE_PLACE)
         self.assertEqual(by_code["адрес_места"].source, BRICK_SOURCE_PLACE)
+        # Poster 2.0 S1: пользовательский код эталона берёт адрес площадки.
+        self.assertEqual(by_code["адрес"].source, BRICK_SOURCE_PLACE)
+        self.assertEqual(by_code["адрес"].value_type, BRICK_TYPE_SHORT_TEXT)
         self.assertEqual(by_code["ссылка_места"].value_type, BRICK_TYPE_URL)
         self.assertEqual(by_code["ссылка_места"].source, BRICK_SOURCE_PLACE)
         self.assertEqual(by_code["описание"].value_type, BRICK_TYPE_LONG_TEXT)

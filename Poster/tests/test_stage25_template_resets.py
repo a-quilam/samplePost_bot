@@ -25,6 +25,7 @@ from template_store import (
     reset_standard_template,
     update_template_header,
 )
+from template_types import BUILTIN_TEMPLATE_VERSION
 from tests.stage23_helpers import (
     OTHER_TG,
     OWNER_TG,
@@ -103,7 +104,9 @@ class PersonalResetTests(TemplateDatabaseTestCase):
         self.assertEqual(template.current_version.header, builtin.header)
         self.assertEqual(template.current_version.body, builtin.body)
         self.assertEqual(template.current_version.footer, builtin.footer)
-        self.assertEqual(template.current_version.builtin_version, 1)
+        self.assertEqual(
+            template.current_version.builtin_version, BUILTIN_TEMPLATE_VERSION
+        )
 
         # История версий не переписана.
         versions = list_template_versions(
@@ -240,12 +243,14 @@ class StandardResetTests(TemplateDatabaseTestCase):
         builtin = get_builtin_template()
         self.assertEqual(result.template.current_version.header, builtin.header)
         self.assertEqual(result.template.current_version.body, builtin.body)
-        self.assertEqual(result.template.current_version.builtin_version, 1)
+        self.assertEqual(
+            result.template.current_version.builtin_version, BUILTIN_TEMPLATE_VERSION
+        )
 
         first = get_template_version(self.session, OTHER_TG, self.template_id, 1)
         second = get_template_version(self.session, OTHER_TG, self.template_id, 2)
         assert first is not None and second is not None
-        self.assertEqual(first.builtin_version, 1)
+        self.assertEqual(first.builtin_version, BUILTIN_TEMPLATE_VERSION)
         self.assertEqual(second.header, "Правка администратора")
 
         snapshot_row = self.session.get(TemplateSnapshot, self.snapshot.snapshot_id)

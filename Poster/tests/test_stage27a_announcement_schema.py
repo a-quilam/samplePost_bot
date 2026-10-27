@@ -33,8 +33,8 @@ from tests.stage27_helpers import AnnouncementDatabaseTestCase
 class AnnouncementWizardMigrationTests(AnnouncementDatabaseTestCase):
     """Миграция 12 и ограничения новых таблиц."""
 
-    def test_latest_migration_is_fourteen_and_follows_brick_proposals(self) -> None:
-        self.assertEqual(LATEST_VERSION, 14)
+    def test_latest_migration_is_sixteen_and_follows_brick_proposals(self) -> None:
+        self.assertEqual(LATEST_VERSION, 16)
         self.assertEqual(
             [(migration.version, migration.name) for migration in DEFAULT_MIGRATIONS],
             [
@@ -52,10 +52,12 @@ class AnnouncementWizardMigrationTests(AnnouncementDatabaseTestCase):
                 (12, "announcement_wizard"),
                 (13, "announcement_photos_publication"),
                 (14, "announcement_redelivery"),
+                (15, "brick_description_and_address"),
+                (16, "announcement_draft_origin"),
             ],
         )
-        self.assertEqual(run_migrations(self.engine), 14)
-        self.assertEqual(run_migrations(self.engine), 14)
+        self.assertEqual(run_migrations(self.engine), LATEST_VERSION)
+        self.assertEqual(run_migrations(self.engine), LATEST_VERSION)
 
     def test_new_tables_columns_indexes_and_triggers_exist(self) -> None:
         connection = sqlite3.connect(self.path)
@@ -304,7 +306,7 @@ class OldDraftCompatibilityTests(unittest.TestCase):
         self.addCleanup(self.engine.dispose)
 
     def test_old_draft_and_wip_survive_without_content_migration(self) -> None:
-        self.assertEqual(run_migrations(self.engine), 14)
+        self.assertEqual(run_migrations(self.engine), LATEST_VERSION)
         self.session = sessionmaker(bind=self.engine, expire_on_commit=False)()
         self.addCleanup(self.session.close)
 

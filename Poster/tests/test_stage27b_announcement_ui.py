@@ -907,7 +907,7 @@ class AnnouncementWizardStandardTemplateTests(unittest.TestCase):
             field.code: field.raw_value for field in fields if field.status == "known"
         }
         self.assertEqual(known["место"], "Дом культуры")
-        self.assertEqual(known["адрес_места"], "ул. Тестовая, 1")
+        self.assertEqual(known["адрес"], "ул. Тестовая, 1")
         self.assertEqual(known["ссылка_места"], "https://example.com/place")
         askable = [field for field in fields if field.status != FIELD_STATUS_KNOWN]
 

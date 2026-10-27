@@ -26,7 +26,7 @@ from admin_transfer_store import (
     get_transfer_view,
 )
 from base import Base
-from migrations import DEFAULT_MIGRATIONS, run_migrations
+from migrations import DEFAULT_MIGRATIONS, LATEST_VERSION, run_migrations
 from models import Draft, Place, PlaceAdmin, PlaceName, UserState, utcnow
 from permissions import (
     can_access_admin_panel,
@@ -204,7 +204,7 @@ class Stage22ACompatibilityTests(unittest.TestCase):
                 (5, "admin_transfers"),
             ],
         )
-        self.assertEqual(run_migrations(self.engine), 14)
+        self.assertEqual(run_migrations(self.engine), LATEST_VERSION)
 
         copies = self.backup_paths()
         self.assertEqual(len(copies), 1, copies)
@@ -245,7 +245,7 @@ class Stage22ACompatibilityTests(unittest.TestCase):
         finally:
             connection.close()
 
-        self.assertEqual(journal(self.path)[-1], (14, "announcement_redelivery"))
+        self.assertEqual(journal(self.path)[-1], (16, "announcement_draft_origin"))
         with self.Session() as session:
             stored_draft = session.get(Draft, 7)
             stored_state = session.get(UserState, user.telegram_user_id)
@@ -274,7 +274,8 @@ class Stage22ACompatibilityTests(unittest.TestCase):
                 self.path,
                 "SELECT count(*) FROM bricks WHERE scope='system'",
             ),
-            (9,),
+            # 9 кирпичиков миграции 6 + `[адрес]` миграции 15.
+            (10,),
         )
         self.assertIsNone(
             scalar(
@@ -292,7 +293,7 @@ class Stage22ACompatibilityTests(unittest.TestCase):
         assignment = self.make_admin(place.id, admin.id)
         self.session.close()
 
-        self.assertEqual(run_migrations(self.engine), 14)
+        self.assertEqual(run_migrations(self.engine), LATEST_VERSION)
         with self.Session() as session:
             self.assertTrue(is_place_admin(session, admin.telegram_user_id, place.id))
             self.assertTrue(can_manage_place(session, admin.telegram_user_id, place.id))
@@ -341,7 +342,7 @@ class Stage22ACompatibilityTests(unittest.TestCase):
         transfer_id = created.transfer.transfer_id
         self.session.close()
 
-        self.assertEqual(run_migrations(self.engine), 14)
+        self.assertEqual(run_migrations(self.engine), LATEST_VERSION)
         with self.Session() as session:
             pending = get_transfer_view(session, transfer_id)
             self.assertIsNotNone(pending)

@@ -32,6 +32,7 @@ from brick_types import (
     BRICK_SCOPE_PERSONAL,
     BRICK_SCOPE_PLACE,
     BRICK_SCOPE_SYSTEM,
+    SYSTEM_BRICKS_BY_CODE,
     BrickValueResult,
     BrickValueStatus,
     validate_brick_value,
@@ -55,11 +56,16 @@ SECTION_ORDER = (
     TEMPLATE_SECTION_FOOTER,
 )
 
-# Постоянные ID системных кирпичиков из миграции 6. Контекст места строится
-# по ID, а не по повторному разрешению текстовых кодов.
-PLACE_BRICK_ID_NAME = 5
-PLACE_BRICK_ID_ADDRESS = 6
-PLACE_BRICK_ID_URL = 7
+# Постоянные ID системных кирпичиков каталога (миграции 6 и 15). Контекст
+# места строится по ID, а не по повторному разрешению текстовых кодов. ID
+# берутся из каталога, чтобы не дублировать магические числа.
+PLACE_BRICK_ID_NAME = SYSTEM_BRICKS_BY_CODE["место"].id
+PLACE_BRICK_ID_ADDRESS = SYSTEM_BRICKS_BY_CODE["адрес_места"].id
+PLACE_BRICK_ID_URL = SYSTEM_BRICKS_BY_CODE["ссылка_места"].id
+# Poster 2.0 S1: пользовательский код эталона `[адрес]`. Старый
+# `адрес_места` остаётся для уже сохранённых снимков; автоподстановка
+# выполняется в оба кирпичика.
+ADDRESS_BRICK_ID = SYSTEM_BRICKS_BY_CODE["адрес"].id
 
 EXTRA_POSITION_START = "start"
 EXTRA_POSITION_END = "end"
@@ -239,24 +245,81 @@ def evaluate_announcement_readiness(
     )
 
 
-def place_context_values(
+def place_values_by_code(
     *,
-    display_name: str,
+    display_name: str | None,
     address: str | None,
     url: str | None,
+) -> dict[str, object]:
+    """
+    Известные значения места по **кодам** системных кирпичиков.
+
+    Коды, а не ID: в уже существующей базе реальный `bricks.id` кирпичика
+    `[адрес]` зависит от того, какие пользовательские кирпичики были созданы
+    раньше (миграция 15 берёт `MAX(id)+1`). Поэтому сопоставление
+    «код → brick_id» всегда берётся из снимка шаблона, а не из каталога.
+
+    Адрес подставляется в оба кода — новый `[адрес]` (Poster 2.0) и старый
+    `[адрес_места]`, чтобы сохранённые снимки продолжали работать.
+    """
+    values: dict[str, object] = {}
+    if display_name is not None and display_name.strip():
+        values["место"] = display_name
+    if address is not None and address.strip():
+        values["адрес"] = address
+        values["адрес_места"] = address
+    if url is not None and url.strip():
+        values["ссылка_места"] = url
+    return values
+
+
+def place_context_values(
+    *,
+    display_name: str | None,
+    address: str | None,
+    url: str | None,
+    brick_ids_by_code: Mapping[str, int] | None = None,
 ) -> dict[int, object]:
     """
-    Известные значения места по постоянным brick_id.
+    Известные значения места по brick_id.
 
     Отсутствующий адрес/ссылка не превращаются в пустую строку или заглушку:
     такого ключа просто нет, и мастер задаст вопрос только при необходимости.
+
+    `brick_ids_by_code` — реальные ID из снимка/определений. Без него берутся
+    канонические ID каталога; это годится только для чистой базы, где
+    миграции создали кирпичики подряд, поэтому рабочий слой всегда передаёт
+    явное сопоставление.
     """
-    values: dict[int, object] = {PLACE_BRICK_ID_NAME: display_name}
-    if address is not None and address.strip():
-        values[PLACE_BRICK_ID_ADDRESS] = address
-    if url is not None and url.strip():
-        values[PLACE_BRICK_ID_URL] = url
+    known = place_values_by_code(display_name=display_name, address=address, url=url)
+    mapping: Mapping[str, int]
+    if brick_ids_by_code is None:
+        mapping = {
+            code: SYSTEM_BRICKS_BY_CODE[code].id
+            for code in known
+            if code in SYSTEM_BRICKS_BY_CODE
+        }
+    else:
+        mapping = brick_ids_by_code
+    values: dict[int, object] = {}
+    for code, raw in known.items():
+        brick_id = mapping.get(code)
+        if brick_id is not None:
+            values[brick_id] = raw
     return values
+
+
+def snapshot_brick_ids_by_code(
+    snapshot: AnnouncementTemplateSnapshot,
+) -> dict[str, int]:
+    """
+    Реальные brick_id снимка по коду кирпичика.
+
+    Нужен автоподстановке: в существующей базе `bricks.id` системного
+    `[адрес]` зависит от порядка миграций и пользовательских кирпичиков,
+    поэтому каталог даёт только код, а конкретный ID — снимок.
+    """
+    return _bindings_by_code(snapshot)
 
 
 def _bindings_by_code(
@@ -493,14 +556,16 @@ def answer_payload_to_raw(answer: BrickValueResult) -> object | None:
 def visible_brick_issue(
     definition: BrickDefinition,
     *,
-    place_id: int,
+    place_id: int | None,
     owner_user_id: int,
 ) -> str | None:
     """
     Причина, по которой определение несовместимо с анонсом, либо None.
 
     Системный кирпичик виден всем; кирпичик места — только выбранному месту;
-    личный — только своему владельцу.
+    личный — только своему владельцу. У личного шаблона места нет
+    (`place_id=None`), поэтому кирпичики мест в нём недоступны — это
+    осознанное поведение, а не ошибка.
     """
     if not definition.is_active:
         return f"Кирпичик #{definition.id} «{definition.code}» находится в архиве."

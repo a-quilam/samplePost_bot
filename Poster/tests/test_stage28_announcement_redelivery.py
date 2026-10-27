@@ -99,11 +99,11 @@ class AnnouncementRedeliveryMigrationTests(unittest.TestCase):
         self.engine = make_engine(self.path)
         self.addCleanup(self.engine.dispose)
 
-    def test_migrations_one_to_fourteen_keep_legacy_data_and_checksums(self) -> None:
+    def test_migrations_one_to_sixteen_keep_legacy_data_and_checksums(self) -> None:
         create_old_schema(self.path)
 
-        self.assertEqual(run_migrations(self.engine), 14)
-        self.assertEqual(LATEST_VERSION, 14)
+        self.assertEqual(run_migrations(self.engine), LATEST_VERSION)
+        self.assertEqual(LATEST_VERSION, 16)
 
         journal = _journal(self.path)
         self.assertEqual(
@@ -118,6 +118,11 @@ class AnnouncementRedeliveryMigrationTests(unittest.TestCase):
         # 1–13 не изменились даже побайтно по контрольной сумме DDL.
         self.assertEqual(
             tuple(checksum for _, _, checksum in journal[:13]), CHECKSUMS_1_13
+        )
+        # 14–16 — ровно код текущих миграций: ни переписаны, ни подменены.
+        self.assertEqual(
+            [checksum for _, _, checksum in journal[13:]],
+            [migration.checksum for migration in DEFAULT_MIGRATIONS[13:]],
         )
 
         connection = connect(self.path)
@@ -161,7 +166,9 @@ class AnnouncementRedeliveryMigrationTests(unittest.TestCase):
         self.assertEqual(run_migrations(self.engine, DEFAULT_MIGRATIONS[:13]), 13)
         before = _schema_signature(self.path)
 
-        self.assertEqual(run_migrations(self.engine), 14)
+        # Проверяется именно версия 14, поэтому список миграций усечён:
+        # схему меняют также 15/16, и они не предмет этого теста.
+        self.assertEqual(run_migrations(self.engine, DEFAULT_MIGRATIONS[:14]), 14)
         after = _schema_signature(self.path)
 
         self.assertEqual(
@@ -210,10 +217,12 @@ class AnnouncementRedeliveryMigrationTests(unittest.TestCase):
             "previous_ids", triggers["trg_announcement_drafts_published_immutable"]
         )
 
-        # Исправленная версия применяется поверх откатившейся попытки.
-        self.assertEqual(run_migrations(self.engine), 14)
+        # Исправленная версия применяется поверх откатившейся попытки,
+        # затем доводятся 15/16 текущего кода.
+        self.assertEqual(run_migrations(self.engine), LATEST_VERSION)
         self.assertEqual(
-            [version for version, _, _ in _journal(self.path)], list(range(1, 15))
+            [version for version, _, _ in _journal(self.path)],
+            list(range(1, LATEST_VERSION + 1)),
         )
 
 
@@ -379,7 +388,9 @@ class AnnouncementRedeliveryBackupTests(unittest.TestCase):
         wal = Path(self.path + "-wal")
         self.assertTrue(wal.exists() and wal.stat().st_size > 0)
 
-        self.assertEqual(run_migrations(engine), 14)
+        # Копия делается перед первой ожидающей миграцией (14) и содержит
+        # версию 13 — это проверяется ниже; текущий код доходит до 16.
+        self.assertEqual(run_migrations(engine), LATEST_VERSION)
 
         copies = sorted(Path(self.path).parent.glob(Path(self.path).name + ".backup-*"))
         self.assertEqual(len(copies), 1, copies)

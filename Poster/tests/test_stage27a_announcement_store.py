@@ -44,6 +44,7 @@ from announcement_wizard import (
 from brick_store import create_personal_brick, update_personal_brick
 from models import Place
 from place_store import add_alternative_name
+from template_parser import BrickNode, FormatNode, LinkNode
 from template_store import (
     create_personal_template,
     get_accessible_template,
@@ -57,6 +58,27 @@ from tests.stage27_helpers import (
 )
 
 TODAY = date(2026, 5, 1)
+
+
+def brick_nodes(tokens) -> list[BrickNode]:
+    """
+    Все токены-кирпичики секции по порядку, включая вложенные в разметку.
+
+    Эталон §6.1.1 оборачивает шапку в `**…**`, поэтому первый элемент
+    секции — `FormatNode`, а не `BrickNode`. Тест не должен зависеть от
+    того, обёрнут ли токен жирным: он ищет кирпичики рекурсивно.
+    """
+    found: list[BrickNode] = []
+    for token in tokens:
+        if isinstance(token, BrickNode):
+            found.append(token)
+        elif isinstance(token, LinkNode):
+            found.extend(brick_nodes(token.label))
+            if isinstance(token.url, BrickNode):
+                found.append(token.url)
+        elif isinstance(token, FormatNode):
+            found.extend(brick_nodes(token.children))
+    return found
 
 
 class PlaceSelectionTests(AnnouncementDatabaseTestCase):
@@ -395,7 +417,10 @@ class ValueTests(AnnouncementDatabaseTestCase):
             draft_id=draft.draft_id,
             today=TODAY,
         )
-        self.assertEqual([item.brick_id for item in questions], [1, 2, 3, 4, 8, 9])
+        # Эталон §6.1.1 содержит 1,2,3,5,7,8,9,10. Место/адрес/ссылка
+        # подставлены из карточки площадки, поэтому спрашиваются только
+        # остальные кирпичики — в порядке шапка → тело → подвал.
+        self.assertEqual([item.brick_id for item in questions], [1, 2, 3, 8, 9])
         self.assertTrue(all(item.source != "place" for item in questions))
 
     def test_missing_place_contacts_produce_questions(self) -> None:
@@ -421,9 +446,10 @@ class ValueTests(AnnouncementDatabaseTestCase):
             draft_id=chosen.draft_id,
             today=TODAY,
         )
-        self.assertEqual(
-            [item.brick_id for item in questions], [1, 2, 3, 4, 6, 8, 7, 9]
-        )
+        # Площадка без адреса и ссылки: название места известно из карточки,
+        # а `ссылка_места` (7) и `адрес` (10) контекста не имеют и становятся
+        # обычными вопросами. Порядок — первое появление в снимке.
+        self.assertEqual([item.brick_id for item in questions], [1, 2, 3, 7, 10, 8, 9])
 
     def test_save_valid_invalid_and_empty_values(self) -> None:
         draft = self.start_at_questions()
@@ -708,8 +734,11 @@ class ExtraTests(AnnouncementDatabaseTestCase):
             actor_telegram_user_id=OWNER_TG,
             draft_id=body.draft_id,
         )
-        self.assertEqual(payload.tokens_by_section["header"][0].code, "доп_места")
-        self.assertEqual(payload.tokens_by_section["body"][-1].code, "доп_личный")
+        header_nodes = brick_nodes(payload.tokens_by_section["header"])
+        body_nodes = brick_nodes(payload.tokens_by_section["body"])
+        # Дополнительный кирпичик вставлен в начало шапки перед базовыми.
+        self.assertEqual(header_nodes[0].code, "доп_места")
+        self.assertEqual(body_nodes[-1].code, "доп_личный")
         self.assertEqual(payload.values_by_id[self.place_extra], "Шапка")
         self.assertEqual(payload.values_by_id[self.personal_extra], "Тело")
 
@@ -718,9 +747,8 @@ class ExtraTests(AnnouncementDatabaseTestCase):
             actor_telegram_user_id=OWNER_TG,
             draft_id=second_extra.draft_id,
         )
-        self.assertEqual(
-            second_payload.tokens_by_section["footer"][-1].code, "доп_места"
-        )
+        footer_nodes = brick_nodes(second_payload.tokens_by_section["footer"])
+        self.assertEqual(footer_nodes[-1].code, "доп_места")
         self.assertNotIn(self.personal_extra, second_payload.values_by_id)
 
     def test_add_rejects_snapshot_duplicate_and_inaccessible_bricks(self) -> None:
@@ -797,8 +825,10 @@ class ExtraTests(AnnouncementDatabaseTestCase):
             actor_telegram_user_id=OWNER_TG,
             draft_id=draft.draft_id,
         )
-        self.assertNotEqual(payload.tokens_by_section["header"][0].code, "доп_места")
-        self.assertEqual(payload.tokens_by_section["footer"][-1].code, "доп_места")
+        header_nodes = brick_nodes(payload.tokens_by_section["header"])
+        self.assertNotIn("доп_места", [node.code for node in header_nodes])
+        footer_nodes = brick_nodes(payload.tokens_by_section["footer"])
+        self.assertEqual(footer_nodes[-1].code, "доп_места")
 
         removed = remove_announcement_extra(
             self.session,
@@ -889,7 +919,8 @@ class RestartAndAccessTests(AnnouncementDatabaseTestCase):
         self.assertEqual(stored.extras[0].code, "после_старта")
         self.assertIsNotNone(stored.template_snapshot)
         assert stored.template_snapshot is not None
-        self.assertEqual(len(stored.template_snapshot.bindings), 9)
+        # Эталон §6.1.1: 8 кирпичиков вместо прежних 9.
+        self.assertEqual(len(stored.template_snapshot.bindings), 8)
 
     def test_stale_revision_cannot_overwrite(self) -> None:
         draft = self.start_at_questions()

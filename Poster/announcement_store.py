@@ -52,6 +52,7 @@ from announcement_wizard import (
     build_questions,
     evaluate_announcement_readiness,
     place_context_values,
+    snapshot_brick_ids_by_code,
     snapshot_section,
     snapshot_tokens_by_section,
     visible_brick_issue,
@@ -110,6 +111,12 @@ PUBLICATION_STATUSES = (
 )
 PUBLICATION_FROZEN_STATUSES = PUBLICATION_STATUSES
 
+# Источник шаблона анонса (Poster 2.0 S1). Не путать с местом, выбранным
+# позже в кирпичике «Место»: `origin` фиксируется при создании черновика.
+ORIGIN_PLACE = "place"
+ORIGIN_PERSONAL = "personal"
+ORIGINS = (ORIGIN_PLACE, ORIGIN_PERSONAL)
+
 
 @dataclass(frozen=True)
 class AnnouncementValueDetails:
@@ -147,9 +154,9 @@ class AnnouncementDraftDetails:
 
     draft_id: int
     author_user_id: int
-    place_id: int
+    place_id: int | None
     place_name_id: int | None
-    place_display_name: str
+    place_display_name: str | None
     place_address: str | None
     place_url: str | None
     template_id: int | None
@@ -157,8 +164,13 @@ class AnnouncementDraftDetails:
     template_snapshot: AnnouncementTemplateSnapshot | None
     stage: WizardStage
     revision: int
+    # Источник шаблона: 'place' — стандарт площадки (place_id обязателен),
+    # 'personal' — личный шаблон без площадки в черновике.
+    origin: str = ORIGIN_PLACE
     values: tuple[AnnouncementValueDetails, ...] = field(default_factory=tuple)
     extras: tuple[AnnouncementExtraDetails, ...] = field(default_factory=tuple)
+    # Адреса всех сообщений живого медиаблока (альбом — несколько ID).
+    live_message_ids: tuple[int, ...] = field(default_factory=tuple)
     # Отдельная коллекция вложений анонса. Фото не являются кирпичиками
     # и не участвуют в шаблонном тексте.
     photos: tuple[str, ...] = field(default_factory=tuple)
@@ -171,6 +183,11 @@ class AnnouncementDraftDetails:
     published_at: datetime | None = None
     created_at: datetime = field(default_factory=utcnow)
     updated_at: datetime = field(default_factory=utcnow)
+
+    @property
+    def is_personal(self) -> bool:
+        """Анонс по личному шаблону: площадка в черновике не выбрана."""
+        return self.origin == ORIGIN_PERSONAL
 
     def value_for(self, brick_id: int) -> AnnouncementValueDetails | None:
         return next(
@@ -665,6 +682,31 @@ def _extra_details(
     return tuple(details)
 
 
+def _live_ids_from_json(raw: str | None) -> tuple[int, ...]:
+    """Читает JSON-массив адресов живого блока; битое значение — ошибка."""
+    if not raw:
+        return ()
+    try:
+        parsed = json.loads(raw)
+    except (TypeError, ValueError) as exc:
+        raise AnnouncementSnapshotError(
+            "Поле live_message_ids_json содержит битый JSON."
+        ) from exc
+    if not isinstance(parsed, list):
+        raise AnnouncementSnapshotError(
+            "Поле live_message_ids_json должно быть JSON-массивом message_id."
+        )
+    result: list[int] = []
+    for item in parsed:
+        if isinstance(item, bool) or not isinstance(item, int) or item <= 0:
+            raise AnnouncementSnapshotError(
+                "Адреса живого блока должны быть положительными message_id."
+            )
+        if item not in result:
+            result.append(item)
+    return tuple(result)
+
+
 def _draft_details(
     session: Session,
     actor: User,
@@ -696,6 +738,7 @@ def _draft_details(
         place_display_name=row.place_display_name,
         place_address=row.place_address,
         place_url=row.place_url,
+        origin=row.origin,
         template_id=row.template_id,
         template_version=row.template_version,
         template_snapshot=_draft_snapshot(session, actor, row),
@@ -703,6 +746,7 @@ def _draft_details(
         revision=row.revision,
         values=tuple(_decode_value(value) for value in value_rows),
         extras=_extra_details(session, extra_rows),
+        live_message_ids=_live_ids_from_json(row.live_message_ids_json),
         photos=_photo_ids_from_json(row.photos, field_name="photos"),
         publication_status=publication_status,
         publication_text=row.publication_text,
@@ -731,7 +775,7 @@ def _active_definition(
     session: Session,
     *,
     actor: User,
-    place_id: int,
+    place_id: int | None,
     brick_id: int,
 ) -> BrickDefinition:
     definition = get_visible_brick(
@@ -831,22 +875,79 @@ def start_announcement_wizard(
     session: Session,
     *,
     actor_telegram_user_id: int | None,
-    place_id: int,
+    place_id: int | None = None,
     place_name_id: int | None = None,
+    template_id: int | None = None,
+    origin: object = ORIGIN_PLACE,
     idempotency_key: object | None = None,
 ) -> AnnouncementDraftDetails:
     """
-    Создаёт состояние нового мастера с выбранным местом.
+    Создаёт состояние нового мастера.
 
-    Место выбирается первым. `place_name_id=None` означает каноническое
-    название; альтернативное сохраняется отдельно и не создаёт новое место.
-    Адрес/ссылка копируются из справочника, отсутствие остаётся NULL.
+    Два взаимоисключающих входа (Poster 2.0):
+
+    - `origin='place'` — сначала выбирается место (`place_id` обязателен,
+      `place_name_id` уточняет вариант названия); шаблон фиксируется позже
+      через `choose_announcement_template`, как раньше.
+    - `origin='personal'` — анонс по личному шаблону: площадки нет
+      (`place_id`/`place_name_id` обязаны быть None), `template_id`
+      обязателен, снимок шаблона создаётся сразу и мастер начинается с
+      вопросов. Личный шаблон должен принадлежать автору; чужой
+      неотличим от несуществующего.
+
+    Идемпотентность по `idempotency_key` работает для обоих входов и
+    учитывает источник: тот же ключ с другим origin/template/place — конфликт.
     """
     actor = _require_actor(session, actor_telegram_user_id)
+    checked_origin = _validate_origin(origin)
+    key = _validated_key(idempotency_key)
+
+    if checked_origin == ORIGIN_PLACE:
+        if template_id is not None:
+            raise AnnouncementStageError(
+                "Шаблон площадки выбирается после подтверждения места."
+            )
+        return _start_place_announcement(
+            session,
+            actor=actor,
+            place_id=place_id,
+            place_name_id=place_name_id,
+            idempotency_key=key,
+        )
+    if place_id is not None or place_name_id is not None:
+        raise AnnouncementStageError(
+            "Анонс по личному шаблону не привязывается к площадке."
+        )
+    if not _valid_positive_id(template_id):
+        raise AnnouncementNotFoundError("Некорректный идентификатор шаблона.")
+    assert isinstance(template_id, int)
+    return _start_personal_announcement(
+        session,
+        actor=actor,
+        template_id=template_id,
+        idempotency_key=key,
+    )
+
+
+def _validate_origin(origin: object) -> str:
+    if origin not in ORIGINS:
+        raise AnnouncementStageError(
+            "Источник анонса: 'place' (площадка) или 'personal' (личный шаблон)."
+        )
+    return str(origin)
+
+
+def _start_place_announcement(
+    session: Session,
+    *,
+    actor: User,
+    place_id: object,
+    place_name_id: object,
+    idempotency_key: str | None,
+) -> AnnouncementDraftDetails:
     if not _valid_positive_id(place_id):
         raise AnnouncementNotFoundError("Некорректный идентификатор места.")
     assert isinstance(place_id, int)
-    key = _validated_key(idempotency_key)
 
     place = session.get(Place, place_id)
     if place is None:
@@ -870,16 +971,12 @@ def start_announcement_wizard(
         resolved_name_id = name.id
         display_name = name.name
 
-    if key is not None:
-        existing = session.scalar(
-            select(AnnouncementDraft).where(
-                AnnouncementDraft.author_user_id == actor.id,
-                AnnouncementDraft.idempotency_key == key,
-            )
-        )
+    if idempotency_key is not None:
+        existing = _draft_by_key(session, actor, idempotency_key)
         if existing is not None:
             if (
-                existing.place_id != place_id
+                existing.origin != ORIGIN_PLACE
+                or existing.place_id != place_id
                 or existing.place_name_id != resolved_name_id
             ):
                 raise AnnouncementConflictError(
@@ -895,12 +992,13 @@ def start_announcement_wizard(
         place_display_name=display_name,
         place_address=_optional_text(details.address),
         place_url=_optional_text(details.url),
+        origin=ORIGIN_PLACE,
         template_id=None,
         template_version=None,
         template_snapshot_id=None,
         stage=WizardStage.PLACE.value,
         revision=1,
-        idempotency_key=key,
+        idempotency_key=idempotency_key,
         created_at=now,
         updated_at=now,
     )
@@ -909,13 +1007,8 @@ def start_announcement_wizard(
         session.commit()
     except (IntegrityError, OperationalError) as exc:
         session.rollback()
-        if key is not None:
-            existing = session.scalar(
-                select(AnnouncementDraft).where(
-                    AnnouncementDraft.author_user_id == actor.id,
-                    AnnouncementDraft.idempotency_key == key,
-                )
-            )
+        if idempotency_key is not None:
+            existing = _draft_by_key(session, actor, idempotency_key)
             if existing is not None:
                 return _draft_details(session, actor, existing)
         raise AnnouncementConflictError(
@@ -925,6 +1018,124 @@ def start_announcement_wizard(
         session.rollback()
         raise
     return _details_by_id(session, actor, row.id)
+
+
+def _start_personal_announcement(
+    session: Session,
+    *,
+    actor: User,
+    template_id: int,
+    idempotency_key: str | None,
+) -> AnnouncementDraftDetails:
+    """Анонс по личному шаблону: площадки нет, снимок фиксируется сразу."""
+    if idempotency_key is not None:
+        existing = _draft_by_key(session, actor, idempotency_key)
+        if existing is not None:
+            if (
+                existing.origin != ORIGIN_PERSONAL
+                or existing.template_id != template_id
+            ):
+                raise AnnouncementConflictError(
+                    "Ключ идемпотентности уже использован для другого выбора."
+                )
+            return _draft_details(session, actor, existing)
+
+    template = get_accessible_template(session, actor.telegram_user_id, template_id)
+    if template is None or template.kind != TEMPLATE_KIND_PERSONAL:
+        # Стандартный шаблон площадки требует выбранного места, а чужой
+        # личный неотличим от несуществующего.
+        raise AnnouncementNotFoundError("Личный шаблон не найден или недоступен.")
+    if template.owner_user_id != actor.id:
+        raise AnnouncementNotFoundError("Личный шаблон не найден или недоступен.")
+
+    now = utcnow()
+    row = AnnouncementDraft(
+        author_user_id=actor.id,
+        place_id=None,
+        place_name_id=None,
+        place_display_name=None,
+        place_address=None,
+        place_url=None,
+        origin=ORIGIN_PERSONAL,
+        template_id=None,
+        template_version=None,
+        template_snapshot_id=None,
+        stage=WizardStage.PLACE.value,
+        revision=1,
+        idempotency_key=idempotency_key,
+        created_at=now,
+        updated_at=now,
+    )
+    session.add(row)
+    try:
+        session.flush()
+        compatibility = validate_template_compatibility(
+            session,
+            actor_telegram_user_id=actor.telegram_user_id,
+            template_id=template_id,
+            selected_place_id=None,
+        )
+        if not compatibility.compatible:
+            raise AnnouncementBrickError(
+                "Шаблон несовместим: " + "; ".join(compatibility.issues)
+            )
+        snapshot = create_template_snapshot(
+            session,
+            actor_telegram_user_id=actor.telegram_user_id,
+            template_id=template_id,
+            idempotency_key=f"announcement-wizard:{row.id}",
+            commit=False,
+        )
+        _cas_update_draft(
+            session,
+            draft_id=row.id,
+            revision=1,
+            fields={
+                "template_id": template.template_id,
+                "template_version": template.current_version.version,
+                "template_snapshot_id": snapshot.snapshot_id,
+                "stage": WizardStage.QUESTIONS.value,
+            },
+        )
+        session.commit()
+    except AnnouncementError:
+        session.rollback()
+        raise
+    except TemplateNotFoundError as exc:
+        session.rollback()
+        raise AnnouncementNotFoundError(str(exc)) from exc
+    except TemplatePermissionError as exc:
+        session.rollback()
+        raise AnnouncementNotFoundError(str(exc)) from exc
+    except TemplateError as exc:
+        session.rollback()
+        raise AnnouncementConflictError(str(exc)) from exc
+    except (IntegrityError, OperationalError) as exc:
+        session.rollback()
+        if idempotency_key is not None:
+            existing = _draft_by_key(session, actor, idempotency_key)
+            if existing is not None:
+                return _draft_details(session, actor, existing)
+        raise AnnouncementConflictError(
+            "Не удалось создать анонс из-за одновременной записи."
+        ) from exc
+    except Exception:
+        session.rollback()
+        raise
+    return _details_by_id(session, actor, row.id)
+
+
+def _draft_by_key(
+    session: Session,
+    actor: User,
+    idempotency_key: str,
+) -> AnnouncementDraft | None:
+    return session.scalar(
+        select(AnnouncementDraft).where(
+            AnnouncementDraft.author_user_id == actor.id,
+            AnnouncementDraft.idempotency_key == idempotency_key,
+        )
+    )
 
 
 def confirm_announcement_place(
@@ -945,6 +1156,12 @@ def confirm_announcement_place(
     row = _load_owned_draft(session, actor, draft_id)
     revision = _expected_revision(row, expected_revision)
 
+    if row.origin == ORIGIN_PERSONAL:
+        # У анонса по личному шаблону площадки нет: подтверждать нечего.
+        # Это не «уже подтверждено», а неверный шаг сценария.
+        raise AnnouncementStageError(
+            "Анонс по личному шаблону не требует подтверждения площадки."
+        )
     if row.stage in {
         WizardStage.TEMPLATE.value,
         WizardStage.QUESTIONS.value,
@@ -956,12 +1173,18 @@ def confirm_announcement_place(
     if row.stage != WizardStage.PLACE.value:
         raise AnnouncementStageError("Неизвестный этап адаптивного мастера.")
 
-    details = get_place_details(session, row.place_id)
+    # После ветки origin='personal' выше схема гарантирует place_id у
+    # 'place'-черновика; защищаемся явно, чтобы не работать с повреждённой
+    # строкой как с валидной (типы и сообщение вместо TypeError).
+    if row.place_id is None:
+        raise AnnouncementStageError("Выбранное место больше не доступно.")
+    place_id = row.place_id
+    details = get_place_details(session, place_id)
     if details is None:
         raise AnnouncementStageError("Выбранное место больше не доступно.")
     display_name = row.place_display_name
     if row.place_name_id is not None:
-        name = get_place_name(session, row.place_id, row.place_name_id)
+        name = get_place_name(session, place_id, row.place_name_id)
         if name is None:
             raise AnnouncementStageError(
                 "Выбранное название места больше не принадлежит этому месту."
@@ -998,6 +1221,12 @@ def _template_for_selection(
     if template is None:
         raise AnnouncementNotFoundError("Шаблон не найден или недоступен.")
     if template.kind == TEMPLATE_KIND_STANDARD:
+        # Стандарт всегда принадлежит конкретной площадке. У анонса по
+        # личному шаблону площадки нет, поэтому стандарт недопустим.
+        if draft.origin != ORIGIN_PLACE or draft.place_id is None:
+            raise AnnouncementStageError(
+                "Стандартный шаблон площадки недоступен без выбранного места."
+            )
         if template.place_id != draft.place_id:
             raise AnnouncementStageError(
                 "Стандартный шаблон относится к другому месту."
@@ -2006,6 +2235,7 @@ def build_announcement_questions(
         display_name=row.place_display_name,
         address=row.place_address,
         url=row.place_url,
+        brick_ids_by_code=snapshot_brick_ids_by_code(snapshot),
     )
     answers = {
         value.brick_id: BrickValueResult(
@@ -2085,6 +2315,7 @@ def build_announcement_render_payload(
         display_name=row.place_display_name,
         address=row.place_address,
         url=row.place_url,
+        brick_ids_by_code=snapshot_brick_ids_by_code(snapshot),
     ).items():
         values_by_id.setdefault(brick_id, raw)
     return AnnouncementRenderPayload(
@@ -2130,6 +2361,7 @@ def build_announcement_fields(
         display_name=row.place_display_name,
         address=row.place_address,
         url=row.place_url,
+        brick_ids_by_code=snapshot_brick_ids_by_code(snapshot),
     )
 
     states: list[AnnouncementFieldState] = []

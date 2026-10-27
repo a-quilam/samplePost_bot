@@ -69,7 +69,7 @@ class FieldStateTests(AnnouncementDatabaseTestCase):
             field.code: field for field in fields if field.status == FIELD_STATUS_KNOWN
         }
         self.assertEqual(known["место"].raw_value, "Дом культуры")
-        self.assertEqual(known["адрес_места"].raw_value, "ул. Тестовая, 1")
+        self.assertEqual(known["адрес"].raw_value, "ул. Тестовая, 1")
         self.assertEqual(known["ссылка_места"].raw_value, "https://example.com/place")
 
     def test_filled_and_explicitly_skipped_are_distinct(self) -> None:

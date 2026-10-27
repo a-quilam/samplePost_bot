@@ -16,7 +16,7 @@ from sqlalchemy.exc import IntegrityError
 
 from brick_store import list_system_bricks
 from brick_types import SYSTEM_BRICKS
-from migrations import run_migrations
+from migrations import LATEST_VERSION, run_migrations
 from models import Draft
 from tests.stage19a_helpers import connect
 from tests.stage22a_helpers import BrickDatabaseTestCase
@@ -76,7 +76,7 @@ class BrickSchemaTests(BrickDatabaseTestCase):
                 },
             )
 
-    def test_migration_six_seeds_exactly_nine_stable_system_bricks(self) -> None:
+    def test_migrations_seed_exactly_ten_stable_system_bricks(self) -> None:
         self.assertEqual(
             self.journal(),
             [
@@ -94,16 +94,25 @@ class BrickSchemaTests(BrickDatabaseTestCase):
                 (12, "announcement_wizard"),
                 (13, "announcement_photos_publication"),
                 (14, "announcement_redelivery"),
+                (15, "brick_description_and_address"),
+                (16, "announcement_draft_origin"),
             ],
         )
+        # 9 кирпичиков миграции 6 + системный `[адрес]` миграции 15
+        # (Poster 2.0 S1). Каталог и БД обязаны совпадать по коду и порядку.
         definitions = list_system_bricks(self.session)
-        self.assertEqual(len(definitions), 9)
-        self.assertEqual([item.id for item in definitions], list(range(1, 10)))
+        self.assertEqual(len(definitions), 10)
+        self.assertEqual([item.id for item in definitions], list(range(1, 11)))
         self.assertEqual(
             [item.code for item in definitions],
             [item.code for item in SYSTEM_BRICKS],
         )
         for actual, expected in zip(definitions, SYSTEM_BRICKS, strict=True):
+            # На чистой базе миграция 15 вставляет `[адрес]` сразу за
+            # миграцией 6, поэтому ID совпадают с каталогом. В существующей
+            # базе номер мог быть другим (`MAX(id)+1`), поэтому основная
+            # сверка — по коду.
+            self.assertEqual(actual.code, expected.code)
             self.assertEqual(actual.title, expected.title)
             self.assertEqual(actual.value_type, expected.value_type)
             self.assertEqual(actual.source, expected.source)
@@ -118,8 +127,8 @@ class BrickSchemaTests(BrickDatabaseTestCase):
             (item.id, item.code, item.title, item.created_at)
             for item in list_system_bricks(self.session)
         ]
-        self.assertEqual(run_migrations(self.engine), 14)
-        self.assertEqual(run_migrations(self.engine), 14)
+        self.assertEqual(run_migrations(self.engine), LATEST_VERSION)
+        self.assertEqual(run_migrations(self.engine), LATEST_VERSION)
         after = [
             (item.id, item.code, item.title, item.created_at)
             for item in list_system_bricks(self.session)
@@ -131,15 +140,15 @@ class BrickSchemaTests(BrickDatabaseTestCase):
                     text("SELECT count(*) FROM bricks WHERE scope='system'")
                 ).scalar_one()
             )
-        self.assertEqual(count, 9)
-        self.assertEqual(len(self.journal()), 14)
+        self.assertEqual(count, 10)
+        self.assertEqual(len(self.journal()), LATEST_VERSION)
 
     def test_restart_does_not_overwrite_a_controlled_system_definition(self) -> None:
         with self.engine.begin() as connection:
             connection.execute(
                 text("UPDATE bricks SET title='Название (изменено)' WHERE id=1")
             )
-        self.assertEqual(run_migrations(self.engine), 14)
+        self.assertEqual(run_migrations(self.engine), LATEST_VERSION)
         self.session.expire_all()
         changed = list_system_bricks(self.session)[0]
         self.assertEqual(changed.id, 1)
