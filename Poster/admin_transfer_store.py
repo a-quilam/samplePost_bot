@@ -219,6 +219,26 @@ def _place_name(session: Session, place_id: int) -> str | None:
     )
 
 
+def _result_after_lost_race(
+    session: Session, row: AdminTransfer, actor: User
+) -> TransferMutationResult:
+    """
+    Честный итог для проигравшего гонку подтверждения.
+
+    Условный UPDATE не сработал, значит предложение уже закрыто другим
+    потоком/процессом. Своя копия строки устарела (SQLite-чтения вне
+    транзакции видят свежие данные, а объект в сессии — нет), поэтому статус
+    перечитывается. Получатель, чьё подтверждение уже победило, должен
+    увидеть «уже подтверждено», а не «администратор изменился».
+    """
+    session.refresh(row)
+    if row.status == STATUS_CONFIRMED and row.to_user_id == actor.id:
+        return TransferMutationResult(
+            status="already_confirmed", transfer=_view(session, row)
+        )
+    return TransferMutationResult(status="conflict", transfer=_view(session, row))
+
+
 def _view(session: Session, row: AdminTransfer) -> TransferView:
     from_user = session.get(User, row.from_user_id)
     to_user = session.get(User, row.to_user_id) if row.to_user_id else None
@@ -707,7 +727,7 @@ def confirm_admin_transfer(
 
     now = utcnow()
     if now >= row.expires_at:
-        _close_pending(session, transfer_id, STATUS_EXPIRED, now=now)
+        closed_expired = _close_pending(session, transfer_id, STATUS_EXPIRED, now=now)
         try:
             session.commit()
         except (IntegrityError, OperationalError):
@@ -715,6 +735,10 @@ def confirm_admin_transfer(
         except Exception:
             session.rollback()
             raise
+        if not closed_expired:
+            # Пока шли проверки, предложение закрыл другой вызов: нельзя
+            # отдавать устаревший «expired» вместо фактического исхода.
+            return _result_after_lost_race(session, row, actor)
         session.refresh(row)
         return TransferMutationResult(status="expired", transfer=_view(session, row))
 
@@ -724,7 +748,14 @@ def confirm_admin_transfer(
         or active[0].id != row.from_assignment_id
         or active[1].id != row.from_user_id
     ):
-        _close_pending(session, transfer_id, STATUS_SUPERSEDED, now=now)
+        # `row.status` мог быть прочитан ДО конкурентного подтверждения, а
+        # SQLite-чтения вне явной транзакции сразу видят свежие строки. Поэтому
+        # «администратор изменился» — это только гипотеза: она подтверждается
+        # условным закрытием pending. Если строку уже закрыл победитель гонки,
+        # отдаём его исход, а не «superseded» (дефект флейка Stage 21).
+        closed_superseded = _close_pending(
+            session, transfer_id, STATUS_SUPERSEDED, now=now
+        )
         try:
             session.commit()
         except (IntegrityError, OperationalError):
@@ -732,6 +763,8 @@ def confirm_admin_transfer(
         except Exception:
             session.rollback()
             raise
+        if not closed_superseded:
+            return _result_after_lost_race(session, row, actor)
         session.refresh(row)
         return TransferMutationResult(status="superseded", transfer=_view(session, row))
 
@@ -756,7 +789,7 @@ def confirm_admin_transfer(
         )
         if getattr(closed, "rowcount", 0) != 1:
             session.rollback()
-            return TransferMutationResult(status="conflict")
+            return _result_after_lost_race(session, row, actor)
 
         revoked = session.execute(
             update(PlaceAdmin)
@@ -792,7 +825,7 @@ def confirm_admin_transfer(
         session.commit()
     except (IntegrityError, OperationalError):
         session.rollback()
-        return TransferMutationResult(status="conflict")
+        return _result_after_lost_race(session, row, actor)
     except Exception:
         session.rollback()
         raise

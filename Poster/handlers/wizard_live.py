@@ -1,25 +1,27 @@
 # handlers/wizard_live.py
 """
-Poster 2.0 S3: живой верхний блок анонса.
+Poster 2.0: живой верхний блок анонса (S3 — текст, S4 — медиаблок).
 
-Логический верхний блок — это настоящий анонс (Telegram HTML), который
-стоит в чате ВЫШЕ единственного служебного экрана. Модуль отвечает только
-за него:
+Логический верхний блок — это настоящий анонс, который стоит в чате ВЫШЕ
+единственного служебного экрана. Он может состоять из нескольких сообщений
+Telegram, когда у анонса есть фотографии:
 
 - собрать текст тем же `template_compiler.render_announcement`, что и
   итоговая отправка (одна точка правды для live/final);
 - отправить его ДО нижнего вопроса (S3 п.2), в том числе техническую `.`,
   если видимый текст пуст и фотографий нет;
-- после каждого ответа отредактировать существующее сообщение
-  (`editMessageText`), а не создавать новое;
-- если редактирование невозможно (сообщение удалено, старше 48 часов,
-  «message is not modified»), отправить новую версию и только после
-  успешной отправки обновить сохранённые адреса;
+- с фото — отправить фотографии партиями 2–10 и текст ровно один раз
+  подписью ПОСЛЕДНЕГО сегмента (фото над текстом, S4 §5.3);
+- после каждого ответа отредактировать существующий блок
+  (`editMessageText` / `editMessageCaption`), а не создавать новый;
+- если блок изменился по составу (появились/исчезли фото) — отправить
+  новую версию, а прошлую удалять ТОЛЬКО после подтверждённого успеха;
 - восстановить адреса из БД после рестарта: повторного снимка и дублей нет.
 
-Медиа-сценарии (альбомы, лимиты, замена нескольких сообщений, финальная
-доставка) — S4. В S3 верхний блок текстовый; `live_message_ids_json`
-хранит упорядоченный набор уже на будущее.
+Медиа-группу нельзя «дополнить»: `editMessageCaption` меняет только
+подпись, поэтому смена набора фото пересобирает блок. Номер и адреса
+подтверждённых сообщений хранит `live_message_ids_json` — миграция для
+этого уже есть (S1).
 
 Клавиатуры верхний блок не содержит: кнопки живут только на служебном
 экране, иначе готовый анонс нельзя было бы скопировать.
@@ -39,12 +41,24 @@ from announcement_store import (
     set_announcement_live_message_ids,
 )
 from database import SessionLocal
+from delivery import (
+    delivery_fingerprint,
+    media_batches,
+    send_announcement_post,
+)
 from template_compiler import render_announcement
 
 if TYPE_CHECKING:  # pragma: no cover — только для типов, без циклического импорта
     from telegram import Bot
 
 logger = logging.getLogger(__name__)
+
+# Где в `user_data` лежит служебное состояние живого блока: отпечаток уже
+# показанной версии и прогресс частичной отправки. В БД этого нет (схема
+# не меняется): после рестарта блок считается актуальным, если количество
+# его сообщений совпадает с ожидаемым числом сегментов.
+LIVE_STATE_KEY = "announcement_live_state"
+LIVE_PROGRESS_KEY = "announcement_live_progress"
 
 
 @dataclass(frozen=True)
@@ -55,6 +69,14 @@ class LiveBlock:
     text: str
     # Сколько сообщений пришлось отправить заново (0 — отредактировали).
     replaced: int = 0
+    # Сколько фото в показанном блоке (для финализации и порядка в чате).
+    photo_count: int = 0
+    # Отпечаток показанного содержимого: по нему финал узнаёт свою версию.
+    fingerprint: str = ""
+
+    @property
+    def has_media(self) -> bool:
+        return self.photo_count > 0
 
 
 def render_live_text(
@@ -92,6 +114,41 @@ def current_live_ids(details) -> tuple[int, ...]:
     return tuple(getattr(details, "live_message_ids", ()) or ())
 
 
+def expected_segments(photo_count: int) -> int:
+    """Сколько сообщений займёт блок: 1 без фото, иначе партии 2–10."""
+    return len(media_batches(photo_count)) or 1
+
+
+def live_state(user_data: dict) -> dict:
+    state = user_data.get(LIVE_STATE_KEY)
+    return state if isinstance(state, dict) else {}
+
+
+def remember_live_state(user_data: dict, *, draft_id: int, block: LiveBlock) -> None:
+    """Запоминает, какая именно версия показана (до рестарта процесса)."""
+    user_data[LIVE_STATE_KEY] = {
+        "draft_id": int(draft_id),
+        "fingerprint": block.fingerprint,
+        "ids": list(block.message_ids),
+        "photo_count": block.photo_count,
+    }
+
+
+def forget_live_state(user_data: dict) -> None:
+    user_data.pop(LIVE_STATE_KEY, None)
+    user_data.pop(LIVE_PROGRESS_KEY, None)
+
+
+def live_matches(user_data: dict, *, draft_id: int, fingerprint: str) -> bool:
+    """Совпадает ли показанная версия с ожидаемым содержимым (в сессии)."""
+    state = live_state(user_data)
+    return (
+        int(state.get("draft_id") or 0) == int(draft_id)
+        and bool(fingerprint)
+        and state.get("fingerprint") == fingerprint
+    )
+
+
 def _persist_ids(
     *,
     telegram_user_id: int,
@@ -123,6 +180,61 @@ def _persist_ids(
     return tuple(updated.live_message_ids)
 
 
+def _is_not_modified(exc: BaseException) -> bool:
+    return "message is not modified" in str(exc).lower()
+
+
+async def _edit_text_block(
+    bot: "Bot", chat_id: int, message_ids: tuple[int, ...], text: str
+) -> bool:
+    """Правит текстовый блок; True — содержимое уже актуально."""
+    try:
+        await bot.edit_message_text(
+            text=text,
+            chat_id=chat_id,
+            message_id=message_ids[0],
+            parse_mode="HTML",
+            reply_markup=None,
+            disable_web_page_preview=False,
+        )
+    except TelegramError as exc:
+        if _is_not_modified(exc):
+            logger.info("Живой блок уже актуален (message is not modified).")
+            return True
+        logger.info("Живой блок не отредактирован (%s) — отправляю новую версию.", exc)
+        return False
+    return True
+
+
+async def _edit_caption(bot: "Bot", chat_id: int, message_id: int, text: str) -> bool:
+    """Правит подпись последнего сегмента медиаблока; True — уже актуальна."""
+    try:
+        await bot.edit_message_caption(
+            chat_id=chat_id,
+            message_id=message_id,
+            caption=text or None,
+            parse_mode="HTML" if text else None,
+        )
+    except TelegramError as exc:
+        if _is_not_modified(exc):
+            logger.info("Подпись живого блока уже актуальна.")
+            return True
+        logger.info("Подпись живого блока не изменена (%s) — пересобираю.", exc)
+        return False
+    return True
+
+
+async def _delete_old(bot: "Bot", chat_id: int, old_ids: tuple[int, ...]) -> None:
+    """Удаляет прошлую версию блока best-effort (только после успеха новой)."""
+    for message_id in old_ids:
+        try:
+            await bot.delete_message(chat_id, message_id)
+        except Exception as exc:  # noqa: BLE001 — удаление не сбой доставки
+            logger.info(
+                "Прошлая версия живого блока (%s) не удалена: %s", message_id, exc
+            )
+
+
 async def sync_live_block(
     bot: "Bot",
     chat_id: int,
@@ -133,6 +245,9 @@ async def sync_live_block(
     known_ids: tuple[int, ...] = (),
     text: str | None = None,
     has_photos: bool = False,
+    photos: tuple[str, ...] = (),
+    force_recreate: bool = False,
+    user_data: dict | None = None,
     session_factory=None,
 ) -> LiveBlock:
     """
@@ -143,12 +258,16 @@ async def sync_live_block(
 
     Правила замены:
 
-    - есть сохранённый ID → `editMessageText`; при «message is not
-      modified» это успех (блок уже актуален);
-    - редактирование невозможно → новая версия отправляется ниже, и только
-      после её успеха прошлый адрес забывается. До успеха старая версия
-      остаётся в чате: пользователь не теряет анонс.
+    - текст без фото: `editMessageText` (неизменённый текст — успех);
+    - медиаблок: `editMessageCaption` последнего сегмента, если число
+      сегментов совпадает с ожидаемым. Состав фото неизменен — новых
+      сообщений нет;
+    - состав изменился (фото добавились/удалились) или править нечего —
+      отправляется новая версия, и только после её успеха прошлые адреса
+      удаляются. До успеха старая версия остаётся в чате.
     """
+    file_ids = tuple(str(item) for item in photos if item)
+    has_photos = bool(has_photos or file_ids)
     if text is None:
         text = render_live_text(
             telegram_user_id=telegram_user_id,
@@ -156,49 +275,89 @@ async def sync_live_block(
             has_photos=has_photos,
             session_factory=session_factory,
         )
+    fingerprint = delivery_fingerprint(text, file_ids)
+    segments = expected_segments(len(file_ids))
     ids = tuple(known_ids)
-    if ids:
-        target = ids[0]
-        try:
-            await bot.edit_message_text(
-                text=text,
-                chat_id=chat_id,
-                message_id=target,
-                parse_mode="HTML",
-                reply_markup=None,
-                disable_web_page_preview=False,
-            )
-        except TelegramError as exc:
-            if "message is not modified" in str(exc).lower():
-                logger.info("Живой блок уже актуален (message is not modified).")
-                return LiveBlock(message_ids=ids, text=text)
-            logger.info(
-                "Живой блок не отредактирован (%s) — отправляю новую версию.", exc
-            )
-        else:
-            # Остальные адреса (на будущее — альбомы S4) не трогаем: их
-            # замена требует отдельного подтверждения на каждое сообщение.
-            return LiveBlock(message_ids=ids, text=text)
 
-    # Живой блок — предпросмотр, а не доставленный пост: явный
-    # `disable_web_page_preview=False` отличает его от `send_rendered_post`
-    # (тот не передаёт этот параметр) и от служебного экрана (`True`).
-    message = await bot.send_message(
-        chat_id=chat_id,
-        text=text,
-        parse_mode="HTML",
-        reply_markup=None,
-        disable_web_page_preview=False,
+    if ids and not force_recreate and len(ids) == segments:
+        if not file_ids:
+            if await _edit_text_block(bot, chat_id, ids, text):
+                return LiveBlock(
+                    message_ids=ids,
+                    text=text,
+                    fingerprint=fingerprint,
+                    photo_count=0,
+                )
+        elif await _edit_caption(bot, chat_id, ids[-1], text):
+            # Подпись правится и пустой: у сообщения с фото это «уже
+            # актуально», а у ТЕКСТОВОГО блока Telegram отвечает «there is no
+            # caption in the message». Так блок без фото заменяется
+            # медиаблоком, а не признаётся готовым постом (дефект S4-1:
+            # текстовая `.` оставалась в чате, хотя появилось фото).
+            return LiveBlock(
+                message_ids=ids,
+                text=text,
+                fingerprint=fingerprint,
+                photo_count=len(file_ids),
+            )
+
+    progress: dict | None = None
+    if user_data is not None:
+        stored = user_data.get(LIVE_PROGRESS_KEY)
+        if not isinstance(stored, dict) or force_recreate:
+            # Пересборка с нуля: остатки прошлой попытки не должны «дослать»
+            # старые адреса вместо нового блока.
+            stored = {}
+            user_data[LIVE_PROGRESS_KEY] = stored
+        progress = stored
+
+    def _on_progress(snapshot: dict) -> None:
+        # Частичная отправка: фиксируем подтверждённые адреса, чтобы после
+        # сбоя не отправлять их второй раз в этой сессии.
+        confirmed = tuple(int(mid) for mid in snapshot.get("ids") or [])
+        if confirmed:
+            _persist_ids(
+                telegram_user_id=telegram_user_id,
+                draft_id=draft_id,
+                message_ids=confirmed,
+                revision=revision,
+                session_factory=session_factory,
+            )
+
+    sent = await send_announcement_post(
+        bot,
+        chat_id,
+        text,
+        list(file_ids),
+        progress=progress,
+        on_progress=_on_progress if progress is not None else None,
+        live=True,
     )
-    message_id = getattr(message, "message_id", None)
-    if message_id is None:
-        return LiveBlock(message_ids=ids, text=text, replaced=1)
-    replaced_ids: tuple[int, ...] = (int(message_id),)
-    stored = _persist_ids(
+    new_ids = tuple(int(mid) for mid in sent)
+    if not new_ids:
+        # Telegram не вернул message_id: блок не подтверждён, старый цел.
+        return LiveBlock(
+            message_ids=ids,
+            text=text,
+            replaced=len(ids),
+            photo_count=len(file_ids),
+        )
+    stored_ids = _persist_ids(
         telegram_user_id=telegram_user_id,
         draft_id=draft_id,
-        message_ids=replaced_ids,
+        message_ids=new_ids,
         revision=revision,
         session_factory=session_factory,
     )
-    return LiveBlock(message_ids=stored, text=text, replaced=len(ids))
+    replaced = [old for old in ids if old not in stored_ids]
+    if replaced:
+        await _delete_old(bot, chat_id, tuple(replaced))
+    if user_data is not None:
+        user_data.pop(LIVE_PROGRESS_KEY, None)
+    return LiveBlock(
+        message_ids=stored_ids,
+        text=text,
+        replaced=len(replaced),
+        photo_count=len(file_ids),
+        fingerprint=fingerprint,
+    )

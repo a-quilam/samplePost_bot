@@ -63,6 +63,7 @@ from brick_types import (
     BrickValueStatus,
     validate_brick_value,
 )
+from delivery import EMPTY_CAPTION_TEXT
 from models import (
     AnnouncementDraft,
     AnnouncementExtra,
@@ -73,7 +74,12 @@ from models import (
     utcnow,
 )
 from place_store import get_place_details, get_place_name
-from template_compiler import render_announcement, render_template
+from template_compiler import (
+    PLACEHOLDER_TEXT,
+    check_announcement_length,
+    render_announcement,
+    render_template,
+)
 from template_parser import BrickNode
 from template_store import (
     TemplateError,
@@ -97,7 +103,9 @@ _UNSET = object()
 
 # Разумный предел коллекции: защищает сообщение/БД от бесконечного набора.
 # Отправка при этом всё равно режется на медиагруппы по лимиту Telegram.
-MAX_ANNOUNCEMENT_PHOTOS = 100
+# Решение владельца от 2026-10-27 (S4 §5.3): максимум ровно 10 фото на
+# один анонс. 11-е отклоняется, принятые не теряются.
+MAX_ANNOUNCEMENT_PHOTOS = 10
 
 PUBLICATION_STATUS_SENDING = "sending"
 PUBLICATION_STATUS_PARTIAL = "partial"
@@ -1906,6 +1914,26 @@ def begin_announcement_publication(
         raise AnnouncementStageError(f"Анонс не готов к выдаче: {reason}")
     now = utcnow()
     photos = preview.draft.photos
+    # S4 §5.1: перед заморозкой payload проверяется видимый размер — без
+    # фото 4096, с фото 1024. Превышение не «лечится» автосокращением:
+    # вызывающий слой показывает проблемный экран, данные остаются в БД.
+    length = check_announcement_length(preview.html, has_photos=bool(photos))
+    if length.over:
+        raise AnnouncementStageError(
+            "Анонс не помещается в сообщение: "
+            f"{length.length} из {length.limit} символов "
+            f"(превышение {length.excess}). Сократите текст кирпичиков."
+        )
+    # С фото пустой видимый текст не превращается в подпись-точку: вложения
+    # уходят без подписи. Форма публикации требует непустой замороженный
+    # текст, поэтому для этого случая хранится невидимый маркер пустой
+    # подписи (подписью он не становится, см. `delivery.visible_text`).
+    if preview.html:
+        frozen_text = preview.html
+    elif photos:
+        frozen_text = EMPTY_CAPTION_TEXT
+    else:
+        frozen_text = PLACEHOLDER_TEXT
     # Прогресс новой версии: step/ids/total заполнит отправитель, а
     # `previous_ids` — адреса уже доставленной версии, которую нужно
     # заменить. Никакой «неизменяемой истории»: при следующей пересборке
@@ -1920,7 +1948,7 @@ def begin_announcement_publication(
             revision=revision,
             fields={
                 "publication_status": PUBLICATION_STATUS_SENDING,
-                "publication_text": preview.html,
+                "publication_text": frozen_text,
                 "publication_photos": json.dumps(list(photos), ensure_ascii=False),
                 "publication_progress": (
                     _publication_progress_to_json(progress) if progress else None

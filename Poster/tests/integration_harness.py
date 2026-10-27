@@ -112,9 +112,11 @@ class FakeBot:
         # kind -> разрешено ещё N успешных вызовов, далее все падают
         self.fail_after: dict[str, int] = {}
         self._next_message_id = 100
-        # (chat_id, message_id) -> (text, reply_markup-подпись): реализм
-        # «message is not modified» у настоящего Telegram
-        self._message_content: dict[tuple[int, int], tuple[Any, Any]] = {}
+        # (chat_id, message_id) -> (вид содержимого, текст-подпись, подпись
+        # клавиатуры): реализм Telegram. Вид — "text" или "caption", потому
+        # что настоящий Bot API не даёт править подпись у текстового
+        # сообщения и текст у сообщения с подписью.
+        self._message_content: dict[tuple[int, int], tuple[str, Any, Any]] = {}
 
     def _markup_signature(self, markup: Any) -> Any:
         """Сравнимая подпись клавиатуры (для детекции идентичного edit'а)."""
@@ -128,11 +130,13 @@ class FakeBot:
             return id(markup)
 
     def _remember_content(self, kwargs: dict, message: Any) -> None:
-        """Запоминает последнее содержимое сообщения бота (текст/фото)."""
-        text = kwargs.get("text")
-        if text is None:
-            text = kwargs.get("caption")
+        """Запоминает последнее содержимое сообщения бота (текст/подпись)."""
+        if kwargs.get("text") is not None or kwargs.get("caption") is None:
+            kind, text = "text", kwargs.get("text")
+        else:
+            kind, text = "caption", kwargs.get("caption")
         self._message_content[(message.chat.id, message.message_id)] = (
+            kind,
             text,
             self._markup_signature(kwargs.get("reply_markup")),
         )
@@ -217,15 +221,43 @@ class FakeBot:
         )
         key = (int(kwargs.get("chat_id") or 0), int(kwargs.get("message_id") or 0))
         current = self._message_content.get(key)
+        if not injected and current is not None and current[0] != "text":
+            # У сообщения с подписью нет текста: Telegram это отвергает.
+            raise BadRequest("Bad Request: there is no text in the message to edit")
         proposed = (
             kwargs.get("text"),
             self._markup_signature(kwargs.get("reply_markup")),
         )
-        if not injected and current is not None and current == proposed:
+        if not injected and current is not None and current[1:] == proposed:
             raise BadRequest("message is not modified")
         self._record("edit_message", args, kwargs)
         if kwargs.get("chat_id") is not None and kwargs.get("message_id") is not None:
-            self._message_content[key] = proposed
+            self._message_content[key] = ("text", *proposed)
+
+    async def edit_message_caption(self, *args: Any, **kwargs: Any) -> None:
+        """
+        Правка подписи медиаблока (живой блок с фото).
+
+        Как и `edit_message_text`, реалистично отвечает «message is not
+        modified», если подпись не изменилась: повторная синхронизация
+        живого блока не должна выглядеть новым сообщением.
+        """
+        injected = any(
+            "edit_message" in container
+            for container in (self.fail_types, self.errors_by_type, self.fail_after)
+        )
+        key = (int(kwargs.get("chat_id") or 0), int(kwargs.get("message_id") or 0))
+        current = self._message_content.get(key)
+        if not injected and current is not None and current[0] != "caption":
+            # У текстового сообщения нет подписи: Telegram это отвергает,
+            # и живой блок пересобирается новым медиасообщением.
+            raise BadRequest("Bad Request: there is no caption in the message")
+        proposed = (kwargs.get("caption"), None)
+        if not injected and current is not None and current[1:] == proposed:
+            raise BadRequest("message is not modified")
+        self._record("edit_caption", args, kwargs)
+        if kwargs.get("chat_id") is not None and kwargs.get("message_id") is not None:
+            self._message_content[key] = ("caption", *proposed)
 
     async def delete_message(self, *args: Any, **kwargs: Any) -> None:
         self._record("delete_message", args, kwargs)

@@ -43,6 +43,7 @@ from telegram.ext import (
     filters,
 )
 
+import delivery
 from announcement_store import (
     FIELD_STATUS_KNOWN,
     FIELD_STATUS_MISSING,
@@ -58,7 +59,6 @@ from announcement_store import (
     AnnouncementNotFoundError,
     AnnouncementPreview,
     add_announcement_extra,
-    add_announcement_photo,
     begin_announcement_publication,
     build_announcement_fields,
     build_announcement_preview,
@@ -98,13 +98,18 @@ from brick_types import (
     BrickValueStatus,
 )
 from database import SessionLocal
-from handlers import wizard_live, wizard_questions
+from handlers import wizard_live, wizard_photos, wizard_questions
 from place_store import (
     get_place_details,
     list_places,
     search_places,
 )
-from template_compiler import TemplateCompileError
+from template_compiler import (
+    PLACEHOLDER_TEXT,
+    TemplateCompileError,
+    announcement_text_limit,
+    check_announcement_length,
+)
 from template_store import (
     TemplateError,
     get_standard_template,
@@ -343,6 +348,7 @@ async def _sync_live(
     """
     if details is None or details.publication_status is not None:
         return
+    user_data = ctx.data(context)
     try:
         block = await wizard_live.sync_live_block(
             context.bot,
@@ -352,10 +358,16 @@ async def _sync_live(
             revision=details.revision,
             known_ids=wizard_live.current_live_ids(details),
             has_photos=bool(details.photos),
+            # S4: живой блок — медиаблок. Фото и прогресс частичной отправки
+            # передаются явно: без них состав блока не совпал бы с payload
+            # финальной отправки, и готовый пост появился бы вторым.
+            photos=tuple(details.photos),
+            user_data=user_data,
         )
     except Exception as exc:  # noqa: BLE001 — живой блок не должен ломать диалог
         logger.info("Живой блок #%s не обновлён: %s", details.draft_id, exc)
         return
+    wizard_live.remember_live_state(user_data, draft_id=details.draft_id, block=block)
     await _keep_live_above_screen(update, context, block)
 
 
@@ -1624,7 +1636,13 @@ async def _after_questions(
             notice=notice,
             pending=_has_pending_changes(update, updated),
         )
-    return await _render_photo_step(update, context, updated, notice=notice)
+    return await wizard_photos.render_photo_step(
+        update,
+        context,
+        updated,
+        notice=notice,
+        announcement_is_empty=_announcement_is_empty(update, updated),
+    )
 
 
 async def _save_question_value(
@@ -1678,6 +1696,11 @@ async def _save_question_value(
         if stale:
             await screen.cleanup_messages(context.bot, ctx.chat(update).id, stale)
         await screen.drop_user_input(update, context)
+    # S4 §5.2 п.5: сокращение после проблемного экрана сразу пересобирает
+    # анонс и применяет уже сохранённую фотографию без повторного вопроса.
+    resumed = await _resume_after_shortening(update, context, updated)
+    if resumed is not None:
+        return resumed
     return await _advance_question(
         update,
         context,
@@ -2781,6 +2804,11 @@ async def _save_extra_value(
             update, context, updated, current_extra, notice=notice
         )
     _clear_active(ui)
+    # S4 §5.2 п.5: сокращение дополнительного кирпичика тоже сразу
+    # пересобирает анонс с уже сохранённым фото.
+    resumed = await _resume_after_shortening(update, context, updated)
+    if resumed is not None:
+        return resumed
     return await _render_extras(update, context, updated, notice=notice)
 
 
@@ -3167,6 +3195,146 @@ async def _render_preview_error(
     rows.append([InlineKeyboardButton("🏠 Главное меню", callback_data="main_menu")])
     await _render(update, context, text, InlineKeyboardMarkup(rows))
     return AW_PREVIEW
+
+
+async def _render_length_problem(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+    preview,
+    check,
+) -> int:
+    """
+    Проблемный экран превышения лимита текста (S4 §5.2).
+
+    Данные и фото НЕ меняются: значения кирпичиков уже сохранены с CAS,
+    `file_id` лежат в черновике, сообщение пользователя, вызвавшее
+    превышение, не удаляется. Экран показывает фактическую длину, лимит,
+    превышение и самые длинные кирпичики с прямой правкой, чтобы автор мог
+    сократить текст сам — автосокращения и разрезания поста нет.
+    """
+    details = preview.draft
+    ui = _ui(context)
+    _set_details(ui, details)
+    _clear_active(ui)
+    # Флаг «ждём сокращения»: после сохранения любого кирпичика анонс
+    # пересобирается и ожидавшее фото применяется автоматически, без
+    # повторного вопроса и без повторной отправки снимка.
+    ui["length_problem"] = {
+        "draft_id": details.draft_id,
+        "revision": details.revision,
+        "has_photos": check.has_photos,
+    }
+    longest = _longest_fields(preview, limit=3)
+    lines = [
+        "⚠️ Анонс не помещается в сообщение",
+        "",
+        f"Длина: {check.length} из {check.limit} символов "
+        f"(превышение {check.excess}).",
+        (
+            "С фотографиями текст идёт подписью к последнему снимку: "
+            f"допустимо {check.limit} символа."
+            if check.has_photos
+            else f"Без фотографий допустимо {check.limit} символов."
+        ),
+        "",
+        "Данные и фотографии сохранены, ваше сообщение не удалено. "
+        "Сократите текст — анонс соберётся заново сам.",
+    ]
+    if longest:
+        lines.extend(["", "Самые длинные кирпичики:"])
+        for field, length in longest:
+            lines.append(f"• {_h(_short(field.title, 60))} — {length} симв.")
+    lines.extend(
+        [
+            "",
+            "Автосокращения нет: текст не режется и не уходит второй частью. "
+            "Можно также отказаться от фотографий — тогда снова доступно "
+            f"{announcement_text_limit(has_photos=False)} символов.",
+        ]
+    )
+    rows: list[list[InlineKeyboardButton]] = []
+    for field, length in longest:
+        rows.append(
+            [
+                InlineKeyboardButton(
+                    _short(f"✏️ {field.title} — {length}", 60),
+                    callback_data=(
+                        f"aw_qgoto:{details.draft_id}:"
+                        f"{details.revision}:{field.brick_id}"
+                    ),
+                )
+            ]
+        )
+    rows.append(
+        [
+            InlineKeyboardButton(
+                "✏️ Изменить другой кирпичик",
+                callback_data=(f"aw_qmanage:{details.draft_id}:{details.revision}"),
+            )
+        ]
+    )
+    if check.has_photos:
+        rows.append(
+            [
+                InlineKeyboardButton(
+                    "🚫 Без фотографий",
+                    callback_data=(
+                        f"aw_photo_drop:{details.draft_id}:{details.revision}"
+                    ),
+                )
+            ]
+        )
+    rows.append([InlineKeyboardButton("🏠 Главное меню", callback_data="main_menu")])
+    await _render(update, context, "\n".join(lines), InlineKeyboardMarkup(rows))
+    return AW_PREVIEW
+
+
+def _longest_fields(preview, *, limit: int) -> list[tuple[AnnouncementFieldState, int]]:
+    """
+    Самые длинные заполненные кирпичики снимка — кандидаты на сокращение.
+
+    Длина считается по видимому тексту значения (`_field_value_text`), а не
+    по HTML: автор видит в списке те же символы, что и Telegram.
+    """
+    measured: list[tuple[AnnouncementFieldState, int]] = []
+    for field in preview.fields:
+        if field.status not in {FIELD_STATUS_VALID, FIELD_STATUS_KNOWN}:
+            continue
+        length = len(_field_value_text(field))
+        if length <= 0:
+            continue
+        measured.append((field, length))
+    measured.sort(key=lambda item: (-item[1], item[0].brick_id))
+    return measured[:limit]
+
+
+def _length_problem_pending(context: ContextTypes.DEFAULT_TYPE, details) -> bool:
+    """Ждёт ли этот черновик сокращения текста (S4 §5.2 п.5)."""
+    if details is None:
+        return False
+    flag = _ui(context).get("length_problem")
+    if not isinstance(flag, dict):
+        return False
+    return int(flag.get("draft_id") or 0) == int(details.draft_id)
+
+
+async def _resume_after_shortening(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+    details,
+) -> int | None:
+    """
+    После правки кирпичика в проблемном сценарии собирает анонс заново.
+
+    Возвращает None, если превышения не было: обычный поток вопросов не
+    меняется. Ожидавшее фото уже сохранено в черновике, поэтому повторно
+    присылать его не нужно — финализация берёт его из БД. Если текст всё
+    ещё длинный, `_finish_and_deliver` снова покажет проблемный экран.
+    """
+    if not _length_problem_pending(context, details):
+        return None
+    _ui(context).pop("length_problem", None)
+    return await _finish_and_deliver(update, context, details)
 
 
 async def _resume_current(
@@ -3579,9 +3747,14 @@ async def _render_publish_status(
 
 
 def _delivery_fingerprint(text: str, photos: Sequence[str]) -> str:
-    from handlers.post_creation import _delivery_fingerprint as fingerprint
+    """
+    Отпечаток payload — общий с живым блоком и доставкой (S4 п.1).
 
-    return fingerprint(text, list(photos))
+    Раньше адаптер звал приватную функцию легаси-мастера; теперь один
+    алгоритм живёт в `delivery.py`, поэтому fingerprint живого блока и
+    финальной отправки не может разойтись.
+    """
+    return delivery.delivery_fingerprint(text, list(photos))
 
 
 def _announcement_is_empty(update: Update, details) -> bool:
@@ -3603,91 +3776,6 @@ def _announcement_is_empty(update: Update, details) -> bool:
     except (AnnouncementError, TemplateError, TemplateCompileError, BrickError):
         return False
     return not preview.visible_text and not details.photos
-
-
-async def _render_photo_step(
-    update: Update,
-    context: ContextTypes.DEFAULT_TYPE,
-    details,
-    *,
-    notice: str | None = None,
-) -> int:
-    """
-    Шаг фотографий после последнего кирпичика (Poster 2.0 S3 п.6).
-
-    Последний ответ больше **не** доставляет анонс: сначала спрашиваются
-    фотографии. Кнопки «Готово»/«Сформировать» здесь нет — завершает
-    «Без фотографий» (или партия фото в S4). Текст верхнего блока уже
-    показан выше и не пересылается повторно.
-    """
-    ui = _ui(context)
-    _set_details(ui, details)
-    _clear_active(ui)
-    await _sync_live(update, context, details)
-    total = len(details.photos)
-    lines = [
-        "📷 Фотографии анонса",
-        "",
-        "Пришлите одно фото или альбом — они уйдут отдельными вложениями "
-        "после текста. Можно отправить несколько сообщений подряд или "
-        "продолжить без фотографий.",
-        f"Добавлено фотографий: {total}.",
-    ]
-    # S3 п.11: шутка — только в нижнем служебном экране и только пока
-    # анонс пуст. В живой блок и в отправленный текст она не попадает.
-    if _announcement_is_empty(update, details):
-        humor = ui_humor.get_humor_line(announcement_is_empty=True)
-        if humor:
-            lines.extend(["", humor])
-    if notice:
-        lines.insert(1, notice)
-    rows: list[list[InlineKeyboardButton]] = [
-        [
-            InlineKeyboardButton(
-                "📎 Добавить фото",
-                callback_data=f"aw_photo_add:{details.draft_id}:{details.revision}",
-            )
-        ],
-        [
-            InlineKeyboardButton(
-                "🚫 Без фотографий",
-                callback_data=f"aw_photo_none:{details.draft_id}:{details.revision}",
-            )
-        ],
-    ]
-    if total:
-        rows.insert(
-            1,
-            [
-                InlineKeyboardButton(
-                    "📷 Показать добавленные",
-                    callback_data=(
-                        f"aw_photos:{details.draft_id}:{details.revision}:0"
-                    ),
-                )
-            ],
-        )
-    rows.append(
-        [
-            InlineKeyboardButton(
-                "🧱 К вопросам",
-                callback_data=f"aw_qmanage:{details.draft_id}:{details.revision}",
-            )
-        ]
-    )
-    rows.append(
-        [
-            InlineKeyboardButton(
-                "👁 Обзор анонса",
-                callback_data=f"aw_preview:{details.draft_id}:{details.revision}",
-            )
-        ]
-    )
-    rows.append([InlineKeyboardButton("🏠 Главное меню", callback_data="main_menu")])
-    await _render(update, context, "\n".join(lines), InlineKeyboardMarkup(rows))
-    # Шаг фото живёт в состоянии обзора: там же обрабатываются aw_photo_*,
-    # aw_preview и aw_qmanage — отдельного состояния диалога не заводим.
-    return AW_PREVIEW
 
 
 def _has_pending_changes(update: Update, details) -> bool:
@@ -3774,6 +3862,14 @@ async def _finish_and_deliver(
             preview.draft,
             f"{reason}. Заполните поля и попробуйте снова.",
         )
+    # S4 §5.2: лимит проверяется ДО доставки. Превышение не лечится
+    # автосокращением и не режется на части: показывается проблемный экран,
+    # данные и фото остаются в черновике.
+    length = check_announcement_length(
+        preview.html, has_photos=bool(preview.draft.photos)
+    )
+    if length.over:
+        return await _render_length_problem(update, context, preview, length)
     if details.publication_status == PUBLICATION_STATUS_SENT:
         current = _delivery_fingerprint(preview.html, preview.draft.photos)
         if (
@@ -3786,6 +3882,26 @@ async def _finish_and_deliver(
                 context,
                 details,
                 notice=notice or "✅ Эта версия анонса уже отправлена.",
+            )
+    # S4 п.5: верхний медиаблок уже стоит в чате. Если его payload совпадает
+    # с текущим и прошлую версию заменять не нужно, он и есть готовый пост:
+    # повторная отправка создала бы второй альбом. Текстовый анонс без фото
+    # доставляется отдельным сообщением (контракт S3: превью остаётся в
+    # истории выше), поэтому промоушен к нему не применяется.
+    if preview.draft.photos and not details.previous_message_ids:
+        promoted = await _promote_live_post(
+            update,
+            context,
+            details,
+            html=preview.html,
+            photos=tuple(preview.draft.photos),
+        )
+        if promoted is not None:
+            return await _render_delivered(
+                update,
+                context,
+                promoted,
+                notice=notice or "✅ Анонс готов: он уже отправлен в этот чат.",
             )
     try:
         with SessionLocal() as session:
@@ -3805,6 +3921,101 @@ async def _finish_and_deliver(
         return await _render_preview_error(update, context, details, str(exc))
     _set_details(_ui(context), publication.draft)
     return await _run_announcement_publication(update, context, publication)
+
+
+async def _promote_live_post(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+    details,
+    *,
+    html: str,
+    photos: tuple[str, ...],
+):
+    """
+    Признаёт подтверждённый верхний блок готовым постом без новой отправки.
+
+    S4 п.5: живой блок — это и есть анонс, который видит автор. Если его
+    состав и текст совпадают с текущим payload, отправлять второй такой же
+    пост нельзя: Telegram-история показала бы две копии.
+
+    Совпадение проверяется по отпечатку, который `_sync_live` записывает
+    после подтверждённой отправки/правки блока. Перед сверкой блок
+    синхронизируется: после рестарта `user_data` пуст, и только фактическая
+    правка/создание блока доказывает, что в чате лежит именно текущая версия.
+
+    Возвращает обновлённый черновик, если блок стал `sent`, иначе None —
+    тогда вызывающий собирает и отправляет новую версию обычным путём.
+    """
+    previous_ids = tuple(details.previous_message_ids)
+    user_data = ctx.data(context)
+    try:
+        await _sync_live(update, context, details)
+    except Exception as exc:  # noqa: BLE001 — без доказанной синхронизации нет финала
+        logger.info("Живой блок #%s не синхронизирован: %s", details.draft_id, exc)
+        return None
+    state = wizard_live.live_state(user_data)
+    current = _delivery_fingerprint(html, photos)
+    ids = tuple(int(item) for item in state.get("ids") or () if isinstance(item, int))
+    # Дефект S4-1: блок без фото не может стать готовым медиапостом. Отпечаток
+    # у пустого текста один и тот же с фото и без них (подпись пустая), поэтому
+    # дополнительно сверяется фактический состав показанного блока.
+    shown_photos = int(state.get("photo_count") or 0)
+    if (
+        not ids
+        or int(state.get("draft_id") or 0) != int(details.draft_id)
+        or state.get("fingerprint") != current
+        or shown_photos != len(photos)
+    ):
+        return None
+    total = len(delivery.media_batches(len(photos))) or 1
+    progress: dict[str, object] = {
+        "fingerprint": current,
+        "step": total,
+        "ids": list(ids),
+        "total": total,
+    }
+    if previous_ids:
+        progress["previous_ids"] = list(previous_ids)
+    try:
+        with SessionLocal() as session:
+            # Существующий путь: заморозка payload → подтверждённый прогресс →
+            # `sent`. Триггеры 13/14 допускают этот переход, потому что
+            # published_at, frozen payload и текущие `ids` согласованы.
+            begin_announcement_publication(
+                session,
+                actor_telegram_user_id=_user_id(update),
+                draft_id=details.draft_id,
+                expected_revision=details.revision,
+                today=app_today(),
+            )
+            record_announcement_publication_progress(
+                session,
+                actor_telegram_user_id=_user_id(update),
+                draft_id=details.draft_id,
+                progress=progress,
+            )
+            promoted = mark_announcement_publication_sent(
+                session,
+                actor_telegram_user_id=_user_id(update),
+                draft_id=details.draft_id,
+                message_ids=list(ids),
+                fingerprint=current,
+            )
+    except Exception as exc:  # noqa: BLE001 — не выдаём успех без записи в БД
+        logger.warning(
+            "Живой блок #%s не удалось признать доставленным: %s",
+            details.draft_id,
+            exc,
+        )
+        return None
+    replaced = [mid for mid in previous_ids if mid not in ids]
+    if replaced:
+        # Заменённую прошлую версию убираем только после подтверждённого
+        # перехода в `sent`: до этого она оставалась единственной копией.
+        await screen.cleanup_messages(context.bot, ctx.chat(update).id, replaced)
+    _set_details(_ui(context), promoted)
+    wizard_live.forget_live_state(user_data)
+    return promoted
 
 
 async def _render_delivered(
@@ -4003,34 +4214,53 @@ async def _run_announcement_publication(
     user_id = _user_id(update)
     draft_id = publication.draft.draft_id
     chat_id = ctx.chat(update).id
-    delivery = dict(publication.progress)
+    progress = dict(publication.progress)
+
+    # S4 §5.6: с фото пустой текст уходит без подписи. В замороженном
+    # payload лежит техническая заглушка (`.`) или невидимый маркер пустой
+    # подписи (их требует форма публикации), но подписью они не становятся —
+    # отпечаток от этого не меняется.
+    text = publication.text
+    if publication.photos and (
+        text == PLACEHOLDER_TEXT or not delivery.visible_text(text)
+    ):
+        text = ""
 
     def _persist_progress(snapshot: dict) -> None:
-        with SessionLocal() as session:
-            record_announcement_publication_progress(
-                session,
-                actor_telegram_user_id=user_id,
-                draft_id=draft_id,
-                progress=snapshot,
+        # Сбой записи НЕ отменяет уже подтверждённую отправку: id остаются
+        # в памяти прогресса и будут сохранены следующей удачной записью или
+        # фиксацией `sent`. Иначе повтор отправил бы подтверждённое заново.
+        try:
+            with SessionLocal() as session:
+                record_announcement_publication_progress(
+                    session,
+                    actor_telegram_user_id=user_id,
+                    draft_id=draft_id,
+                    progress=snapshot,
+                )
+        except Exception as exc:  # noqa: BLE001 — прогресс досохраним позже
+            logger.warning(
+                "Не удалось сохранить прогресс анонса #%s: %s", draft_id, exc
             )
-
-    from handlers.post_creation import send_rendered_post
 
     # Адреса ПРОШЛОЙ доставленной версии. Их нельзя путать с id текущей
     # отправки: удалять можно только прошлую копию и только после того, как
     # новая версия подтверждена целиком.
     previous_ids = tuple(publication.draft.previous_message_ids)
     try:
-        sent_ids = await send_rendered_post(
+        sent_ids = await delivery.send_announcement_post(
             context.bot,
             chat_id,
-            publication.text,
+            text,
             list(publication.photos),
-            progress=delivery,
+            progress=progress,
             on_progress=_persist_progress,
         )
     except Exception as exc:  # noqa: BLE001 — сбой Telegram/БД должен быть виден
         logger.exception("Отправка анонса #%s не завершена: %s", draft_id, exc)
+        # Подтверждённое до сбоя могло не попасть в БД из-за сбоя записи —
+        # досохраняем из памяти, чтобы продолжение не отправило дубль.
+        _persist_progress(progress)
         error_text = _publication_error_text(exc)
         try:
             with SessionLocal() as session:
@@ -4076,6 +4306,9 @@ async def _run_announcement_publication(
             draft_id,
             exc,
         )
+        # Подтверждённые id уже есть в памяти: сохраняем их как прогресс,
+        # чтобы следующая попытка дослала только недостающее.
+        _persist_progress(progress)
         try:
             with SessionLocal() as session:
                 details = get_announcement_draft(
@@ -4247,14 +4480,52 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int
     )
 
 
+# Сообщения-источники фото по партиям альбома. Удаляются только после
+# подтверждённой записи И только если партия принята целиком: при превышении
+# лимита ввод остаётся в чате (S4 §5.2 п.2).
+BATCH_INPUTS_KEY = "aw_photo_batch_inputs"
+
+
+def _track_batch_input(user_data: dict[str, Any], key: str, message) -> None:
+    message_id = getattr(message, "message_id", None)
+    if message_id is None:
+        return
+    stored = user_data.get(BATCH_INPUTS_KEY)
+    if not isinstance(stored, dict):
+        stored = {}
+        user_data[BATCH_INPUTS_KEY] = stored
+    items = stored.setdefault(key, [])
+    if int(message_id) not in items:
+        items.append(int(message_id))
+
+
+def _take_batch_inputs(user_data: dict[str, Any], key: str) -> list[int]:
+    stored = user_data.get(BATCH_INPUTS_KEY)
+    if not isinstance(stored, dict):
+        return []
+    items = stored.pop(key, []) or []
+    if not stored:
+        user_data.pop(BATCH_INPUTS_KEY, None)
+    return [int(mid) for mid in items]
+
+
+def _drop_batch_inputs(user_data: dict[str, Any], key: str) -> None:
+    _take_batch_inputs(user_data, key)
+
+
 async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     """
-    Принимает одиночные фото и альбомы только на этапе обзора.
+    Принимает фото и альбомы: партия целиком, затем автоматический финал.
 
-    Каждый Update сохраняется в SQLite отдельно, поэтому альбом из
-    нескольких сообщений не теряется при рестарте. Дубликат file_id
-    идемпотентен. После подтверждённой записи исходное сообщение удаляется
-    best-effort; при ошибке — остаётся, данные не теряются.
+    Telegram доставляет каждое фото альбома отдельным Update с общим
+    `media_group_id`, поэтому партия собирается в буфере `wizard_photos` и
+    закрывается короткой паузой (или следующим действием пользователя).
+    Сохранение в SQLite идёт при закрытии партии: до её окончания анонс НЕ
+    считается готовым, иначе трёхсоставный альбом дал бы три финала.
+
+    Одиночное фото без `media_group_id` — партия из одного снимка, она
+    закрывается сразу. 11-е фото отклоняется с объяснением: уже принятые
+    снимки не теряются, а сообщение пользователя не удаляется.
     """
     ui = _ui(context)
     draft_id = ui.get("draft_id")
@@ -4295,44 +4566,189 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> in
                 "Анонс и прогресс сохранены."
             ),
         )
-    before = len(details.photos)
+    if details.publication_sent:
+        # Уже доставленный анонс: партия НЕ завершает его автоматически
+        # (новую версию отправляет «Применить изменения»). Поэтому ждать
+        # весь альбом незачем: каждый снимок сохраняется сразу, а ввод
+        # удаляется после подтверждённой записи (S4 §5.3).
+        return await _add_photo_to_delivered(update, context, details, photo, message)
+    user_data = ctx.data(context)
+    key = wizard_photos.buffer_photo(
+        user_data,
+        getattr(message, "media_group_id", None),
+        photo.file_id,
+    )
+    _track_batch_input(user_data, key, message)
+    # Каждый снимок сохраняется сразу (идемпотентно, с CAS и лимитом 10):
+    # рестарт посреди альбома ничего не теряет. Готовность наступает
+    # отдельно — только когда партия целиком закрыта.
     try:
-        with SessionLocal() as session:
-            updated = add_announcement_photo(
-                session,
-                actor_telegram_user_id=_user_id(update),
-                draft_id=details.draft_id,
-                file_id=photo.file_id,
-                expected_revision=details.revision,
-            )
+        batch = wizard_photos.add_photo_batch(
+            telegram_user_id=_user_id(update),
+            draft_id=details.draft_id,
+            revision=details.revision,
+            file_ids=[photo.file_id],
+            # Фабрика сессий берётся из этого модуля: тесты подменяют именно
+            # её временной SQLite, рабочая база не затрагивается.
+            session_factory=SessionLocal,
+        )
     except (AnnouncementError, TemplateError, TemplateCompileError, BrickError) as exc:
-        await _render_photos(
+        screen.track_failed_input(user_data, f"aw-photo:{details.draft_id}", message)
+        _drop_batch_inputs(user_data, key)
+        return await wizard_photos.render_photo_step(
             update,
             context,
             details,
-            notice=f"Фото не добавлено: {_short(exc, 300)}",
+            notice=wizard_photos.rejected_photo_notice(exc),
+            announcement_is_empty=_announcement_is_empty(update, details),
         )
-        screen.track_failed_input(
-            ctx.data(context), f"aw-photo:{details.draft_id}", message
+    wizard_photos.absorb_result(user_data, key, batch)
+    _set_details(ui, batch.details)
+    if getattr(message, "media_group_id", None) is None:
+        # Одиночный снимок — целая партия: финал наступает сразу, без паузы.
+        return await _close_photo_batch(update, context, key)
+    wizard_photos.schedule_album_close(
+        getattr(context, "application", None),
+        user_data,
+        lambda: _close_photo_batch(update, context, key),
+    )
+    # До закрытия партии экран не перерисовываем: анонс ещё не готов.
+    return AW_PREVIEW
+
+
+async def _add_photo_to_delivered(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+    details,
+    photo,
+    message,
+) -> int:
+    """
+    Фото к уже доставленному анонсу: сохранить сразу, без автофинала.
+
+    Готовый пост не пересобирается на каждую партию — новую версию
+    отправляет явное «Применить изменения» (S4 §5.3). Поэтому ожидание
+    целого альбома здесь не нужно: каждый `file_id` сохраняется с CAS,
+    11-е фото отклоняется, а сообщение пользователя удаляется только после
+    подтверждённой записи.
+    """
+    user_data = ctx.data(context)
+    try:
+        batch = wizard_photos.add_photo_batch(
+            telegram_user_id=_user_id(update),
+            draft_id=details.draft_id,
+            revision=details.revision,
+            file_ids=[photo.file_id],
+            session_factory=SessionLocal,
         )
-        return AW_PREVIEW
-    _set_details(ui, updated)
-    added = len(updated.photos) > before
-    await screen.cleanup_preview(context, ctx.chat(update).id, ctx.data(context))
-    result = await _render_photos(
+    except (AnnouncementError, TemplateError, TemplateCompileError, BrickError) as exc:
+        # Ввод остаётся в чате: пользователь видит, что именно не принято.
+        screen.track_failed_input(user_data, f"aw-photo:{details.draft_id}", message)
+        return await _render_photos(
+            update,
+            context,
+            details,
+            notice=wizard_photos.rejected_photo_notice(exc),
+        )
+    _set_details(_ui(context), batch.details)
+    if batch.changed or batch.duplicate:
+        await screen.drop_user_input(update, context)
+    return await _render_photos(
         update,
         context,
-        updated,
-        notice=(
-            "✅ Фото добавлено."
-            if added
-            else "Это фото уже есть в анонсе — дубль не создан."
-        ),
+        batch.details,
+        notice=wizard_photos.batch_notice(batch),
     )
-    # Ввод надёжно сохранён (или уже присутствовал) — временный источник
-    # можно удалить. Неудача очистки не отменяет сохранение.
-    await screen.drop_user_input(update, context)
-    return result
+
+
+async def _close_photo_batch(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+    key: str,
+) -> int:
+    """
+    Закрывает партию фото: решает, готов ли анонс, и запускает автофинал.
+
+    Снимки уже сохранены по одному; здесь фиксируется «партия получена
+    целиком». Отказ по лимиту 10 не теряет принятые фото и оставляет
+    сообщение пользователя в чате. Принятая партия удаляет ввод только
+    после подтверждённой записи.
+    """
+    user_data = ctx.data(context)
+    ui = _ui(context)
+    draft_id = ui.get("draft_id")
+    wizard_photos.take_batch(user_data, key)
+    result = wizard_photos.take_result(user_data, key)
+    if not draft_id or result is None:
+        return AW_PREVIEW
+    user_id = _user_id(update)
+    try:
+        details = _session_details(user_id, int(draft_id))
+    except (AnnouncementNotFoundError, AnnouncementActorError, AnnouncementError):
+        return await _resume_current(update, context)
+    inputs = _take_batch_inputs(user_data, key)
+    if result.rejected:
+        # Лимит 10: объясняем отказ, принятые фото сохранены, ввод оставляем
+        # в чате — пользователь видит, что именно не принято.
+        return await wizard_photos.render_photo_step(
+            update,
+            context,
+            details,
+            notice=wizard_photos.limit_notice(result),
+            announcement_is_empty=_announcement_is_empty(update, details),
+        )
+    # Партия подтверждённо сохранена. Ввод удаляется только после
+    # ПОДТВЕРЖДЁННОЙ доставки: при превышении лимита экран обещает, что
+    # сообщение пользователя осталось (S4 §5.2 п.2), и это должно быть правдой.
+    # Исключение — фото к уже доставленному анонсу: там ввод больше не нужен
+    # (см. ветку `publication_sent`).
+    _set_details(ui, details)
+    if details.publication_sent:
+        # Фото добавлены к уже доставленному анонсу: новая версия — только по
+        # «Применить изменения», иначе каждая партия создавала бы замену.
+        await screen.cleanup_messages(context.bot, ctx.chat(update).id, inputs)
+        return await _render_photos(
+            update,
+            context,
+            details,
+            notice=wizard_photos.batch_notice(result),
+        )
+    # Вся партия принята → анонс готов автоматически, без кнопки «Готово».
+    state = await _finish_and_deliver(
+        update,
+        context,
+        details,
+        notice=wizard_photos.batch_notice(result) or None,
+    )
+    # Ввод удаляется только после ПОДТВЕРЖДЁННОЙ доставки (S4 §5.2 п.2):
+    # при превышении лимита экран обещает, что сообщение пользователя
+    # осталось, и это должно быть правдой.
+    try:
+        delivered = _session_details(user_id, details.draft_id)
+    except (AnnouncementNotFoundError, AnnouncementActorError, AnnouncementError):
+        delivered = None
+    if delivered is not None and delivered.publication_sent:
+        await screen.cleanup_messages(context.bot, ctx.chat(update).id, inputs)
+    return state
+
+
+async def _flush_photo_batches(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+) -> None:
+    """
+    Досылает незавершённую партию перед следующим действием пользователя.
+
+    Пользователь не должен ждать дебаунс, если уже нажал кнопку: партия
+    считается завершённой. Ошибка закрытия не мешает основному действию.
+    """
+    user_data = ctx.data(context)
+    wizard_photos.cancel_pending_task(user_data)
+    for key in wizard_photos.pending_keys(user_data):
+        try:
+            await _close_photo_batch(update, context, key)
+        except Exception as exc:  # noqa: BLE001 — основное действие важнее
+            logger.info("Незавершённая партия фото не закрыта: %s", exc)
 
 
 async def _exit_to_main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
@@ -5285,9 +5701,8 @@ async def handle_preview_callback(
         await _answer(update)
         return await _render_photos(update, context, details, page=int(parts[3]))
     if action == "aw_photo_none" and len(parts) == 3:
-        # S3 п.6: «Без фотографий» — это и есть финал шага фото, кнопки
-        # «Готово» нет. Используется существующая доставка без изменений:
-        # расширенная работа с альбомами и лимитами — S4.
+        # S4 п.2: «Без фотографий» на шаге фото — это финал: шаг собран в
+        # `wizard_photos`, доставка идёт общим путём без кнопки «Готово».
         if not all(item.isdigit() for item in parts[1:]):
             return await _stale(update, context)
         guarded = _guard_details(update, context, int(parts[1]), int(parts[2]))
@@ -5304,6 +5719,44 @@ async def handle_preview_callback(
             details,
             notice="📷 Анонс останется без вложений.",
         )
+    if action == "aw_photo_drop" and len(parts) == 3:
+        # Проблемный экран §5.2 п.4: отказ от фотографий возвращает лимит
+        # 4096 и НЕ теряет текст. Это подтверждённый отказ, поэтому фото
+        # убираются из черновика — иначе доставка снова упёрлась бы в 1024.
+        # Вернуть снимки можно через «Фотографии».
+        if not all(item.isdigit() for item in parts[1:]):
+            return await _stale(update, context)
+        guarded = _guard_details(update, context, int(parts[1]), int(parts[2]))
+        if guarded is None:
+            return await _stale(update, context)
+        _ui_data, details = guarded
+        if _edit_blocked(details):
+            await _answer(update, "Отправка уже начата.", alert=True)
+            return await _render_publish_status(update, context, details)
+        try:
+            with SessionLocal() as session:
+                updated = clear_announcement_photos(
+                    session,
+                    actor_telegram_user_id=_user_id(update),
+                    draft_id=details.draft_id,
+                    expected_revision=details.revision,
+                )
+        except AnnouncementError as exc:
+            await _answer(update, str(exc), alert=True)
+            return await _render_publish_status(update, context, details)
+        _set_details(_ui(context), updated)
+        _ui(context).pop("length_problem", None)
+        await _answer(update, "Лимит снова 4096 символов.")
+        return await _finish_and_deliver(
+            update,
+            context,
+            updated,
+            notice=(
+                "🚫 Отправляем без фотографий: лимит снова 4096 символов. "
+                "Снимки убраны из черновика — вернуть их можно через "
+                "«📷 Фотографии»."
+            ),
+        )
     if action == "aw_photo_add" and len(parts) == 3:
         guarded = _guided()
         if guarded is None:
@@ -5313,14 +5766,15 @@ async def handle_preview_callback(
             await _answer(update, "Отправка уже начата.", alert=True)
             return await _render_publish_status(update, context, details)
         await _answer(update)
-        return await _render_photos(
+        return await wizard_photos.render_photo_step(
             update,
             context,
             details,
             notice=(
-                "Отправьте одну фотографию или альбом. Можно отправить "
-                "несколько сообщений подряд — все снимки добавятся."
+                "Отправьте одну фотографию или альбом — анонс готовится "
+                "сразу после получения всей партии."
             ),
+            announcement_is_empty=_announcement_is_empty(update, details),
         )
     if action == "aw_photo_del" and len(parts) == 4:
         if not all(item.isdigit() for item in parts[1:]):

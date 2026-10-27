@@ -593,6 +593,50 @@ class ConfirmKnownRecipientTests(TransferFixture):
         self.assertFalse(is_place_admin(self.session, self.TARGET_TG, self.place.id))
         self.assertEqual(len(self._history()), 1)
 
+    def test_lost_race_reports_already_confirmed_not_superseded(self) -> None:
+        """
+        Проигравший гонку получает фактический исход, а не устаревший «superseded».
+
+        Детерминированное воспроизведение флейка: вторая сессия читает
+        предложение ДО чужого подтверждения (устаревший `row.status` в
+        identity map) и заходит в ветку «администратор изменился». Раньше она
+        безусловно возвращала `superseded` и игнорировала то, что условное
+        закрытие pending уже не сработало — победитель подтвердил предложение.
+        """
+        result = self._create_known()
+        assert result.transfer is not None
+        transfer_id = result.transfer.transfer_id
+
+        stale = self.Session()
+        self.addCleanup(stale.close)
+        # Устаревшая копия строки: статус прочитан до победы конкурента.
+        # Ссылку держим: identity map SQLAlchemy хранит объекты слабо, и без
+        # неё `session.get` перечитал бы уже подтверждённую строку.
+        stale_row = stale.get(AdminTransfer, transfer_id)
+        assert stale_row is not None
+        self.assertEqual(stale_row.status, STATUS_PENDING)
+        # Конкурент подтверждает предложение в другой сессии.
+        with self.Session() as other:
+            winner = confirm_admin_transfer(
+                other,
+                actor_telegram_user_id=self.TARGET_TG,
+                transfer_id=transfer_id,
+            )
+        self.assertEqual(winner.status, "confirmed")
+
+        loser = confirm_admin_transfer(
+            stale,
+            actor_telegram_user_id=self.TARGET_TG,
+            transfer_id=transfer_id,
+        )
+        self.assertEqual(
+            loser.status,
+            "already_confirmed",
+            "фактический исход важнее устаревшего снимка строки",
+        )
+        self.assertTrue(is_place_admin(self.session, self.TARGET_TG, self.place.id))
+        self.assertEqual(len(self._history()), 2, "права не менялись повторно")
+
     def test_concurrent_confirmation_has_single_winner(self) -> None:
         result = self._create_known()
         assert result.transfer is not None

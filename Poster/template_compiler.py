@@ -57,6 +57,7 @@ from template_types import (
     TEMPLATE_SECTION_FOOTER,
     TEMPLATE_SECTION_HEADER,
 )
+from utils.tg_html import utf16_len
 from utils.validators import normalize_url
 
 _SECTION_ORDER = (
@@ -467,6 +468,61 @@ def render_template(
 
 # Техническая заглушка Telegram: пустое сообщение отправить нельзя.
 PLACEHOLDER_TEXT = "."
+
+# Лимиты Telegram на один анонс — по ВИДИМОМУ тексту после разбора
+# разметки (S4 §5.1). Сырые HTML-теги символами сообщения не считаются.
+ANNOUNCEMENT_TEXT_LIMIT = 4096
+ANNOUNCEMENT_CAPTION_LIMIT = 1024
+
+
+def visible_text_length(rendered_html: str) -> int:
+    """
+    Длина видимого текста в единицах Telegram (UTF-16 code units).
+
+    Считается после разбора разметки: `visible_announcement_text` снимает
+    теги и раскрывает HTML-сущности, поэтому `&amp;` — один символ, а не
+    пять, и ограничение совпадает с фактическим сообщением.
+    """
+    return utf16_len(visible_announcement_text(rendered_html))
+
+
+def announcement_text_limit(*, has_photos: bool) -> int:
+    """Предел текста: без фото 4096, с фото (подпись) — 1024."""
+    return ANNOUNCEMENT_CAPTION_LIMIT if has_photos else ANNOUNCEMENT_TEXT_LIMIT
+
+
+@dataclass(frozen=True)
+class AnnouncementLengthCheck:
+    """
+    Результат измерения готового текста (S4 §5.1).
+
+    `length` — видимые символы после разбора entities; `limit` — предел
+    Telegram для выбранного вида сообщения. Автосокращения нет: превышение
+    показывается пользователю отдельным экраном, данные сохраняются.
+    """
+
+    length: int
+    limit: int
+    has_photos: bool
+
+    @property
+    def over(self) -> bool:
+        return self.length > self.limit
+
+    @property
+    def excess(self) -> int:
+        return max(0, self.length - self.limit)
+
+
+def check_announcement_length(
+    rendered_html: str, *, has_photos: bool
+) -> AnnouncementLengthCheck:
+    """Измеряет готовый анонс против лимита 4096/1024 без его изменения."""
+    return AnnouncementLengthCheck(
+        length=visible_text_length(rendered_html),
+        limit=announcement_text_limit(has_photos=has_photos),
+        has_photos=has_photos,
+    )
 
 
 def render_announcement(

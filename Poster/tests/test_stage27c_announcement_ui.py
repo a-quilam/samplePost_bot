@@ -252,74 +252,94 @@ class AnnouncementAutoDeliveryPhotoTests(unittest.TestCase):
         self.assertEqual(len(h.posts()), posts_before)
 
     @scenario_test
-    async def test_single_photo_caption_failure_is_partial_and_resumes(self, h) -> None:
-        await h.text("/start")
-        long_body = ("Длинный текст анонса " * 150) + "[main]"
-        draft, _bricks = await _personal_delivered(h, body=long_body)
-        await _open_photos(h)
-        await h.photo("long-photo")
+    async def test_single_photo_caption_failure_is_failed_and_resumes(self, h) -> None:
+        """Сбой единственной операции (фото с подписью) — честный `failed`.
 
-        h.bot.fail_after["message"] = 0
+        S4 §5.1: текст с фото не режется на части и не уходит отдельным
+        сообщением, поэтому отправка — ровно одна операция. Пока Telegram не
+        подтвердил её, статус `failed` (а не `partial`): успех фиксируется
+        только когда доставлено ВСЁ. Прошлая версия остаётся в чате, а
+        продолжение досылает ровно один снимок — без дубля.
+        """
+        await h.text("/start")
+        draft, _bricks = await _personal_delivered(h)
+        await _open_photos(h)
+        await h.photo("caption-photo")
+        self.assertEqual(len(h.posts()), 1, "фото к готовому анонсу не публикуют")
+
+        h.bot.fail_after["photo"] = 0
         await h.callback(_callback(h, "aw_apply"))
 
-        partial = _stored(h, draft.id)
-        self.assertEqual(partial.publication_status, "partial")
-        self.assertEqual(partial.publication_step, 1)
-        self.assertEqual(len(partial.publication_progress["ids"]), 1)
-        self.assertFalse(partial.publication_can_reset)
-        self.assertIn("отправлен частично", h.screen_text())
+        failed = _stored(h, draft.id)
+        self.assertEqual(failed.publication_status, "failed")
+        self.assertEqual(failed.publication_step, 0)
+        self.assertEqual(failed.publication_total, 1)
+        self.assertEqual(failed.publication_progress["ids"], [])
+        self.assertFalse(failed.publication_can_reset)
+        self.assertIn("Ни одна операция", h.screen_text())
+        self.assertIn(
+            "Повторить отправку", " ".join(label for label, _data in h.screen_buttons())
+        )
         self.assertFalse(_callbacks(h, "aw_pub_reset"))
         # Прошлая доставленная версия остаётся в чате до успеха новой:
         # её адреса сохранены, но не выдаются за id текущей отправки.
-        self.assertTrue(partial.previous_message_ids)
-        self.assertNotEqual(
-            set(partial.previous_message_ids),
-            set(partial.publication_progress["ids"]),
-        )
+        self.assertTrue(failed.previous_message_ids)
+        self.assertEqual(failed.delivered_message_ids, ())
         self.assertIn("В чате остаётся прошлая доставленная версия", h.screen_text())
+        # Ввод-фото не удалён: подтверждённой доставки не было.
+        self.assertNotIn(
+            h.calls[-1].get("message_id"),
+            h.deleted_ids(),
+        )
 
         h.bot.fail_after.clear()
         photos_before = len(_post_types(h, {"photo"}))
+        old_ids = set(failed.previous_message_ids)
         await h.callback(_callback(h, "aw_pub_resume"))
         sent = _stored(h, draft.id)
         self.assertEqual(sent.publication_status, "sent")
-        # Фото из подтверждённого шага не отправлялось второй раз.
-        self.assertEqual(len(_post_types(h, {"photo"})), photos_before)
-        self.assertIn("Длинный текст анонса", h.posts()[-1] or "")
+        # Фото отправлено ровно один раз: подтверждённых операций не было.
+        self.assertEqual(len(_post_types(h, {"photo"})), photos_before + 1)
+        self.assertIn("Значение", h.posts()[-1] or "")
+        # Прошлая версия удалена только после успеха новой.
+        self.assertTrue(old_ids <= set(h.deleted_ids()))
 
     @scenario_test
-    async def test_eleven_photos_use_two_groups_and_partial_resume(self, h) -> None:
+    async def test_eleven_photos_are_capped_and_delivered_as_one_group(self, h) -> None:
+        """Лимит 10: 11-е фото отклонено, принятые 10 уходят одной группой."""
         await h.text("/start")
         draft, _bricks = await _personal_delivered(h)
         await _open_photos(h)
         for index in range(11):
-            await h.photo(f"group-photo-{index}")
+            update = await h.photo(f"group-photo-{index}")
         stored = _draft_by_id(h, draft.id)
-        self.assertEqual(len(json.loads(stored.photos)), 11)
+        self.assertEqual(
+            tuple(json.loads(stored.photos)),
+            tuple(f"group-photo-{index}" for index in range(10)),
+        )
+        # Отказ объяснён на экране, а принятые фото не потеряны.
+        self.assertIn("максимум", h.screen_text())
+        self.assertIn("1", h.screen_text())
+        # Сообщение, которым прислали 11-е фото, не удалено: автор видит,
+        # что именно не принято.
+        self.assertNotIn(update.message.message_id, h.deleted_ids())
 
-        h.bot.fail_after["media_group"] = 1
         await h.callback(_callback(h, "aw_apply"))
-        partial = _stored(h, draft.id)
-        self.assertEqual(partial.publication_status, "partial")
-        self.assertEqual(partial.publication_step, 1)
-        self.assertEqual(partial.publication_total, 2)
-        self.assertFalse(partial.publication_can_reset)
-
-        h.bot.fail_after.clear()
-        await h.callback(_callback(h, "aw_pub_resume"))
         sent = _stored(h, draft.id)
         self.assertEqual(sent.publication_status, "sent")
+        self.assertEqual(sent.publication_total, 1)
         groups = _post_types(h, {"media_group"})
-        # Одна группа до сбоя и одна после resume: первая не повторялась,
-        # 11 фото укладываются ровно в 2 группы (10 + 1).
-        self.assertEqual(len(groups), 2)
+        self.assertEqual(len(groups), 1)
         self.assertEqual(
             [getattr(item, "media", None) for item in groups[0]["media"]],
             [f"group-photo-{index}" for index in range(10)],
         )
+        # Хвостового sendPhoto нет: 10 фото — ровно одна группа.
+        self.assertEqual(_post_types(h, {"photo"}), [])
         self.assertEqual(
-            [getattr(item, "media", None) for item in groups[1]["media"]],
-            ["group-photo-10"],
+            [getattr(item, "caption", None) for item in groups[0]["media"]][:-1],
+            [None] * 9,
+            "подпись разрешена только у последнего фотосегмента",
         )
 
 
