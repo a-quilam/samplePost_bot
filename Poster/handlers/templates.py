@@ -107,6 +107,9 @@ TEXT_PREVIEW_LIMIT = 1200
 ERROR_TEXT_LIMIT = 1400
 
 PHASE_HUB = "hub"
+# Poster 2.0 S2: список личных шаблонов как вход в анонс. Тап по названию
+# сразу начинает конструктор, «✏️» открывает карточку для правки.
+PHASE_PICK = "pick"
 PHASE_CARD = "card"
 PHASE_SECTION_EDIT = "section_edit"
 PHASE_CONFIRM_SAVE = "confirm_save"
@@ -153,7 +156,7 @@ _CREATE_PHASES = frozenset(
     {PHASE_AWAIT_NAME, PHASE_CREATE_CHOICE, PHASE_CREATE_CONFIRM, PHASE_CREATE_SAVING}
 )
 
-PHASES = frozenset({PHASE_HUB}) | _TEMPLATE_PHASES | _CREATE_PHASES
+PHASES = frozenset({PHASE_HUB, PHASE_PICK}) | _TEMPLATE_PHASES | _CREATE_PHASES
 
 _TEXT_INPUT_ERROR = "Текст не принят. Исправьте его и отправьте новой полной секцией."
 
@@ -305,6 +308,15 @@ def _valid_failed_inputs(value: object) -> list[int]:
 # --- Состояние ---------------------------------------------------------------
 
 
+def _new_pick(page: int = 0) -> dict:
+    """Состояние входа «📝 Создать по личному шаблону» (Poster 2.0 S2).
+
+    Отдельная фаза списка: тап по названию начинает анонс. Кнопки создания и
+    правки ведут в общий раздел шаблонов — данные те же, меняется только вход.
+    """
+    return {"phase": PHASE_PICK, "page": _page_value(page)}
+
+
 def _new_hub(page: int = 0) -> dict:
     return {"phase": PHASE_HUB, "page": _page_value(page)}
 
@@ -336,7 +348,7 @@ def _valid_state(state: object) -> TypeGuard[dict[str, Any]]:
     if phase not in PHASES:
         return False
 
-    if phase == PHASE_HUB:
+    if phase in {PHASE_HUB, PHASE_PICK}:
         raw_page = state.get("page", 0)
         return _non_negative_int(raw_page)
 
@@ -501,6 +513,77 @@ def _hub_content(
         rows.append(navigation)
     rows.append([InlineKeyboardButton("➕ Создать шаблон", callback_data="tp_create")])
     rows.append([InlineKeyboardButton("◀️ Назад", callback_data="main_menu")])
+    return "\n".join(lines), InlineKeyboardMarkup(rows)
+
+
+def _pick_content(
+    templates: list[TemplateDetails], page: int
+) -> tuple[str, InlineKeyboardMarkup]:
+    """
+    Экран «📝 Создать по личному шаблону» (Poster 2.0 S2).
+
+    Тап по названию сразу начинает анонс по этому шаблону — без карточки и
+    подтверждений. Правка и создание остаются в том же разделе: «✏️» рядом с
+    названием открывает карточку, «➕ Создать шаблон» — мастер создания.
+    """
+    total = len(templates)
+    if total == 0:
+        text = (
+            "📝 Создать по личному шаблону\n\n"
+            "У вас пока нет личных шаблонов. Шаблон определяет, как будет "
+            "выглядеть текст анонса, и подходит для разных площадок.\n\n"
+            "Создайте шаблон — и сразу сможете начать по нему анонс."
+        )
+        keyboard = InlineKeyboardMarkup(
+            [
+                [InlineKeyboardButton("➕ Создать шаблон", callback_data="tp_create")],
+                [InlineKeyboardButton("◀️ Главное меню", callback_data="main_menu")],
+            ]
+        )
+        return text, keyboard
+
+    page = min(_page_value(page), (total - 1) // PAGE_SIZE)
+    offset = page * PAGE_SIZE
+    page_items = templates[offset : offset + PAGE_SIZE]
+    lines = [
+        "📝 Создать по личному шаблону",
+        "",
+        "Выберите шаблон — анонс начнётся сразу, без лишних подтверждений. "
+        "Правка шаблона — кнопкой «✏️» рядом с названием.",
+        "",
+        f"Всего шаблонов: {total}.",
+    ]
+    for index, template in enumerate(page_items, start=offset + 1):
+        lines.append(f"{index}. {_h(template.display_name)} · v{template.revision}")
+    if total > PAGE_SIZE:
+        lines.append(f"Показаны {offset + 1}–{offset + len(page_items)} из {total}.")
+
+    rows: list[list[InlineKeyboardButton]] = []
+    for template in page_items:
+        rows.append(
+            [
+                InlineKeyboardButton(
+                    _short(f"🚀 {template.display_name}"),
+                    callback_data=f"tp_pick:{template.template_id}",
+                ),
+                InlineKeyboardButton(
+                    "✏️", callback_data=f"tp_open:{template.template_id}"
+                ),
+            ]
+        )
+    navigation: list[InlineKeyboardButton] = []
+    if page > 0:
+        navigation.append(
+            InlineKeyboardButton("◀️", callback_data=f"tp_pickpage:{page - 1}")
+        )
+    if offset + PAGE_SIZE < total:
+        navigation.append(
+            InlineKeyboardButton("▶️", callback_data=f"tp_pickpage:{page + 1}")
+        )
+    if navigation:
+        rows.append(navigation)
+    rows.append([InlineKeyboardButton("➕ Создать шаблон", callback_data="tp_create")])
+    rows.append([InlineKeyboardButton("◀️ Главное меню", callback_data="main_menu")])
     return "\n".join(lines), InlineKeyboardMarkup(rows)
 
 
@@ -1263,6 +1346,9 @@ async def _render_phase(
         if phase == PHASE_HUB:
             templates = list_personal_templates(session, telegram_user_id)
             text, keyboard = _hub_content(templates, _page_value(state.get("page")))
+        elif phase == PHASE_PICK:
+            templates = list_personal_templates(session, telegram_user_id)
+            text, keyboard = _pick_content(templates, _page_value(state.get("page")))
         elif phase in _CREATE_PHASES:
             if phase == PHASE_AWAIT_NAME:
                 text, keyboard = _create_name_content(state)
@@ -1574,6 +1660,44 @@ async def open_templates(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     await _render_phase(update, context, state, drop_input=True)
 
 
+async def open_template_picker(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> None:
+    """
+    «📝 Создать по личному шаблону»: список личных шаблонов первым экраном.
+
+    Раздел тот же, что «Мои шаблоны» (`/templates`), но вход сразу
+    ориентирован на запуск анонса: тап по названию начинает конструктор.
+    Правка и создание остаются доступны здесь же.
+    """
+    query = getattr(update, "callback_query", None)
+    if query is not None:
+        await query.answer()
+    await screen.reanchor_screen(update, context)
+    telegram_user_id = ctx.user(update).id
+    clear_place_session(telegram_user_id)
+    clear_admin_session(telegram_user_id)
+    clear_brick_session(telegram_user_id)
+    state = _new_pick()
+    await _render_phase(update, context, state, drop_input=True)
+
+
+async def handle_pick_page(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Пагинация списка выбора личного шаблона."""
+    query = ctx.query(update)
+    state = load_template_session(ctx.user(update).id)
+    if not _valid_state(state) or state.get("phase") != PHASE_PICK:
+        await query.answer(STALE_TEXT, show_alert=True)
+        return
+    page = _callback_id(query.data or "", "tp_pickpage:")
+    if page is None:
+        await query.answer(STALE_TEXT, show_alert=True)
+        return
+    await query.answer()
+    state["page"] = max(0, page)
+    await _render_phase(update, context, state)
+
+
 async def handle_page(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     query = ctx.query(update)
     state = load_template_session(ctx.user(update).id)
@@ -1624,7 +1748,9 @@ async def handle_open(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     if template_id is None:
         await query.answer(STALE_TEXT, show_alert=True)
         return
-    if state.get("phase") != PHASE_HUB and template_id != state.get("template_id"):
+    if state.get("phase") not in {PHASE_HUB, PHASE_PICK} and template_id != state.get(
+        "template_id"
+    ):
         await query.answer(STALE_TEXT, show_alert=True)
         return
     telegram_user_id = ctx.user(update).id
@@ -2315,7 +2441,7 @@ async def handle_save(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
 async def handle_create(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     query = ctx.query(update)
     state = load_template_session(ctx.user(update).id)
-    if not _valid_state(state) or state.get("phase") != PHASE_HUB:
+    if not _valid_state(state) or state.get("phase") not in {PHASE_HUB, PHASE_PICK}:
         await query.answer(STALE_TEXT, show_alert=True)
         return
     await query.answer()
@@ -2698,6 +2824,11 @@ def templates_handlers() -> list[BaseHandler]:
     return [
         CommandHandler("templates", open_templates),
         CallbackQueryHandler(open_templates, pattern=r"^templates$"),
+        # Poster 2.0 S2: вход «📝 Создать по личному шаблону» — список, где тап
+        # по названию сразу начинает анонс. Точка старта (`tp_pick:<id>`)
+        # зарегистрирована в announcement_wizard_handlers как entry_point.
+        CallbackQueryHandler(open_template_picker, pattern=r"^pick_template$"),
+        CallbackQueryHandler(handle_pick_page, pattern=r"^tp_pickpage:\d+$"),
         # Стандартный шаблон в кабинете места и возврат в карточку места.
         CallbackQueryHandler(open_standard_template, pattern=r"^tp_std:\d+$"),
         CallbackQueryHandler(handle_back_to_place, pattern=r"^tp_back_place:\d+$"),

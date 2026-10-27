@@ -298,7 +298,7 @@ class CommandRoutingTests(unittest.TestCase):
         self.assertIn("Неизвестная команда", h.reply_texts()[-1])
 
         await h.photo("stray-photo")
-        self.assertIn("Фото понадобится на шаге", h.screen_text())
+        self.assertIn("Фото добавляются в анонсе на шаге", h.screen_text())
         self.assertIsNone(h.dialog_state())
 
 

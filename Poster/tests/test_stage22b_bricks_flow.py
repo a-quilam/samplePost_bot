@@ -130,8 +130,11 @@ class BricksUiTests(unittest.TestCase):
     @scenario_test
     async def test_main_menu_entry_empty_state_and_back(self, h) -> None:
         await h.text("/start")
-        self.assertIn(("🧱 Мои кирпичики", "bricks"), h.screen_buttons())
-        await h.callback("bricks")
+        # Poster 2.0 S2: кирпичики открываются из «⚙️ Управление».
+        self.assertIn(("⚙️ Управление", "manage"), h.screen_buttons())
+        await h.callback("manage")
+        self.assertIn(("🧱 Кирпичики", "manage_bricks"), h.screen_buttons())
+        await h.callback("manage_bricks")
         self.assertIn("Мои кирпичики", h.screen_text())
         self.assertIn("У вас пока нет личных кирпичиков", h.screen_text())
         self.assertIn(("➕ Создать кирпичик", "bk_create"), h.screen_buttons())

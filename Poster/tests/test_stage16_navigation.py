@@ -61,12 +61,14 @@ class NavigationAfterSaveTests(unittest.TestCase):
 
     @scenario_test
     async def test_drafts_button_below_screen_works(self, h):
-        """Сценарий из инцидента: «Черновики» внизу чата после сохранения."""
+        """Сценарий из инцидента: черновики внизу чата после сохранения."""
         await goto_preview(h, title="Готовый пост")
         await h.callback("save_draft")
         old_screen = h.screen_message_id()
 
-        await h.text_from_below("📝 Черновики")
+        # Poster 2.0 S2: кнопки «Черновики» в меню больше нет, прежние
+        # черновики открываются командой /drafts.
+        await h.text_from_below("/drafts")
 
         self.assertIn("Ваши черновики", h.screen_text())
         render = last_render(h, "Ваши черновики")
@@ -96,7 +98,7 @@ class NavigationAfterSaveTests(unittest.TestCase):
         """/start, /help, /drafts, /cancel внизу чата — каждый даёт видимый ответ."""
         for command, marker in (
             ("/start", "Выберите действие"),
-            ("/help", "Как работать"),
+            ("/help", "Кнопки меню"),
             ("/drafts", "черновик"),
             ("/cancel", "Сейчас нет активного создания поста"),
         ):

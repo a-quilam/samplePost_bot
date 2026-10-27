@@ -506,16 +506,15 @@ class MainMenuKeyboardTests(unittest.TestCase):
         keyboard = main_menu_keyboard()
         self.assertIsInstance(keyboard, InlineKeyboardMarkup)
         texts = [button.text for row in keyboard.inline_keyboard for button in row]
+        # Poster 2.0 S2: главное меню — ровно пять кнопок.
         self.assertEqual(
             texts,
             [
-                "📝 Новый мастер",
-                "✏️ Создать пост",
-                "📍 Места",
-                "🧱 Мои кирпичики",
-                "📄 Мои шаблоны",
-                "📂 Черновики",
-                "❔ Помощь",
+                "📍 Создать для площадки",
+                "📝 Создать по личному шаблону",
+                "📂 Мои анонсы",
+                "⚙️ Управление",
+                "❓ Помощь",
             ],
         )
         callbacks = [
@@ -524,12 +523,10 @@ class MainMenuKeyboardTests(unittest.TestCase):
         self.assertEqual(
             callbacks,
             [
-                "aw_start",
-                "create_post",
-                "places",
-                "bricks",
-                "templates",
-                "drafts",
+                "pick_place",
+                "pick_template",
+                "my_announcements",
+                "manage",
                 "help",
             ],
         )
@@ -550,11 +547,13 @@ class MainMenuKeyboardTests(unittest.TestCase):
         text = bot.calls[0]["text"]
         for command in ("/start", "/create_post", "/drafts", "/cancel", "/help"):
             self.assertIn(command, text)
-        # B8: сценарий работы — разница кнопок и автосохранение при выходе
-        self.assertIn("Готово — получить пост", text)
-        self.assertIn("Сохранить в черновики", text)
-        self.assertIn("автоматически сохраняется", text)
-        self.assertIn("Черновики", text, "возврат к работе через «Черновики»")
+        # Poster 2.0 S2: справка описывает кнопки нового меню и то, что
+        # готовый анонс приходит в личный чат.
+        self.assertIn("Создать для площадки", text)
+        self.assertIn("Создать по личному шаблону", text)
+        self.assertIn("Мои анонсы", text)
+        self.assertIn("Управление", text)
+        self.assertIn("готовый пост в этот чат", text)
 
 
 class ErrorNoticeTests(unittest.TestCase):

@@ -108,7 +108,7 @@ class ChatHygieneSecondAnnouncementTests(unittest.TestCase):
         # — выход в меню и второй анонс —
         await h.callback("main_menu")
         await h.callback("aw_start")
-        self.assertIn("Новый мастер", h.screen_text())
+        self.assertIn("Мои анонсы", h.screen_text())
         # Начали второй: экран ПЕРЕРИСОВЫВАЕТСЯ, а не создаёт новое сообщение.
         self.assertEqual(h.screen_message_id(), screen_after_first)
 

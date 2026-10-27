@@ -91,13 +91,11 @@ class FullCreationFlowTests(unittest.TestCase):
         self.assertEqual(
             [(text, data) for text, data in h.screen_buttons()],
             [
-                ("📝 Новый мастер", "aw_start"),
-                ("✏️ Создать пост", "create_post"),
-                ("📍 Места", "places"),
-                ("🧱 Мои кирпичики", "bricks"),
-                ("📄 Мои шаблоны", "templates"),
-                ("📂 Черновики", "drafts"),
-                ("❔ Помощь", "help"),
+                ("📍 Создать для площадки", "pick_place"),
+                ("📝 Создать по личному шаблону", "pick_template"),
+                ("📂 Мои анонсы", "my_announcements"),
+                ("⚙️ Управление", "manage"),
+                ("❓ Помощь", "help"),
             ],
         )
 
@@ -161,7 +159,7 @@ class FullCreationFlowTests(unittest.TestCase):
         # меню доступно кнопками того же экрана (новых сообщений нет)
         menu_buttons = h.screen_buttons()
         self.assertIn(
-            "✏️ Создать пост",
+            "📍 Создать для площадки",
             [text for text, _data in menu_buttons],
         )
 

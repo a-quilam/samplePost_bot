@@ -235,14 +235,26 @@ class AnnouncementWizardMenuTests(unittest.TestCase):
     async def test_new_menu_entry_keeps_old_wizard_and_wip(self, h) -> None:
         await h.text("/start")
         buttons = h.screen_buttons()
-        self.assertEqual(buttons[0], ("📝 Новый мастер", "aw_start"))
-        self.assertIn(("✏️ Создать пост", "create_post"), buttons)
+        # Poster 2.0 S2: в меню ровно пять кнопок, старых входов нет.
+        self.assertEqual(
+            [label for label, _ in buttons],
+            [
+                "📍 Создать для площадки",
+                "📝 Создать по личному шаблону",
+                "📂 Мои анонсы",
+                "⚙️ Управление",
+                "❓ Помощь",
+            ],
+        )
+        self.assertNotIn("aw_start", [data for _, data in buttons])
+        self.assertNotIn("create_post", [data for _, data in buttons])
 
-        await h.callback("aw_start")
-        self.assertIn("📝 Новый мастер", h.screen_text())
+        # Новый мастер по-прежнему доступен командой /new_wizard.
+        await h.text("/new_wizard")
+        self.assertIn("📂 Мои анонсы", h.screen_text())
         self.assertEqual(h.dialog_state(name=CONVERSATION_NAME), AW_PLACE)
 
-        # Старый мастер по-прежнему запускается своей кнопкой и сохраняет WIP.
+        # Старый мастер по-прежнему запускается командой и сохраняет WIP.
         await h.callback("main_menu")
         self.assertIsNone(h.dialog_state(name=CONVERSATION_NAME))
         await h.start_dialog()
@@ -255,7 +267,7 @@ class AnnouncementWizardMenuTests(unittest.TestCase):
             self.assertIn("Старый заголовок", payload_before or "")
 
         # Вход в новый мастер завершает старый диалог, но не стирает WIP.
-        await h.callback("aw_start")
+        await h.text("/new_wizard")
         self.assertEqual(h.dialog_state(name=CONVERSATION_NAME), AW_PLACE)
         self.assertIsNone(h.dialog_state())
         with h.session_factory() as session:
@@ -836,10 +848,10 @@ class AnnouncementWizardSafetyTests(unittest.TestCase):
             self.assertEqual(other.telegram_user_id, OTHER_TG)
 
         await h.callback("aw_start")
-        self.assertNotIn("Незавершённые анонсы", h.screen_text())
+        self.assertNotIn("чужой анонс", h.screen_text().lower())
         await h.callback(f"aw_open:{foreign_id}")
         self.assertIn("не найден или недоступен", h.screen_text())
-        self.assertIn("📝 Новый мастер", h.screen_text())
+        self.assertIn("📂 Мои анонсы", h.screen_text())
         self.assertEqual(h.dialog_state(name=CONVERSATION_NAME), AW_PLACE)
         self.assertIsNone(_latest_draft(h))
 

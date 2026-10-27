@@ -1141,10 +1141,10 @@ class OutsideDialogTests(_InMemoryDbMixin, unittest.TestCase):
         self.assertIn("нет активного создания поста", text)
 
     def test_outside_hint_texts_explain_next_step(self):
-        # текст — про меню/справку; фото — про шаг «Изображение»
+        # текст — про меню/справку; фото — про шаг «Фотографии»
         for message, expected in (
             (SimpleNamespace(text="привет", photo=None), "меню"),
-            (SimpleNamespace(text=None, photo=[object()]), "Изображение"),
+            (SimpleNamespace(text=None, photo=[object()]), "Фотографии"),
         ):
             with self.subTest(photo=bool(message.photo)):
                 bot = RecordingBot()

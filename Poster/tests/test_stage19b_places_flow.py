@@ -129,7 +129,9 @@ class PlacesNavigationTests(unittest.TestCase):
     @scenario_test
     async def test_main_menu_has_places_and_hub_has_required_actions(self, h):
         await h.text("/start")
-        self.assertIn(("📍 Места", "places"), h.screen_buttons())
+        # Poster 2.0 S2: площадки открываются из «⚙️ Управление».
+        self.assertIn(("📍 Создать для площадки", "pick_place"), h.screen_buttons())
+        self.assertIn(("⚙️ Управление", "manage"), h.screen_buttons())
 
         await open_hub(h)
         buttons = h.screen_buttons()
@@ -405,9 +407,16 @@ class PlaceCreationFlowTests(unittest.TestCase):
                 session.scalar(select(func.count()).select_from(User)) or 0, 1
             )
             # Stage 23: стандартный шаблон создан атомарно, но UI шаблонов
-            # появится только на Stage 25.
+            # появится только на Stage 25. Poster 2.0 S2 добавляет второй
+            # шаблон — стартовый личный, выданный при первом контакте, —
+            # поэтому считаем именно стандартные шаблоны места.
             self.assertEqual(
-                session.scalar(select(func.count()).select_from(Template)) or 0,
+                session.scalar(
+                    select(func.count())
+                    .select_from(Template)
+                    .where(Template.kind == "standard")
+                )
+                or 0,
                 1,
             )
         finally:

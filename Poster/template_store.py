@@ -44,6 +44,7 @@ from brick_types import (
     BRICK_STATUS_ACTIVE,
 )
 from models import (
+    AnnouncementDraft,
     Brick,
     Place,
     Template,
@@ -76,6 +77,12 @@ if TYPE_CHECKING:
     from template_compiler import TemplateCompileError
 
 _UNSET = object()
+
+# Ключ идемпотентности снимка-метки стартового личного шаблона (Poster 2.0, S2).
+# Снимок создаётся один раз при выдаче и переживает удаление строки `templates`,
+# поэтому `has_personal_template_history` помнит о выдаче даже после того, как
+# пользователь осознанно удалил шаблон.
+INITIAL_PERSONAL_TEMPLATE_SNAPSHOT_KEY = "poster2.initial-personal-template"
 
 
 class TemplateError(ValueError):
@@ -1442,16 +1449,17 @@ def ensure_initial_personal_template(
 
     Идемпотентность: повторный вызов возвращает существующий первый личный
     шаблон и второй не создаёт. Осознанное удаление всех личных шаблонов
-    пользователем **не** восстанавливается самовольно: вызывающий слой
-    (S2) использует функцию только при создании профиля, поэтому удаление
-    остаётся удалением. Если личных шаблонов несколько, возвращается самый
-    ранний — новых не появляется.
+    пользователем **не** восстанавливается самовольно: сам шаблон при удалении
+    исчезает, но остаётся его неизменяемый снимок-метка (`ensure_*` создаёт
+    его один раз при выдаче), поэтому `has_personal_template_history` помнит
+    о выдаче и S2 не выдаёт второй. Если личных шаблонов несколько,
+    возвращается самый ранний — новых не появляется.
     """
     actor = _require_actor_user(session, actor_telegram_user_id)
     existing = list_personal_templates(session, actor.telegram_user_id)
     if existing:
         return existing[0]
-    return create_personal_template(
+    created = create_personal_template(
         session,
         actor_telegram_user_id=actor.telegram_user_id,
         name=INITIAL_PERSONAL_TEMPLATE_NAME,
@@ -1459,6 +1467,18 @@ def ensure_initial_personal_template(
         body=BUILTIN_TEMPLATE.body,
         footer=BUILTIN_TEMPLATE.footer,
     )
+    # Метка выдачи (Poster 2.0, S2). Строка `templates` — не единственный
+    # след: снимок переживает её удаление и служит признаком «стартовый
+    # шаблон уже выдавался». Без метки `/start` воскрешал бы осознанно
+    # удалённый шаблон, потому что список личных шаблонов после удаления пуст.
+    # Ключ идемпотентности защищает от второго снимка при повторной выдаче.
+    create_template_snapshot(
+        session,
+        actor_telegram_user_id=actor.telegram_user_id,
+        template_id=created.template_id,
+        idempotency_key=INITIAL_PERSONAL_TEMPLATE_SNAPSHOT_KEY,
+    )
+    return created
 
 
 def reset_standard_template(
@@ -1674,6 +1694,77 @@ def list_template_snapshots(
         .order_by(TemplateSnapshot.created_at, TemplateSnapshot.id)
     ).all()
     return [_snapshot_details(session, row) for row in rows]
+
+
+# Источник личного анонса. Совпадает с CHECK `ck_announcement_drafts_origin`
+# и с `announcement_store.ORIGIN_PERSONAL`; литерал здесь намеренно, чтобы не
+# импортировать announcement_store (он сам импортирует этот модуль).
+_DRAFT_ORIGIN_PERSONAL = "personal"
+
+
+def has_personal_template_history(
+    session: Session,
+    *,
+    actor_telegram_user_id: int | None,
+) -> bool:
+    """
+    Был ли у пользователя личный шаблон когда-либо — а не только сейчас.
+
+    Нужен ровно для одного решения: выдавать ли стартовый личный шаблон на
+    `/start` (Poster 2.0, S2). Признак «живой личный шаблон есть» недостаточен:
+    после осознанного удаления шаблона список пуст, и наивная проверка
+    воскрешала бы удалённое при каждом входе.
+
+    Следы владения личным шаблоном переживают удаление строки `templates`:
+    снимок `template_snapshots.source_kind='personal'` (создаётся при старте
+    любого личного анонса) и сам анонс `announcement_drafts.origin='personal'`.
+    Поэтому проверяются три независимых признака: живой шаблон, снимок, анонс.
+
+    Граница: физическое удаление строк шаблона напрямую в SQLite вне продукта
+    (вместе со снимками и анонсами) этим признаком не покрывается. В продукте
+    такого пути нет: сервисного удаления шаблонов с чисткой истории не
+    существует, а удаление из UI (когда появится) обязано сохранять снимки —
+    история анонсов не должна теряться. Приоритет — не воскрешать осознанно
+    удалённый шаблон; см. решение владельца в S2.
+    """
+    actor = _actor_user(session, actor_telegram_user_id)
+    if actor is None:
+        return False
+    if (
+        session.scalar(
+            select(Template.id)
+            .where(
+                Template.kind == TEMPLATE_KIND_PERSONAL,
+                Template.owner_user_id == actor.id,
+            )
+            .limit(1)
+        )
+        is not None
+    ):
+        return True
+    if (
+        session.scalar(
+            select(TemplateSnapshot.id)
+            .where(
+                TemplateSnapshot.owner_user_id == actor.id,
+                TemplateSnapshot.source_kind == TEMPLATE_KIND_PERSONAL,
+            )
+            .limit(1)
+        )
+        is not None
+    ):
+        return True
+    return (
+        session.scalar(
+            select(AnnouncementDraft.id)
+            .where(
+                AnnouncementDraft.author_user_id == actor.id,
+                AnnouncementDraft.origin == _DRAFT_ORIGIN_PERSONAL,
+            )
+            .limit(1)
+        )
+        is not None
+    )
 
 
 # --- Совместимость привязок -------------------------------------------------

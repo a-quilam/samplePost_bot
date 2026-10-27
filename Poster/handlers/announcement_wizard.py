@@ -265,6 +265,24 @@ def _h(value: object) -> str:
     return escape_html(str(value if value is not None else ""))
 
 
+def _place_lines(details: object) -> list[str]:
+    """
+    Строки «Место: …» для экранов анонса — только если площадка реально есть.
+
+    У личного анонса площадки нет по схеме (`ck_announcement_drafts_origin_place`:
+    `origin='personal'` требует `place_id IS NULL` и `place_display_name IS NULL`).
+    Печатать в этом случае «Место: » с пустым значением нельзя: пользователь
+    читает это как потерянные данные. Единый вариант для всех пяти экранов
+    (шаг выбора шаблона, обзор, отправка, доставлено, отказ в неличном чате) —
+    строки нет вовсе. Возвращается список 0/1 строк, чтобы вызывающий вставлял
+    его через `extend` без ветвлений.
+    """
+    name = getattr(details, "place_display_name", None)
+    if name is None or not str(name).strip():
+        return []
+    return [f"Место: {_h(name)}"]
+
+
 async def _answer(
     update: Update, text: str | None = None, *, alert: bool = False
 ) -> None:
@@ -411,6 +429,25 @@ def _draft_status_label(draft) -> str:
     return STAGE_LABELS.get(str(getattr(draft, "stage", "")), "черновик")
 
 
+def _draft_display_name(draft) -> str:
+    """
+    Человеческое название анонса для «Мои анонсы» (без HTML-экранирования).
+
+    У анонса по площадке показываем подтверждённое место (оно и есть название
+    анонса), у анонса по личному шаблону площадки нет — имя шаблона из
+    снимка, иначе нейтральное «Анонс». Экранирует вызывающий слой: текст
+    экрана — HTML, подпись кнопки — обычный текст.
+    """
+    snapshot = getattr(draft, "template_snapshot", None)
+    name = getattr(draft, "place_display_name", None)
+    if not name and snapshot is not None:
+        name = getattr(snapshot, "source_name", None)
+    if not name:
+        origin = getattr(draft, "origin", None)
+        name = "Анонс по личному шаблону" if origin == "personal" else "Анонс"
+    return str(name)
+
+
 def _home_content(user_id: int, page: int) -> tuple[str, InlineKeyboardMarkup, int]:
     try:
         with SessionLocal() as session:
@@ -426,29 +463,35 @@ def _home_content(user_id: int, page: int) -> tuple[str, InlineKeyboardMarkup, i
     shown = drafts[start : start + TEMPLATE_PAGE_SIZE]
 
     lines = [
-        "📝 Новый мастер",
+        "📂 Мои анонсы",
         "",
-        "Адаптивный мастер сам определит недостающие поля по выбранному "
-        "шаблону. Фотографии можно добавить отдельно. Готовый анонс "
-        "автоматически приходит в этот личный чат отдельным сообщением — "
-        "ни в каналы, ни другим людям он не отправляется.",
+        "Незавершённые анонсы можно продолжить с того же шага, завершённые "
+        "остаются в истории и не удаляются при создании новых. Готовый анонс "
+        "приходит в этот личный чат отдельным сообщением — ни в каналы, ни "
+        "другим людям он не отправляется.",
     ]
     if shown:
-        lines.extend(["", "Незавершённые анонсы:"])
+        lines.extend(["", "Ваши анонсы:"])
         for number, draft in enumerate(shown, start=1):
             stage = _draft_status_label(draft)
-            lines.append(f"{number}. {_short(draft.place_display_name, 70)} — {stage}")
+            lines.append(f"{number}. {_h(_draft_display_name(draft))} — {stage}")
     elif drafts:
-        lines.extend(["", "На этой странице черновиков нет."])
+        lines.extend(["", "На этой странице анонсов нет."])
     else:
-        lines.extend(["", "Сохранённых черновиков нового мастера пока нет."])
+        lines.extend(
+            [
+                "",
+                "Анонсов пока нет. Начните с кнопки «📍 Создать для площадки» "
+                "или «📝 Создать по личному шаблону».",
+            ]
+        )
 
     buttons: list[list[InlineKeyboardButton]] = [
         [InlineKeyboardButton("➕ Новый анонс", callback_data="aw_new")]
     ]
     for index, draft in enumerate(shown):
         stage = _draft_status_label(draft)
-        label = f"▶️ {index + 1}. {_short(draft.place_display_name, 38)}"
+        label = f"▶️ {index + 1}. {_short(_draft_display_name(draft), 38)}"
         if stage:
             label += f" — {stage}"
         buttons.append(
@@ -1082,7 +1125,7 @@ async def _render_template_screen(
     lines = [
         "🧩 Шаг 2. Выберите шаблон",
         "",
-        f"Место: {_h(details.place_display_name)}",
+        *_place_lines(details),
         "",
         "Стандартный шаблон места:",
         (
@@ -2907,7 +2950,7 @@ def _preview_summary_lines(
     lines = [
         "👁 Обзор анонса",
         "",
-        f"Место: {_h(details.place_display_name)}",
+        *_place_lines(details),
         f"Адрес: {_h(details.place_address) if details.place_address else 'не указан'}",
         f"Ссылка: {_h(details.place_url) if details.place_url else 'не указана'}",
         f"Шаблон: {_h(_preview_template_name(details))}",
@@ -3526,7 +3569,7 @@ async def _render_publish_status(
     lines = [
         "📨 Отправка готового анонса в этот чат",
         "",
-        f"Место: {_h(details.place_display_name)}",
+        *_place_lines(details),
         f"Фотографий: {len(details.publication_photos)}.",
     ]
     if notice:
@@ -3765,7 +3808,7 @@ async def _render_delivered(
     lines = [
         "✅ Готовый анонс отправлен в этот чат",
         "",
-        f"Место: {_h(details.place_display_name)}",
+        *_place_lines(details),
         # В доставленной версии столько фото; текущая коллекция может уже
         # отличаться — тогда об этом честно сказано ниже.
         f"В отправленной версии фотографий: {delivered_photos}.",
@@ -3889,7 +3932,7 @@ async def _render_private_chat_refusal(
         lines.extend(
             [
                 "",
-                f"Место: {_h(details.place_display_name)}",
+                *_place_lines(details),
                 "Данные и фотографии сохранены в черновике.",
             ]
         )
@@ -5393,6 +5436,124 @@ async def open_new_wizard(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     return await _render_home(update, context)
 
 
+async def start_place_announcement_pick(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+    place_id: int,
+) -> int:
+    """
+    Немедленный старт анонса по выбранной площадке (Poster 2.0 S2).
+
+    Тап по названию в списке площадок не задаёт вопросов: место
+    подтверждается программно, снимком становится стандартный шаблон
+    площадки, и пользователь сразу попадает к вопросам. Идемпотентность
+    обеспечивает сервис: повтор с тем же черновиком не создаёт второй.
+    """
+    await _answer(update)
+    _end_foreign_conversations(update, context)
+    _clear_other_sessions(_user_id(update))
+    await _reanchor(update, context)
+    user_id = _user_id(update)
+    ui = _fresh_ui()
+    ctx.data(context)["announcement_ui"] = ui
+    try:
+        with SessionLocal() as session:
+            details = start_announcement_wizard(
+                session,
+                actor_telegram_user_id=user_id,
+                place_id=place_id,
+                idempotency_key=ui["place"]["idempotency_key"] or uuid.uuid4().hex,
+            )
+            details = confirm_announcement_place(
+                session,
+                actor_telegram_user_id=user_id,
+                draft_id=details.draft_id,
+                expected_revision=details.revision,
+            )
+            standard = get_standard_template(session, user_id, place_id)
+            details = choose_announcement_template(
+                session,
+                actor_telegram_user_id=user_id,
+                draft_id=details.draft_id,
+                template_id=standard.template_id,
+                expected_revision=details.revision,
+                expected_template_revision=standard.revision,
+            )
+    except AnnouncementNotFoundError:
+        await _answer(update, "Площадка или её шаблон больше недоступны.", alert=True)
+        return await _render_home(update, context)
+    except (AnnouncementError, TemplateError) as exc:
+        await _answer(update, str(exc), alert=True)
+        return await _render_home(update, context, notice=str(exc))
+    _set_details(ui, details)
+    return await _enter_questions(update, context, details)
+
+
+async def start_personal_announcement_pick(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+    template_id: int,
+) -> int:
+    """
+    Немедленный старт анонса по личному шаблону (Poster 2.0 S2).
+
+    Снимок шаблона создаётся сервисом S1 сразу; площадки у такого анонса нет.
+    Чужой или удалённый шаблон неотличим от несуществующего.
+    """
+    await _answer(update)
+    _end_foreign_conversations(update, context)
+    _clear_other_sessions(_user_id(update))
+    await _reanchor(update, context)
+    user_id = _user_id(update)
+    ui = _fresh_ui()
+    ctx.data(context)["announcement_ui"] = ui
+    try:
+        with SessionLocal() as session:
+            details = start_announcement_wizard(
+                session,
+                actor_telegram_user_id=user_id,
+                template_id=template_id,
+                origin="personal",
+                idempotency_key=ui["place"]["idempotency_key"] or uuid.uuid4().hex,
+            )
+    except AnnouncementNotFoundError:
+        await _answer(
+            update, "Личный шаблон не найден или больше недоступен.", alert=True
+        )
+        return await _render_my_announcements(update, context)
+    except (AnnouncementError, TemplateError) as exc:
+        await _answer(update, str(exc), alert=True)
+        return await _render_my_announcements(update, context, notice=str(exc))
+    _set_details(ui, details)
+    return await _enter_questions(update, context, details)
+
+
+async def open_my_announcements(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> int:
+    """
+    Пункт меню «📂 Мои анонсы»: история и незавершённые черновики.
+
+    Чтение только через `list_announcement_drafts` (автор = текущий
+    пользователь); чужой `draft_id` в callback откроется как «не найден».
+    """
+    await _answer(update)
+    _end_foreign_conversations(update, context)
+    _clear_other_sessions(_user_id(update))
+    await _reanchor(update, context)
+    ctx.data(context)["announcement_ui"] = _fresh_ui()
+    return await _render_home(update, context)
+
+
+async def _render_my_announcements(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+    *,
+    notice: str | None = None,
+) -> int:
+    return await _render_home(update, context, notice=notice)
+
+
 async def _command_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     return await _exit_to_main_menu(update, context)
 
@@ -5446,6 +5607,57 @@ async def handle_unknown_command(
     )
 
 
+def remember_conversation_state(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+    state: object,
+) -> None:
+    """
+    Запоминает состояние диалога анонсов, начатого вне его entry-точки.
+
+    «➕ Новая площадка» создаётся обработчиком справочника, а конструктор —
+    отдельный ConversationHandler. Состояние выставляется явно, иначе
+    следующий текст пользователя не попал бы в вопросы анонса. Ошибка не
+    ломает уже нарисованный экран: пользователь продолжит кнопками.
+    """
+    application = getattr(context, "application", None)
+    if application is None:
+        return
+    for group in application.handlers.values():
+        for handler in group:
+            if not isinstance(handler, ConversationHandler):
+                continue
+            if getattr(handler, "name", None) != CONVERSATION_NAME:
+                continue
+            try:
+                key = handler._get_key(update)  # noqa: SLF001 — старт вне entry
+                handler._update_state(state, key)  # noqa: SLF001
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("Не удалось открыть диалог анонса: %s", exc)
+            return
+
+
+async def handle_pick_callback(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> int:
+    """
+    Точки входа Poster 2.0 из списков площадок и личных шаблонов.
+
+    Callback приходит с `pl_pick:<id>` (площадка) или `tp_pick:<id>`
+    (личный шаблон). Здесь же обрабатывается меню «Мои анонсы»; все ветки
+    перепроверяют доступ доменными сервисами, поэтому подделанный id
+    открывает только «не найдено».
+    """
+    data = (ctx.query(update).data or "").split(":")
+    action = data[0]
+    if action == "pl_pick" and len(data) == 2 and data[1].isdigit():
+        return await start_place_announcement_pick(update, context, int(data[1]))
+    if action == "tp_pick" and len(data) == 2 and data[1].isdigit():
+        return await start_personal_announcement_pick(update, context, int(data[1]))
+    await _answer(update, EXPIRED_TEXT, alert=True)
+    return ConversationHandler.END
+
+
 def announcement_wizard_handlers() -> list[BaseHandler]:
     text_handler = MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text)
     photo_handler = MessageHandler(filters.PHOTO, handle_photo)
@@ -5485,6 +5697,10 @@ def announcement_wizard_handlers() -> list[BaseHandler]:
         entry_points=[
             CallbackQueryHandler(open_new_wizard, pattern=r"^aw_start$"),
             CommandHandler("new_wizard", open_new_wizard),
+            # Poster 2.0 S2: тап по площадке/личному шаблону сразу запускает
+            # конструктор — entry-точки, поэтому состояние диалога ведётся.
+            CallbackQueryHandler(handle_pick_callback, pattern=r"^(pl|tp)_pick:\d+$"),
+            CallbackQueryHandler(open_my_announcements, pattern=r"^my_announcements$"),
         ],
         states=states,
         fallbacks=[

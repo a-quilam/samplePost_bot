@@ -67,7 +67,12 @@ CARD_ALIASES_LIMIT = 5
 BUTTON_TEXT_LIMIT = 60
 STALE_TEXT = "Кнопка устарела: откройте раздел «Места» заново."
 
-TEXT_INPUT_PHASES = {"search_input", "create_input", "alias_input"}
+TEXT_INPUT_PHASES = {
+    "search_input",
+    "create_input",
+    "alias_input",
+    "pick_search_input",
+}
 
 PHASES = {
     "hub",
@@ -83,6 +88,10 @@ PHASES = {
     "alias_warning",
     "admin_request",
     "confirmed",
+    # Poster 2.0 S2: выбор площадки для немедленного старта анонса.
+    "pick",
+    "pick_search_input",
+    "pick_search_results",
 }
 
 
@@ -656,6 +665,24 @@ async def _render_phase(
     try:
         if phase == "hub":
             text, keyboard = _hub_content()
+        elif phase == "pick":
+            text, keyboard = _pick_content(session, state)
+        elif phase == "pick_search_input":
+            text = (
+                "🔎 Поиск площадки\n\n"
+                "Введите часть названия. Регистр, «е/ё», пробелы и пунктуация "
+                "не важны."
+            )
+            keyboard = InlineKeyboardMarkup(
+                [[InlineKeyboardButton("◀️ К списку", callback_data="pl_pick_back")]]
+            )
+        elif phase == "pick_search_results":
+            if not state.get("query"):
+                state.clear()
+                state.update(_new_pick())
+                text, keyboard = _pick_content(session, state)
+            else:
+                text, keyboard = _pick_search_content(session, state)
         elif phase == "search_input":
             text = (
                 "🔎 Поиск места\n\n"
@@ -833,6 +860,294 @@ async def _render_phase(
 
 async def _stale(update: Update, text: str = STALE_TEXT) -> None:
     await ctx.query(update).answer(text, show_alert=True)
+
+
+# --- Poster 2.0 S2: выбор площадки для немедленного старта анонса -------------
+
+PICK_PAGE_SIZE = 8
+PICK_STALE_TEXT = "Кнопка устарела: откройте «Создать для площадки» заново."
+
+
+def _pick_content(session: Session, state: dict) -> tuple[str, InlineKeyboardMarkup]:
+    """Список зарегистрированных площадок; тап по названию сразу начинает анонс."""
+    offset = _page_value(state, "pick_page")
+    places, total = list_places(session, offset=offset, limit=PICK_PAGE_SIZE)
+    if not places and total > 0 and offset > 0:
+        offset = 0
+        places, total = list_places(session, offset=0, limit=PICK_PAGE_SIZE)
+    state["pick_page"] = offset
+
+    if total == 0:
+        text = (
+            "📍 Создать для площадки\n\n"
+            "В справочнике пока нет площадок. Добавьте первую — анонс "
+            "начнётся сразу по её стандартному шаблону."
+        )
+        keyboard = InlineKeyboardMarkup(
+            [
+                [
+                    InlineKeyboardButton(
+                        "➕ Новая площадка", callback_data="pl_pick_add"
+                    )
+                ],
+                [InlineKeyboardButton("◀️ Главное меню", callback_data="main_menu")],
+            ]
+        )
+        return text, keyboard
+
+    text = (
+        "📍 Создать для площадки\n\n"
+        "Выберите площадку — анонс начнётся сразу по её стандартному "
+        "шаблону, без лишних подтверждений.\n\n"
+    )
+    for number, item in enumerate(places, start=offset + 1):
+        text += f"{number}. {_h(item.canonical_name)}\n"
+    text += "\n" + _page_note(offset, len(places), total, PICK_PAGE_SIZE)
+
+    rows: list[list[InlineKeyboardButton]] = []
+    for item in places:
+        rows.append(
+            [
+                InlineKeyboardButton(
+                    _button_name("🚀 ", item.canonical_name),
+                    callback_data=f"pl_pick:{item.place_id}",
+                )
+            ]
+        )
+    nav: list[InlineKeyboardButton] = []
+    if offset > 0:
+        nav.append(
+            InlineKeyboardButton(
+                "⬅️ Назад",
+                callback_data=f"pl_pickp:{max(offset - PICK_PAGE_SIZE, 0)}",
+            )
+        )
+    if offset + len(places) < total:
+        nav.append(
+            InlineKeyboardButton(
+                "Вперёд ➡️",
+                callback_data=f"pl_pickp:{offset + len(places)}",
+            )
+        )
+    if nav:
+        rows.append(nav)
+    rows.append(
+        [InlineKeyboardButton("🔎 Найти площадку", callback_data="pl_pick_search")]
+    )
+    rows.append(
+        [InlineKeyboardButton("➕ Новая площадка", callback_data="pl_pick_add")]
+    )
+    rows.append([InlineKeyboardButton("◀️ Главное меню", callback_data="main_menu")])
+    return text, InlineKeyboardMarkup(rows)
+
+
+def _pick_search_content(
+    session: Session, state: dict
+) -> tuple[str, InlineKeyboardMarkup]:
+    """Результаты поиска площадки в режиме pick."""
+    query = str(state.get("query") or "")
+    results = search_places(session, query)
+    total = len(results)
+    offset = _clamp_offset(_page_value(state, "page"), total, SEARCH_PAGE_SIZE)
+    state["page"] = offset
+    page_results = results[offset : offset + SEARCH_PAGE_SIZE]
+    if not results:
+        text = (
+            f"🔎 Поиск площадки: «{_h(query)}»\n\n"
+            "Ничего не найдено. Площадка не создаётся автоматически — её можно "
+            "добавить отдельно."
+        )
+        keyboard = InlineKeyboardMarkup(
+            [
+                [
+                    InlineKeyboardButton(
+                        "➕ Новая площадка", callback_data="pl_pick_add"
+                    )
+                ],
+                [
+                    InlineKeyboardButton(
+                        "🔁 Искать снова", callback_data="pl_pick_search"
+                    )
+                ],
+                [InlineKeyboardButton("◀️ К списку", callback_data="pl_pick_back")],
+            ]
+        )
+        return text, keyboard
+
+    text = f"🔎 Площадки по запросу: «{_h(query)}»\n\n"
+    for number, result in enumerate(page_results, start=offset + 1):
+        text += f"{number}. {_h(result.canonical_name)} — {_result_label(result)}\n"
+    text += "\n" + _page_note(offset, len(page_results), total)
+
+    rows: list[list[InlineKeyboardButton]] = []
+    for result in page_results:
+        rows.append(
+            [
+                InlineKeyboardButton(
+                    _button_name("🚀 ", result.canonical_name),
+                    callback_data=f"pl_pick:{result.place_id}",
+                )
+            ]
+        )
+    nav: list[InlineKeyboardButton] = []
+    if offset > 0:
+        nav.append(
+            InlineKeyboardButton(
+                "⬅️ Назад",
+                callback_data=f"pl_picksp:{max(offset - SEARCH_PAGE_SIZE, 0)}",
+            )
+        )
+    if offset + len(page_results) < total:
+        nav.append(
+            InlineKeyboardButton(
+                "Вперёд ➡️",
+                callback_data=f"pl_picksp:{offset + len(page_results)}",
+            )
+        )
+    if nav:
+        rows.append(nav)
+    rows.append(
+        [InlineKeyboardButton("🔁 Искать снова", callback_data="pl_pick_search")]
+    )
+    rows.append([InlineKeyboardButton("◀️ К списку", callback_data="pl_pick_back")])
+    return text, InlineKeyboardMarkup(rows)
+
+
+def _new_pick() -> dict:
+    return {"phase": "pick", "pick_page": 0}
+
+
+async def open_place_picker(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """
+    «📍 Создать для площадки»: список площадок первым экраном.
+
+    Поиск и добавление — отдельные кнопки, а не замена списка. Состояние
+    раздела сбрасывается: это вход в создание анонса, а не справочник.
+    """
+    query = getattr(update, "callback_query", None)
+    if query is not None:
+        await query.answer()
+    await screen.reanchor_screen(update, context)
+    user_id = ctx.user(update).id
+    clear_admin_session(user_id)
+    clear_brick_session(user_id)
+    clear_template_session(user_id)
+    state = _new_pick()
+    save_place_session(user_id, state)
+    await _render_phase(update, context, state, drop_input=True)
+
+
+async def handle_pick_page(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Пагинация списка площадок в режиме pick."""
+    query = ctx.query(update)
+    state = load_place_session(ctx.user(update).id)
+    if state is None or state.get("phase") != "pick":
+        await query.answer(PICK_STALE_TEXT, show_alert=True)
+        return
+    offset = _parse_offset(query.data or "", "pl_pickp:")
+    if offset is None:
+        await query.answer(PICK_STALE_TEXT, show_alert=True)
+        return
+    await query.answer()
+    state["pick_page"] = offset
+    await _render_phase(update, context, state)
+
+
+async def handle_pick_search(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> None:
+    """Поиск площадки в режиме pick — отдельное действие."""
+    query = ctx.query(update)
+    state = load_place_session(ctx.user(update).id)
+    if state is None or state.get("phase") not in {
+        "pick",
+        "pick_search_input",
+        "pick_search_results",
+    }:
+        await query.answer(PICK_STALE_TEXT, show_alert=True)
+        return
+    await query.answer()
+    state["phase"] = "pick_search_input"
+    state["page"] = 0
+    await _render_phase(update, context, state)
+
+
+async def handle_pick_search_page(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> None:
+    """Пагинация результатов поиска площадок в режиме pick."""
+    query = ctx.query(update)
+    state = load_place_session(ctx.user(update).id)
+    if state is None or state.get("phase") != "pick_search_results":
+        await query.answer(PICK_STALE_TEXT, show_alert=True)
+        return
+    offset = _parse_offset(query.data or "", "pl_picksp:")
+    if offset is None:
+        await query.answer(PICK_STALE_TEXT, show_alert=True)
+        return
+    await query.answer()
+    state["page"] = offset
+    await _render_phase(update, context, state)
+
+
+async def handle_pick_back(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Возврат из поиска площадок к полному списку."""
+    query = ctx.query(update)
+    state = load_place_session(ctx.user(update).id)
+    if state is None or state.get("phase") not in {
+        "pick_search_input",
+        "pick_search_results",
+    }:
+        await query.answer(PICK_STALE_TEXT, show_alert=True)
+        return
+    await query.answer()
+    state.clear()
+    state.update(_new_pick())
+    await _render_phase(update, context, state)
+
+
+def _parse_offset(data: str, prefix: str) -> int | None:
+    if not data.startswith(prefix):
+        return None
+    try:
+        return max(int(data[len(prefix) :]), 0)
+    except (TypeError, ValueError):
+        return None
+
+
+async def handle_pick_add(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """«➕ Новая площадка» в режиме pick: создание с автозапуском анонса."""
+    query = ctx.query(update)
+    state = load_place_session(ctx.user(update).id)
+    if state is None or state.get("phase") not in {
+        "pick",
+        "pick_search_input",
+        "pick_search_results",
+    }:
+        await query.answer(PICK_STALE_TEXT, show_alert=True)
+        return
+    await query.answer()
+    state.clear()
+    state.update({"phase": "create_input", "pick_mode": True})
+    await _render_phase(update, context, state, drop_input=True)
+
+
+async def _auto_start_pick_announcement(
+    update: Update, context: ContextTypes.DEFAULT_TYPE, place_id: int
+) -> None:
+    """
+    Автозапуск анонса после создания площадки (Poster 2.0 S2).
+
+    Создание идёт в обработчике справочника, а конструктор — отдельный
+    ConversationHandler, поэтому состояние диалога выставляется явно.
+    """
+    from handlers.announcement_wizard import (
+        remember_conversation_state,
+        start_place_announcement_pick,
+    )
+
+    state = await start_place_announcement_pick(update, context, place_id)
+    remember_conversation_state(update, context, state)
 
 
 async def open_places(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1215,6 +1530,7 @@ async def handle_create_confirm(
     if not isinstance(candidate, str) or not candidate:
         await _stale(update)
         return
+    pick_mode = bool(state.get("pick_mode"))
     await query.answer()
 
     session = SessionLocal()
@@ -1259,6 +1575,11 @@ async def handle_create_confirm(
             "return_page": 0,
         }
     )
+    if pick_mode:
+        # Poster 2.0 S2: создание площадки из «Создать для площадки» сразу
+        # открывает анонс по её стандартному шаблону.
+        await _auto_start_pick_announcement(update, context, place_id)
+        return
     await _render_phase(
         update,
         context,
@@ -1540,6 +1861,31 @@ async def handle_place_text(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         )
         return
 
+    if phase == "pick_search_input":
+        try:
+            display_query = clean_display_name(raw)
+            session = SessionLocal()
+            try:
+                search_places(session, display_query)
+            finally:
+                session.close()
+        except PlaceNameError as exc:
+            _failed_add(state, update)
+            await _render_phase(update, context, state, notice=str(exc))
+            return
+        state["query"] = display_query
+        state["phase"] = "pick_search_results"
+        state["page"] = 0
+        cleanup = _failed_take(state)
+        await _render_phase(
+            update,
+            context,
+            state,
+            cleanup_ids=cleanup,
+            drop_input=True,
+        )
+        return
+
     if phase == "create_input":
         try:
             candidate = validate_place_name(raw)
@@ -1662,10 +2008,22 @@ def places_handlers() -> list[BaseHandler]:
     обработчиков главного меню: активный мастер получает свои тексты первым,
     а навигация вне мастера попадает сюда. Callback-префикс `pl_` уникален и
     не пересекается с кнопками визарда/черновиков.
+
+    Режим pick (Poster 2.0 S2) — вход «📍 Создать для площадки»: список
+    площадок, поиск, добавление; тап по названию немедленно начинает анонс.
+    Точка входа тапа (`pl_pick:<id>`) зарегистрирована в
+    `announcement_wizard_handlers` как entry_point диалога конструктора.
     """
     return [
         CommandHandler("places", open_places),
         CallbackQueryHandler(open_places, pattern=r"^places$"),
+        # Poster 2.0 S2: выбор площадки для немедленного старта анонса.
+        CallbackQueryHandler(open_place_picker, pattern=r"^pick_place$"),
+        CallbackQueryHandler(handle_pick_page, pattern=r"^pl_pickp:\d+$"),
+        CallbackQueryHandler(handle_pick_search, pattern=r"^pl_pick_search$"),
+        CallbackQueryHandler(handle_pick_search_page, pattern=r"^pl_picksp:\d+$"),
+        CallbackQueryHandler(handle_pick_back, pattern=r"^pl_pick_back$"),
+        CallbackQueryHandler(handle_pick_add, pattern=r"^pl_pick_add$"),
         CallbackQueryHandler(handle_hub, pattern=r"^pl_hub$"),
         CallbackQueryHandler(handle_search_prompt, pattern=r"^pl_search$"),
         CallbackQueryHandler(handle_all_places, pattern=r"^pl_all$"),

@@ -70,22 +70,28 @@ class SaveDraftScreenTests(unittest.TestCase):
 
     @scenario_test
     async def test_success_screen_with_working_actions(self, h):
-        """Экран успеха: кнопки «Черновики» и «Создать пост» действительно работают."""
+        """Экран успеха: следующие действия действительно работают."""
         await goto_preview(h, title="Готовый пост")
         await h.callback("save_draft")
 
         self.assertIn("Пост сохранён в черновики", h.screen_text())
         buttons = h.screen_buttons()
-        self.assertIn(("📂 Черновики", "drafts"), buttons)
-        self.assertIn(("✏️ Создать пост", "create_post"), buttons)
+        # Poster 2.0 S2: под успехом — главное меню из пяти кнопок.
+        self.assertIn(("📂 Мои анонсы", "my_announcements"), buttons)
+        self.assertIn(("❓ Помощь", "help"), buttons)
 
-        # «Черновики» после сохранения — список реально показан
-        await h.callback("drafts")
+        # «Мои анонсы» после сохранения — экран реально показан
+        await h.callback("my_announcements")
+        self.assertIn("Мои анонсы", h.screen_text())
+
+        # Черновики прежнего мастера остаются доступны своей командой
+        await h.callback("main_menu")
+        await h.text("/drafts")
         self.assertIsNone(h.dialog_state())
         self.assertIn("Ваши черновики", h.screen_text())
 
-        # «Создать пост» после сохранения — новый диалог реально начинается
-        await h.callback("create_post")
+        # Новый анонс после сохранения — диалог действительно начинается
+        await h.text("/create_post")
         self.assertEqual(h.dialog_state(), POST_CREATION)
         self.assertIn("Заголовок", h.screen_text())
 
@@ -99,7 +105,7 @@ class SaveDraftScreenTests(unittest.TestCase):
 
         self.assertIsNone(h.dialog_state())
         # справка реально показана на экране
-        self.assertIn("Как работать", h.screen_text())
+        self.assertIn("Кнопки меню", h.screen_text())
 
     @scenario_test
     async def test_repeated_save_saves_exactly_once(self, h):

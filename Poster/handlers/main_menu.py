@@ -1,16 +1,24 @@
 # handlers/main_menu.py
 """
-Главное меню и навигация (Stage 11).
+Главное меню и навигация (Stage 11, Poster 2.0 — S2).
 
 Главное меню — это ЭКРАН (постоянное сообщение управления, см. utils.screen):
 /start и кнопки навигации перерисовывают его, а не создают новые сообщения.
-Кнопки меню — inline-кнопки на экране (✏️ Создать пост / 📍 Места /
-📂 Черновики / ❔ Помощь); команды /start, /help, /drafts, /places,
-/cancel работают как прежде.
+Меню Poster 2.0 состоит ровно из пяти кнопок:
 
-Текстовые entry-кнопки «✏️ Создать пост» и «📝 Черновики» (regex) сохранены
-как совместимость: ConversationHandler создания поста реагирует на текст —
-и старые сценарии, и привычка пользователя набрать текст не ломаются.
+- «📍 Создать для площадки» — список зарегистрированных площадок; тап по
+  названию сразу запускает единый конструктор;
+- «📝 Создать по личному шаблону» — список личных шаблонов; тап запускает
+  конструктор без площадки, создание/правка — в том же разделе;
+- «📂 Мои анонсы» — незавершённые анонсы и история (`announcement_drafts`);
+- «⚙️ Управление» — площадки, шаблоны, кирпичики и администрирование
+  (последнее только при подтверждённых правах, роль перепроверяется в
+  обработчике `/admin`);
+- «❓ Помощь» — справка.
+
+Команды /start, /help, /create_post, /places, /templates, /bricks, /admin,
+/drafts и /cancel продолжают работать: меню — навигация, а команды остаются
+совместимым входом в те же разделы (легаси-мастер удаляется на S5).
 """
 
 import logging
@@ -38,43 +46,67 @@ from utils import tg_context as ctx
 logger = logging.getLogger(__name__)
 
 
-def main_menu_keyboard(*, show_admin: bool = False) -> InlineKeyboardMarkup:
+def main_menu_keyboard() -> InlineKeyboardMarkup:
     """
-    Inline-клавиатура главного меню (кнопки экрана).
+    Inline-клавиатура главного меню Poster 2.0 — ровно пять кнопок.
 
-    Callback-данные: aw_start (entry-точка адаптивного мастера Stage 27B),
-    create_post (entry-точка старого ConversationHandler), places —
-    справочник мест, bricks — личные кирпичики, admin_panel —
-    административный кабинет (только для суперадмина/администратора места),
-    drafts — список черновиков, help — справка, main_menu — возврат в меню.
+    Callback-данные: pick_place — выбор зарегистрированной площадки и
+    немедленный старт конструктора, pick_template — выбор личного шаблона,
+    my_announcements — история анонсов, manage — раздел управления,
+    help — справка.
     """
-    rows = [
-        [InlineKeyboardButton("📝 Новый мастер", callback_data="aw_start")],
-        [InlineKeyboardButton("✏️ Создать пост", callback_data="create_post")],
-        [InlineKeyboardButton("📍 Места", callback_data="places")],
-        [InlineKeyboardButton("🧱 Мои кирпичики", callback_data="bricks")],
-        [InlineKeyboardButton("📄 Мои шаблоны", callback_data="templates")],
-    ]
-    if show_admin:
-        rows.append([InlineKeyboardButton("🛡 Админка", callback_data="admin_panel")])
-    rows.append(
+    return InlineKeyboardMarkup(
         [
-            InlineKeyboardButton("📂 Черновики", callback_data="drafts"),
-            InlineKeyboardButton("❔ Помощь", callback_data="help"),
+            [
+                InlineKeyboardButton(
+                    "📍 Создать для площадки", callback_data="pick_place"
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    "📝 Создать по личному шаблону", callback_data="pick_template"
+                )
+            ],
+            [InlineKeyboardButton("📂 Мои анонсы", callback_data="my_announcements")],
+            [InlineKeyboardButton("⚙️ Управление", callback_data="manage")],
+            [InlineKeyboardButton("❓ Помощь", callback_data="help")],
         ]
     )
+
+
+def manage_keyboard(*, show_admin: bool = False) -> InlineKeyboardMarkup:
+    """
+    Подменю «⚙️ Управление».
+
+    «Администрирование» добавляется только при подтверждённых правах;
+    обработчик `/admin` перепроверяет роль заново, поэтому скрытая кнопка —
+    удобство, а не защита.
+    """
+    rows = [
+        [InlineKeyboardButton("📍 Площадки", callback_data="manage_places")],
+        [InlineKeyboardButton("📝 Шаблоны", callback_data="manage_templates")],
+        [InlineKeyboardButton("🧱 Кирпичики", callback_data="manage_bricks")],
+    ]
+    if show_admin:
+        rows.append(
+            [InlineKeyboardButton("🛡 Администрирование", callback_data="admin_panel")]
+        )
+    rows.append([InlineKeyboardButton("◀️ Главное меню", callback_data="main_menu")])
     return InlineKeyboardMarkup(rows)
 
 
 def _show_admin_button(telegram_user_id: int) -> bool:
-    """Видимость кнопки кабинета; роль всё равно перепроверяется в handler."""
+    """Видимость администрирования; роль всё равно перепроверяется в handler."""
     if is_superadmin(telegram_user_id):
         return True
     session = SessionLocal()
     try:
         return can_access_admin_panel(session, telegram_user_id)
     except Exception as e:  # noqa: BLE001 — меню должно открыться и без кабинета
-        logger.error("Не удалось проверить доступ в кабинет: %s", e)
+        # Причина отказа видимости должна быть видна в логах: раньше здесь
+        # был только текст ошибки без traceback, и «кнопка исчезла» было
+        # невозможно диагностировать (S2, §7.5, гипотеза 3).
+        logger.exception("Не удалось проверить доступ в кабинет: %s", e)
         return False
     finally:
         session.close()
@@ -85,14 +117,23 @@ def main_menu_text() -> str:
     return "Здравствуйте! 👋\n\nВыберите действие:"
 
 
+def manage_text() -> str:
+    """Текст экрана «Управление»."""
+    return (
+        "⚙️ Управление\n\n"
+        "Площадки, шаблоны и кирпичики — общие разделы. Администрирование "
+        "видно только тем, кому владелец Poster действительно выдал права."
+    )
+
+
 async def render_main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """
     Рисует главное меню на существующем экране (или создаёт новый экран).
 
     После рестарта процесса ref экрана восстанавливается из БД один раз —
     /start редактирует старое сообщение, а не плодит дубли. Если в БД остался
-    снимок незавершённого поста (рестарт прервал диалог) — в меню добавляется
-    кнопка «▶️ Продолжить пост».
+    снимок незавершённого легаси-поста (рестарт прервал диалог), добавляется
+    кнопка «▶️ Продолжить пост»: сам пост не теряется до этапа S5.
     """
     # навигация пользовательским сообщением → старый экран удаляется,
     # новый создаётся рядом с вводом (Stage 16, дефект №7); callback —
@@ -110,9 +151,11 @@ async def render_main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     if screen.screen_ref(user_data) is None:
         screen.hydrate_screen_ref(user_data, user_id)
     chat_id = ctx.chat(update).id
-    keyboard = main_menu_keyboard(show_admin=_show_admin_button(user_id))
+    keyboard = main_menu_keyboard()
     if screen.load_payload(user_id):
-        # WIP пережил рестарт — предлагаем продолжение вместо потери
+        # WIP легаси-мастера пережил рестарт — предлагаем продолжение вместо
+        # потери. Кнопка не входит в постоянные пять: она появляется только
+        # при реально незавершённом посте и исчезнет вместе с S5.
         keyboard = InlineKeyboardMarkup(
             [
                 *keyboard.inline_keyboard,
@@ -130,7 +173,14 @@ async def render_main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -
 
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Команда /start: главное меню или экран приглашения передачи (Stage 21)."""
+    """
+    Команда /start: главное меню.
+
+    Стартовый личный шаблон выдаётся раньше — при первом контакте с ботом
+    (`handlers/user_tracking.py`), поэтому `/start` внутри активного диалога
+    ничего не теряет: выдача не зависит от того, какая ветка обработала
+    команду. Повторный `/start` и удаление шаблона его не воскрешают.
+    """
     from handlers.admin import handle_transfer_start
 
     if await handle_transfer_start(update, context):
@@ -145,42 +195,31 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 
 def help_text() -> str:
-    """Справка по командам и сценарию работы."""
+    """Справка по кнопкам меню и командам."""
     return (
-        "Я помогаю собрать полноценный пост по шагам, проверить его в превью "
-        "и получить готовый результат.\n\n"
-        "Как работать:\n"
-        "— «📝 Новый мастер» — адаптивный анонс: место, шаблон, вопросы по "
-        "кирпичикам, дополнительные поля и предпросмотр. Публикация на этом "
-        "этапе не выполняется, результат сохраняется как черновик;\n"
-        "— «✏️ Создать пост» — прежний девятишаговый мастер поста;\n"
-        "— «✅ Готово — получить пост» — бот пришлёт готовый пост в этот чат;\n"
-        "— «📄 Сохранить в черновики» — сохранить работу и вернуться к ней "
-        "позже;\n"
-        "— «📍 Места» — найти место по названию, посмотреть карточку, выбрать "
-        "его или добавить новое место/альтернативное название;\n"
-        "— «🧱 Мои кирпичики» — создавать личные типизированные поля для "
-        "будущих шаблонов, менять их, убирать в архив и восстанавливать. "
-        "Новый мастер подставляет их через выбранный шаблон; старый "
-        "девятишаговый мастер кирпичики не использует;\n"
-        "— «📄 Мои шаблоны» — создавать личные шаблоны, редактировать шапку, "
-        "тело и подвал обычным сообщением, смотреть предпросмотр и доступные "
-        "кирпичики, сбрасывать содержимое к встроенному стандарту. "
-        "Новый мастер строит вопросы по выбранному шаблону; старый "
-        "девятишаговый мастер шаблоны не использует;\n"
-        "— при выходе из создания (/cancel, /start, /drafts, /places, "
-        "/bricks, /templates, /admin) незавершённый "
-        "пост автоматически сохраняется в черновиках — вернуться к нему можно "
-        "через «📂 Черновики» → «✏️ Редактировать черновик».\n\n"
+        "Я собираю анонсы по шаблону: вопросы, живой текст, фотографии и "
+        "готовый пост в этот чат.\n\n"
+        "Кнопки меню:\n"
+        "— «📍 Создать для площадки» — выберите зарегистрированную площадку; "
+        "анонс сразу начнётся по её стандартному шаблону. Новую площадку "
+        "можно добавить там же — анонс откроется сразу после создания;\n"
+        "— «📝 Создать по личному шаблону» — ваши личные шаблоны. Тап по "
+        "названию сразу начинает анонс; создание и правка шаблонов — в том же "
+        "разделе;\n"
+        "— «📂 Мои анонсы» — незавершённые анонсы можно продолжить, "
+        "завершённые остаются в истории и не удаляются при создании новых;\n"
+        "— «⚙️ Управление» — площадки, шаблоны и кирпичики. Пункт "
+        "«🛡 Администрирование» виден только при выданных правах;\n"
+        "— «❓ Помощь» — эта справка.\n\n"
         "Команды:\n"
         "/start — главное меню\n"
-        "/new_wizard — новый адаптивный мастер анонса\n"
-        "/create_post — создать новый пост\n"
-        "/places — справочник мест\n"
+        "/new_wizard — новый анонс\n"
+        "/places — площадки\n"
+        "/templates — личные шаблоны\n"
         "/bricks — мои кирпичики\n"
-        "/templates — мои шаблоны\n"
         "/admin — кабинет, если у вас есть права администратора\n"
-        "/drafts — список ваших черновиков\n"
+        "/drafts — старые черновики прошлого мастера\n"
+        "/create_post — прежний девятишаговый мастер (постепенно убирается)\n"
         "/cancel — отменить текущий диалог\n"
         "/help — эта справка"
     )
@@ -206,25 +245,71 @@ async def render_help(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
 
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Справка по командам и сценарию работы."""
+    """Справка по кнопкам меню и командам."""
     await render_help(update, context)
 
 
-async def menu_drafts(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Inline-кнопка «📂 Черновики» главного меню."""
-    await ctx.query(update).answer()
-    await view_drafts(update, context)
-
-
 async def menu_help(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Inline-кнопка «❔ Помощь» главного меню."""
+    """Inline-кнопка «❓ Помощь» главного меню."""
     await ctx.query(update).answer()
     await render_help(update, context)
 
 
 async def drafts_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Команда /drafts — список черновиков (дублирует кнопку меню)."""
+    """Команда /drafts — список черновиков прошлого мастера (до S5)."""
     await view_drafts(update, context)
+
+
+async def menu_drafts(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Совместимость: старая кнопка «📂 Черновики» в открытых экранах."""
+    await ctx.query(update).answer()
+    await view_drafts(update, context)
+
+
+async def open_manage(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Экран «⚙️ Управление»: разделы и администрирование по правам."""
+    query = getattr(update, "callback_query", None)
+    if query is not None:
+        await query.answer()
+    await screen.reanchor_screen(update, context)
+    user_id = ctx.user(update).id
+    clear_place_session(user_id)
+    clear_admin_session(user_id)
+    clear_brick_session(user_id)
+    clear_template_session(user_id)
+    user_data = ctx.data(context)
+    if screen.screen_ref(user_data) is None:
+        screen.hydrate_screen_ref(user_data, user_id)
+    chat_id = ctx.chat(update).id
+    await screen.render_screen(
+        context,
+        user_data,
+        chat_id,
+        manage_text(),
+        manage_keyboard(show_admin=_show_admin_button(user_id)),
+    )
+    screen.save_screen_ref(user_id, user_data, chat_id)
+
+
+async def manage_places(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """«Управление» → «Площадки»: справочник мест."""
+    from handlers.places import open_places
+
+    await open_places(update, context)
+
+
+async def manage_templates(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """«Управление» → «Шаблоны»: личные шаблоны и стандарты мест."""
+    from handlers.templates import open_templates
+
+    await open_templates(update, context)
+
+
+async def manage_bricks(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """«Управление» → «Кирпичики»."""
+    from handlers.bricks import open_bricks
+
+    await open_bricks(update, context)
 
 
 async def cancel_without_dialog(
@@ -265,11 +350,7 @@ async def cancel_without_dialog(
         user_data,
         ctx.chat(update).id,
         text,
-        (
-            main_menu_keyboard(show_admin=_show_admin_button(user_id))
-            if cancelled
-            else None
-        ),
+        main_menu_keyboard() if cancelled else None,
     )
     if cancelled:
         await screen.drop_user_input(update, context)
@@ -282,9 +363,9 @@ async def outside_dialog_hint(
     Подсказка на обычный текст/фото ВНЕ диалога: обновляется на экране
     управления, а не копится новыми сообщениями.
 
-    Внутри диалога этот хендлер не вызывается: ConversationHandler создания
-    поста зарегистрирован первой группой и текст/фото в своих состояниях
-    обслуживает сам.
+    Внутри диалога этот хендлер не вызывается: ConversationHandler анонсов и
+    прежнего мастера зарегистрированы первой группой и свой ввод обслуживают
+    сами.
     """
     message = ctx.message(update)
     # навигация сообщением ниже экрана → подсказка рядом с вводом
@@ -294,8 +375,9 @@ async def outside_dialog_hint(
         screen.hydrate_screen_ref(user_data, ctx.user(update).id)
     if message.photo:
         text = (
-            "Фото понадобится на шаге «Изображение» — начните создание "
-            "кнопкой «✏️ Создать пост»."
+            "Фото добавляются в анонсе на шаге «Фотографии». Начните анонс "
+            "кнопкой «📍 Создать для площадки» или «📝 Создать по личному "
+            "шаблону»."
         )
     else:
         text = "Воспользуйтесь кнопками меню или наберите /help — список команд."
@@ -304,21 +386,16 @@ async def outside_dialog_hint(
 
 def main_menu_handlers() -> list[BaseHandler]:
     """
-    Обработчики главного меню.
+    Обработчики главного меню Poster 2.0.
 
-    Кнопка «✏️ Создать пост» НЕ регистрируется здесь: она — entry_point
-    ConversationHandler в handlers/post_creation.py (иначе состояние диалога
-    создания поста не отслеживается). Это относится и к callback create_post.
-
-    /drafts дублирует кнопку «📂 Черновики»: когда диалога нет — список
-    показывает этот хендлер; во время активного диалога команду и кнопку
-    обслуживают fallback'и ConversationHandler (незавершённый пост
-    сохраняется, диалог завершается — см. handlers/post_creation.py).
+    Кнопки создания анонса — entry-точки ConversationHandler анонсов
+    (`handlers/announcement_wizard.py`), поэтому здесь они не регистрируются:
+    состояние диалога иначе не отслеживалось бы. «Мои анонсы» и «Управление»
+    — экраны навигации без собственного диалога.
 
     Порядок важен: /cancel вне диалога и подсказка на обычный текст/фото
     стоят ПОСЛЕ команд и callback'ов — они не перехватывают ни их, ни
-    состояния диалога (ConversationHandler создания поста регистрируется
-    первой группой в bot.py и свои update обслуживает раньше).
+    состояния диалогов (ConversationHandler'ы идут первой группой в bot.py).
     """
     handlers = [
         CommandHandler("start", start),
@@ -327,7 +404,10 @@ def main_menu_handlers() -> list[BaseHandler]:
         CommandHandler("cancel", cancel_without_dialog),
         CallbackQueryHandler(menu_drafts, pattern="^drafts$"),
         CallbackQueryHandler(menu_help, pattern="^help$"),
-        MessageHandler(filters.Regex("^📝 Черновики$"), view_drafts),
+        CallbackQueryHandler(open_manage, pattern="^manage$"),
+        CallbackQueryHandler(manage_places, pattern="^manage_places$"),
+        CallbackQueryHandler(manage_templates, pattern="^manage_templates$"),
+        CallbackQueryHandler(manage_bricks, pattern="^manage_bricks$"),
         # Последним: обычный текст/фото вне диалога раньше оставались
         # без ответа («тишина»). Команды исключены (~COMMAND), поэтому
         # unknown_command и dialog-fallback'и работают как прежде.

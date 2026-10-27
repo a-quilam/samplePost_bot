@@ -312,10 +312,12 @@ class KnownRecipientFlowTests(unittest.TestCase):
             "confirmed",
         )
 
-        # Новый админ сразу получает кабинет и Stage 20B.
+        # Новый админ сразу получает кабинет и Stage 20B (Poster 2.0 S2:
+        # «🛡 Администрирование» живёт внутри «⚙️ Управление»).
         await h.text("/start", user_id=TARGET_TG, chat_id=TARGET_TG)
+        await h.callback("manage", user_id=TARGET_TG, chat_id=TARGET_TG)
         self.assertIn(
-            ("🛡 Админка", "admin_panel"),
+            ("🛡 Администрирование", "admin_panel"),
             h.screen_buttons(),
         )
         await h.callback("admin_panel", user_id=TARGET_TG, chat_id=TARGET_TG)

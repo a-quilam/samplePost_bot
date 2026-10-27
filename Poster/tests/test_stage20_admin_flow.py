@@ -178,6 +178,10 @@ class AdminMenuAccessTests(unittest.TestCase):
         await h.text("/start")
         labels = [label for label, _ in h.screen_buttons()]
         self.assertNotIn("🛡 Админка", labels)
+        # Poster 2.0 S2: «Управление» доступно всем, но администрирования в нём
+        # нет без выданных прав.
+        await h.callback("manage")
+        self.assertNotIn(("🛡 Администрирование", "admin_panel"), h.screen_buttons())
 
         # команда /admin без прав: экран отказа только с главным меню
         await h.text("/admin")
@@ -200,7 +204,9 @@ class AdminMenuAccessTests(unittest.TestCase):
         with patched_superadmin():
             h.user_id = SUPERADMIN_TG
             await h.text("/start")
-            self.assertIn(("🛡 Админка", "admin_panel"), h.screen_buttons())
+            # Poster 2.0 S2: административный вход — внутри «⚙️ Управление».
+            await h.callback("manage")
+            self.assertIn(("🛡 Администрирование", "admin_panel"), h.screen_buttons())
 
             await h.callback("admin_panel")
             self.assertIn("🛡 Все места", h.screen_text())
@@ -224,7 +230,8 @@ class AdminMenuAccessTests(unittest.TestCase):
             session.close()
 
         await h.text("/start")
-        self.assertIn(("🛡 Админка", "admin_panel"), h.screen_buttons())
+        await h.callback("manage")
+        self.assertIn(("🛡 Администрирование", "admin_panel"), h.screen_buttons())
 
     @scenario_test
     async def test_place_admin_opens_cabinet_with_own_place_only(self, h):
