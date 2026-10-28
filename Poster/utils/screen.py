@@ -21,7 +21,7 @@ import json
 import logging
 from typing import Any
 
-from telegram import Message
+from telegram import Message, ReplyKeyboardRemove
 from telegram.error import TelegramError
 from telegram.ext import ContextTypes
 
@@ -30,6 +30,12 @@ from models import UserState, utcnow
 from utils import tg_context as ctx
 
 logger = logging.getLogger(__name__)
+
+# Текст служебного сообщения, снимающего reply-клавиатуру старых версий
+# (R1, дефект №23). Сообщение сразу удаляется, поэтому видит его только
+# клиент в момент доставки.
+LEGACY_KEYBOARD_RESET_TEXT = "Интерфейс обновлён: кнопки теперь на экране сообщения."
+LEGACY_KEYBOARD_RESET_KEY = "legacy_reply_keyboard_dropped"
 
 
 # —— экран (постоянное сообщение управления) ——————————————————————————
@@ -234,6 +240,51 @@ async def cleanup_preview(
     previews = user_data.pop("preview_messages", None) or []
     if previews:
         await cleanup_messages(context.bot, chat_id, previews)
+
+
+# —— reply-клавиатура клиента (R1, дефект №23) ——————————————————————————
+
+
+async def drop_legacy_reply_keyboard(
+    update: Any, context: ContextTypes.DEFAULT_TYPE
+) -> None:
+    """
+    Убирает «прилипшую» reply-клавиатуру старых версий бота.
+
+    В актуальном коде `ReplyKeyboardMarkup` нигде не отправляется, поэтому
+    кнопки «Создать пост»/«Черновики» остались только у клиентов, которые
+    пользовались прежними версиями: Telegram хранит клавиатуру у себя, пока
+    бот не пришлёт `ReplyKeyboardRemove`.
+
+    Вызывается ТОЛЬКО на входах в актуальный UI (`/start`, главное меню,
+    старт конструктора, `open_admin`), а не на каждом экране. Клавиатуру
+    снимает только `send_message` (правка сообщения её не трогает), поэтому
+    уходит отдельное служебное сообщение — и сразу удаляется best-effort:
+    в чате не должно остаться ни следа, а inline-кнопки экрана не затрагиваются.
+    Любая ошибка Telegram логируется и не ломает вход.
+
+    Повторно не отправляется: Telegram держит клавиатуру, пока бот не пришлёт
+    новый `ReplyKeyboardMarkup`, а актуальный код его не отправляет вовсе —
+    поэтому одного снятия на клиента достаточно (признак в user_data).
+    """
+    user_data = ctx.data(context)
+    if user_data.get(LEGACY_KEYBOARD_RESET_KEY):
+        return
+    chat_id = ctx.chat(update).id
+    try:
+        message = await context.bot.send_message(
+            chat_id=chat_id,
+            text=LEGACY_KEYBOARD_RESET_TEXT,
+            reply_markup=ReplyKeyboardRemove(selective=False),
+            disable_notification=True,
+        )
+    except Exception as e:  # noqa: BLE001 — вход не должен ломаться
+        logger.info("Reply-клавиатура не снята (Telegram ошибся): %s", e)
+        return
+    user_data[LEGACY_KEYBOARD_RESET_KEY] = True
+    message_id = getattr(message, "message_id", None)
+    if message_id is not None:
+        await cleanup_messages(context.bot, chat_id, [int(message_id)])
 
 
 # —— долговременное состояние (таблица user_states) ————————————————————

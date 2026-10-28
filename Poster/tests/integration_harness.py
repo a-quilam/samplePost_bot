@@ -702,14 +702,26 @@ class Harness:
         """
         Сообщения бота (промпты/ответы), НЕ являющиеся постами и НЕ
         являющиеся экранами: лид-сообщения, отдельные подсказки.
+
+        Удалённые сообщения не считаются: служебные сообщения (например,
+        снятие легаси reply-клавиатуры) удаляются сразу и в чате не остаются.
         """
-        return [
-            c
-            for c in self.calls
-            if c["type"] == "message"
-            and not is_post_message(c)
-            and not is_screen_record(c)
-        ]
+        deleted = {int(mid) for mid in self.deleted_ids()}
+        out: list[dict] = []
+        index = 0
+        for call in self.calls:
+            if call["type"] not in {"message", "photo", "media_group"}:
+                continue
+            index += 1
+            if 100 + index in deleted:
+                continue
+            if (
+                call["type"] == "message"
+                and not is_post_message(call)
+                and not is_screen_record(call)
+            ):
+                out.append(call)
+        return out
 
     def reply_texts(self) -> list[str]:
         return [call_text(c) or "" for c in self.replies()]

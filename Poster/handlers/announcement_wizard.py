@@ -5992,6 +5992,9 @@ async def start_place_announcement_pick(
     _end_foreign_conversations(update, context)
     _clear_other_sessions(_user_id(update))
     await _reanchor(update, context)
+    # R1, дефект №23: старт конструктора — вход в актуальный UI; у клиента
+    # могла остаться reply-клавиатура старых версий.
+    await screen.drop_legacy_reply_keyboard(update, context)
     user_id = _user_id(update)
     ui = _fresh_ui()
     ctx.data(context)["announcement_ui"] = ui
@@ -6043,6 +6046,8 @@ async def start_personal_announcement_pick(
     _end_foreign_conversations(update, context)
     _clear_other_sessions(_user_id(update))
     await _reanchor(update, context)
+    # R1, дефект №23: старт конструктора — вход в актуальный UI.
+    await screen.drop_legacy_reply_keyboard(update, context)
     user_id = _user_id(update)
     ui = _fresh_ui()
     ctx.data(context)["announcement_ui"] = ui

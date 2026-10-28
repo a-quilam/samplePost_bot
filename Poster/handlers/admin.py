@@ -1412,6 +1412,66 @@ def _assign_search_text(details: PlaceDetails, state: dict) -> str:
     )
 
 
+# R1, дефект №21: исход поиска получателя всегда явный. Вид запроса хранится
+# в состоянии, чтобы «не найдено» объясняло, что именно не нашлось.
+ASSIGN_QUERY_INVALID_TEXT = (
+    "Неверный формат запроса. Введите @username, имя или точный числовой "
+    "Telegram user ID — пустой ввод и одни символы не ищутся."
+)
+
+ASSIGN_QUERY_USERNAME = "username"
+ASSIGN_QUERY_ID = "id"
+ASSIGN_QUERY_NAME = "name"
+
+
+def _normalize_assign_query(raw: str) -> tuple[str, str] | None:
+    """
+    Разбирает ввод в фазе `assign_search`.
+
+    Возвращает (вид, значение) или None для пустого/несимвольного ввода —
+    вызывающий показывает явную ошибку формата, а не молчит.
+    """
+    cleaned = " ".join(str(raw).split())
+    if not cleaned:
+        return None
+    if cleaned.startswith("@"):
+        username = cleaned[1:].strip()
+        # Один «@» без имени — это не поиск, а ошибка формата.
+        return (ASSIGN_QUERY_USERNAME, username) if username else None
+    if cleaned.isascii() and cleaned.isdecimal():
+        try:
+            telegram_user_id = int(cleaned)
+        except ValueError:  # pragma: no cover — isdecimal уже отсеял
+            return None
+        return (
+            (ASSIGN_QUERY_ID, str(telegram_user_id)) if telegram_user_id > 0 else None
+        )
+    if not any(character.isalnum() for character in cleaned):
+        return None
+    return (ASSIGN_QUERY_NAME, cleaned)
+
+
+def _assign_not_found_text(query: str, kind: str) -> str:
+    """Явное «не найдено» с конкретным следующим шагом (R1, дефект №21)."""
+    if kind == ASSIGN_QUERY_ID:
+        return (
+            f"Пользователь не найден: Telegram user ID "
+            f"{_h(_short(query, 40))} не известен боту. Получатель должен "
+            "открыть Poster и нажать /start, после чего повторите поиск."
+        )
+    if kind == ASSIGN_QUERY_USERNAME:
+        return (
+            f"Пользователь не найден: @{_h(_short(query, 100))} не известен "
+            "боту. Получатель должен открыть Poster и нажать /start, после "
+            "чего повторите поиск."
+        )
+    return (
+        f"Пользователь не найден по запросу «{_h(_short(query, 100))}». Если "
+        "это получатель, он должен открыть Poster и нажать /start, после чего "
+        "повторите поиск по @username или точному Telegram user ID."
+    )
+
+
 def _assign_results_content(
     session: Session, details: PlaceDetails, state: dict
 ) -> tuple[str, InlineKeyboardMarkup]:
@@ -1424,12 +1484,11 @@ def _assign_results_content(
     )
     keyboard: list[list[InlineKeyboardButton]] = []
     if not results.users:
-        text += (
-            "Пользователь не найден среди известных боту. Если получатель "
-            "ещё не запускал Poster, автоматически определить его user ID "
-            "нельзя: попросите его открыть бота и нажать /start, затем "
-            "повторите поиск."
-        )
+        # R1, дефект №21: у «не найдено» должен быть ЯВНЫЙ следующий шаг —
+        # человек может быть просто не знаком боту (не нажимал /start).
+        parsed = _normalize_assign_query(query)
+        kind = str(state.get("query_kind") or (parsed[0] if parsed else ""))
+        text += _assign_not_found_text(query, kind)
     else:
         if results.total == len(results.users):
             text += f"Найдено: {results.total}.\n\n"
@@ -2183,6 +2242,9 @@ async def open_admin(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     """Вход в кабинет: /admin, кнопка меню или восстановление после рестарта."""
     query = getattr(update, "callback_query", None)
     await screen.reanchor_screen(update, context)
+    # R1, дефект №23: кабинет — вход в актуальный UI; снимаем reply-клавиатуру
+    # старых версий, если она «прилипла» у клиента.
+    await screen.drop_legacy_reply_keyboard(update, context)
     user_id = ctx.user(update).id
     session = SessionLocal()
     try:
@@ -2385,6 +2447,7 @@ async def handle_search_again(
     await query.answer()
     state["phase"] = "assign_search"
     state.pop("query", None)
+    state.pop("query_kind", None)
     await _render_phase(update, context, state)
 
 
@@ -2558,6 +2621,7 @@ async def handle_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         "expected_admin_telegram_user_id",
         "mode",
         "query",
+        "query_kind",
     ):
         state.pop(key, None)
     await _render_phase(update, context, state, notice=_mutation_notice(result))
@@ -3315,6 +3379,7 @@ async def handle_cancel_flow(
             "confirm_replace",
             "confirm_revoke",
             "edit_menu",
+            "edit_aliases",
         }
         | EDIT_CANCEL_TO_MENU_PHASES
         | EDIT_CANCEL_TO_ALIASES_PHASES
@@ -3328,6 +3393,7 @@ async def handle_cancel_flow(
         "expected_admin_telegram_user_id",
         "mode",
         "query",
+        "query_kind",
     ):
         state.pop(key, None)
     if phase in TRANSFER_CANCEL_PHASES:
@@ -3342,6 +3408,17 @@ async def handle_cancel_flow(
     elif phase == "edit_menu":
         # Назад из меню редактирования к карточке места.
         _clear_edit_keys(state)
+        if isinstance(state.get("place_id"), int):
+            state["phase"] = "place"
+        else:
+            state.clear()
+            state.update(_new_state())
+    elif phase == "edit_aliases":
+        # R1, дефект №22: кнопка «Назад» на списке альтернативных названий
+        # ведёт к карточке места. Раньше фаза не входила в allow-list, и
+        # кнопка выглядела устаревшей (плюс падение при отрисовке).
+        _clear_edit_keys(state)
+        state.pop("alias_page", None)
         if isinstance(state.get("place_id"), int):
             state["phase"] = "place"
         else:
@@ -3382,6 +3459,7 @@ async def handle_cancel_confirm(
         "expected_admin_telegram_user_id",
         "mode",
         "query",
+        "query_kind",
     ):
         state.pop(key, None)
     state["phase"] = "place"
@@ -3402,18 +3480,43 @@ async def handle_search_text(
 
     await screen.reanchor_screen(update, context)
     raw = ctx.message(update).text or ""
-    query = " ".join(raw.split())
     _failed_add(state, update)
+    parsed = _normalize_assign_query(raw)
+    if parsed is None:
+        # R1, дефект №21: пустой/несимвольный ввод — явная ошибка формата.
+        # Фаза остаётся assign_search: пользователь сразу повторяет ввод.
+        state.pop("query", None)
+        state.pop("query_kind", None)
+        await _render_phase(
+            update,
+            context,
+            state,
+            notice=ASSIGN_QUERY_INVALID_TEXT,
+            cleanup_ids=_failed_take(state),
+            drop_input=True,
+        )
+        return
+    kind, value = parsed
     session = SessionLocal()
     try:
-        search_known_users(session, query)
+        search_known_users(session, value)
     except UserSearchError as e:
-        await _render_phase(update, context, state, notice=str(e))
+        state.pop("query", None)
+        state.pop("query_kind", None)
+        await _render_phase(
+            update,
+            context,
+            state,
+            notice=str(e),
+            cleanup_ids=_failed_take(state),
+            drop_input=True,
+        )
         return
     finally:
         session.close()
 
-    state["query"] = query
+    state["query"] = value
+    state["query_kind"] = kind
     state["phase"] = "assign_results"
     cleanup = _failed_take(state)
     current = getattr(update, "message", None)

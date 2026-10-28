@@ -228,9 +228,12 @@ class BrickServiceTests(BrickDatabaseTestCase):
         )
         self.assertFalse(duplicate.available)
         self.assertEqual(duplicate.reason, "duplicate")
-        in_system = check_code_availability(self.session, "цена", scope="system")
-        self.assertFalse(in_system.available)
-        self.assertEqual(in_system.reason, "duplicate")
+        # R1, дефект №30: код, существующий только в личной/местной области,
+        # больше не считается занятым для системной области — глобальный
+        # кирпичик живёт отдельно (внутрисистемный дубль проверяется ниже).
+        personal_only = check_code_availability(self.session, "цена", scope="system")
+        self.assertTrue(personal_only.available)
+        self.assertIsNone(personal_only.reason)
         create_place_brick(
             self.session,
             actor_telegram_user_id=user.telegram_user_id,
@@ -239,11 +242,27 @@ class BrickServiceTests(BrickDatabaseTestCase):
             title="Цена места",
             value_type="number",
         )
+        # Код занят и в месте, и у пользователя — но по-прежнему не в системе.
+        place_and_personal = check_code_availability(
+            self.session, "цена", scope="system"
+        )
+        self.assertTrue(place_and_personal.available)
         place_duplicate = check_code_availability(
             self.session, "цена", scope="place", place_id=place.id
         )
         self.assertFalse(place_duplicate.available)
         self.assertEqual(place_duplicate.reason, "duplicate")
+        # Внутрисистемный дубль остаётся запрещённым (резерв не ослаблен):
+        # код реального системного кирпичика для system недоступен.
+        system_duplicate = check_code_availability(self.session, "дата", scope="system")
+        self.assertFalse(system_duplicate.available)
+        self.assertEqual(system_duplicate.reason, "duplicate")
+        # Системный резерв по-прежнему действует и для личной области.
+        system_reserved = check_code_availability(
+            self.session, "название", scope="system"
+        )
+        self.assertFalse(system_reserved.available)
+        self.assertEqual(system_reserved.reason, "duplicate")
 
     def test_private_personal_brick_isolation_and_foreign_id_rejection(self) -> None:
         owner = self.make_user(2006)

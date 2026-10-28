@@ -140,6 +140,9 @@ async def render_main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     # новый создаётся рядом с вводом (Stage 16, дефект №7); callback —
     # guard-пропуск, кнопки и так на экране
     await screen.reanchor_screen(update, context)
+    # R1, дефект №23: главное меню — вход в актуальный UI, у клиента могла
+    # остаться reply-клавиатура старых версий. Снимается один раз на вход.
+    await screen.drop_legacy_reply_keyboard(update, context)
     user_data = ctx.data(context)
     user_id = ctx.user(update).id
     # Главное меню — другая ветка сценария: незавершённый выбор места,

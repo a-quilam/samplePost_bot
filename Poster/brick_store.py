@@ -738,11 +738,21 @@ def check_code_availability(
                 ),
             )
     if scope == BRICK_SCOPE_SYSTEM:
-        statement = select(Brick.id).where(Brick.code == canonical)
-        if exclude_brick_id is not None:
-            statement = statement.where(Brick.id != exclude_brick_id)
-        any_row = session.scalar(statement)
-        if system_row is not None or any_row is not None or system_reserved:
+        # R1, дефект №30: системный код конфликтует только сам с собой.
+        # Раньше здесь учитывалась ЛЮБАЯ строка `bricks` с этим кодом (включая
+        # place/personal), и одобрение глобального предложения падало, если
+        # такой же код уже был у места. Глобальный кирпичик — отдельная
+        # область: одноимённые местные/личные определения ему не мешают.
+        # Ограничение остаётся: `system_row` (внутрисистемный дубль) и
+        # зарезервированные SYSTEM_BRICK_CODES запрещены. Полная модель
+        # конфликтов «глобальный выигрывает + задачи на разрешение локальных
+        # дублей» — этап R3; здесь только стабилизация без миграции.
+        # Если несистемных носителей кода ДВА и больше, INSERT системного
+        # кирпичика всё равно отклонит триггер
+        # `trg_bricks_reserve_codes_insert` (исключение Stage 26 рассчитано
+        # ровно на один такой носитель): сервис вернёт явную ошибку, а не
+        # «одобрено». Разрешение таких конфликтов — тоже R3.
+        if system_row is not None or system_reserved:
             return BrickCodeAvailability(
                 code=canonical,
                 available=False,
