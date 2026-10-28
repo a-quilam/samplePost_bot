@@ -2434,6 +2434,198 @@ MIGRATION_17_ARCHIVE_LEGACY_DRAFTS = Migration(
 )
 
 
+# --- Версия 18: нетронутые копии встроенного шаблона → версия 3 (R2) --------
+#
+# Poster 2.1 R2 уточнил эталон стандартного анонса (Часть III): после
+# заголовка и строки «дата // время» появились пустые строки, сама строка
+# даты/времени и площадка стали жирными. Уже выданные копии прежнего эталона
+# без этого обновления остались бы «старыми», поэтому миграция добавляет
+# каждому НЕТРОНУТОМУ шаблону новую версию с текстом BUILTIN v3.
+#
+# Правило «обновляем только доказуемо нетронутые»:
+#
+# - кандидат — ТЕКУЩАЯ версия шаблона (`template_versions.version =
+#   templates.revision`), содержимое которой побайтово совпадает с эталоном
+#   v2, а маркер версии — `builtin_version = 2`;
+# - исключение по маркеру: стартовая личная копия до R2 создавалась сервисом
+#   как обычный личный шаблон (`builtin_version IS NULL`). Для личного
+#   шаблона с нетронутым именем «Мой шаблон» и побайтовым текстом v2 такого
+#   совпадения достаточно: имя и все три секции совпадают с эталоном, то есть
+#   копия доказуемо нетронута (после R2 такие копии сразу получают маркер);
+# - правки человека (любая изменённая секция, новая версия без
+#   `builtin_version`) в кандидаты не попадают: их текущая версия уже не v2;
+# - личная копия дополнительно обязана сохранить имя «Мой шаблон»: если
+#   человек переименовал копию, содержимое тоже НЕ обновляется — иначе одно
+#   и то же действие (переименование) молча меняло бы текст;
+# - стандартные шаблоны мест не имеют имени: у них проверяется только
+#   содержимое и маркер v2, имя (NULL) остаётся прежним.
+#
+# Иммутабельность истории не нарушается: старая версия v2 остаётся в
+# `template_versions` как есть, миграция только ДОБАВЛЯЕТ следующую версию,
+# поднимает `templates.revision` (он же указатель текущей версии) и
+# переименовывает нетронутую стартовую копию в «Дефолтный шаблон» в той же
+# транзакции. Снимки (`template_snapshots`) не трогаются: это замороженные
+# копии прошлых черновиков.
+#
+# Привязки резолвятся ПО КОДУ из `bricks`, а не хардкодом ID (S1-замечание):
+# миграция 15 создала системный `[адрес]` с `MAX(id)+1`, поэтому жёсткие
+# номера разошлись бы с реальной базой. Если хотя бы один из восьми
+# системных кодов отсутствует/архивирован, шаблон не обновляется вовсе:
+# версия с неполными привязками сломала бы рендер.
+#
+# Идемпотентность: журнал не даёт применить миграцию повторно, а сама
+# выборка после применения пуста (текущие версии стали `builtin_version=3`).
+# Временная таблица-очередь удаляется последним шагом, поэтому повторный
+# запуск на уже мигрированной базе ничего не оставляет.
+
+# Эталоны миграции заданы локально, а НЕ импортом из `template_types`:
+# миграция обязана остаться самодостаточной и не зависеть от будущих правок
+# текущих констант.
+_M18_V2_HEADER = "**[название]**"
+_M18_V2_BODY = (
+    "[дата] // [время_начала]\n"
+    "[место]([ссылка_места])\n"
+    "[адрес]\n"
+    "\n"
+    "[описание]"
+)
+_M18_V2_FOOTER = "[контакт]"
+_M18_V3_HEADER = "**[название]**"
+_M18_V3_BODY = (
+    "\n"
+    "**[дата] // [время_начала]**\n"
+    "\n"
+    "**[место]([ссылка_места])**\n"
+    "[адрес]\n"
+    "\n"
+    "[описание]"
+)
+_M18_V3_FOOTER = "\n[контакт]"
+_M18_OLD_INITIAL_NAME = "Мой шаблон"
+_M18_NEW_INITIAL_NAME = "Дефолтный шаблон"
+_M18_CODES = (
+    "название",
+    "дата",
+    "время_начала",
+    "место",
+    "ссылка_места",
+    "адрес",
+    "описание",
+    "контакт",
+)
+
+
+def _migration_18_literal(value: str) -> str:
+    """SQL-литерал строки: шаги миграции — готовые строки без параметров."""
+    return "'" + value.replace("'", "''") + "'"
+
+
+_M18_CODES_SQL = ", ".join(_migration_18_literal(code) for code in _M18_CODES)
+_M18_CODES_VALUES_SQL = " UNION ALL ".join(
+    f"SELECT {_migration_18_literal(code)} AS code" for code in _M18_CODES
+)
+
+MIGRATION_18_BUILTIN_TEMPLATES_V3 = Migration(
+    version=18,
+    name="builtin_templates_v3",
+    statements=(
+        # Очередь кандидатов: одна строка на шаблон, чтобы все следующие шаги
+        # работали с одним и тем же зафиксированным списком.
+        """
+        CREATE TABLE migration_18_targets (
+            template_id INTEGER NOT NULL PRIMARY KEY,
+            new_version INTEGER NOT NULL,
+            rename_to_default INTEGER NOT NULL
+        )
+        """,
+        f"""
+        INSERT INTO migration_18_targets (template_id, new_version, rename_to_default)
+        SELECT
+            t.id,
+            t.revision + 1,
+            CASE
+                WHEN t.kind = 'personal' AND t.name = {_migration_18_literal(_M18_OLD_INITIAL_NAME)}
+                    THEN 1
+                ELSE 0
+            END
+        FROM templates AS t
+        JOIN template_versions AS v
+          ON v.template_id = t.id AND v.version = t.revision
+        WHERE v.header = {_migration_18_literal(_M18_V2_HEADER)}
+          AND v.body = {_migration_18_literal(_M18_V2_BODY)}
+          AND v.footer = {_migration_18_literal(_M18_V2_FOOTER)}
+          AND (
+              v.builtin_version = 2
+              OR (
+                  t.kind = 'personal'
+                  AND t.name = {_migration_18_literal(_M18_OLD_INITIAL_NAME)}
+              )
+          )
+          AND (
+              t.kind = 'standard'
+              OR (t.kind = 'personal' AND t.name = {_migration_18_literal(_M18_OLD_INITIAL_NAME)})
+          )
+          AND (
+              SELECT count(*) FROM bricks AS b
+              WHERE b.scope = 'system'
+                AND b.status = 'active'
+                AND b.code IN ({_M18_CODES_SQL})
+          ) = {len(_M18_CODES)}
+        """,
+        # Новая версия: только INSERT, старая v2 остаётся в истории.
+        f"""
+        INSERT INTO template_versions
+            (template_id, version, header, body, footer,
+             created_by_user_id, created_at, builtin_version)
+        SELECT
+            g.template_id, g.new_version,
+            {_migration_18_literal(_M18_V3_HEADER)},
+            {_migration_18_literal(_M18_V3_BODY)},
+            {_migration_18_literal(_M18_V3_FOOTER)},
+            NULL, CURRENT_TIMESTAMP, 3
+        FROM migration_18_targets AS g
+        """,
+        # Те же восемь системных кодов, но brick_id — из `bricks` по коду.
+        f"""
+        INSERT INTO template_version_bricks (template_version_id, brick_id, code)
+        SELECT ver.id, b.id, c.code
+        FROM migration_18_targets AS g
+        JOIN template_versions AS ver
+          ON ver.template_id = g.template_id AND ver.version = g.new_version
+        CROSS JOIN ({_M18_CODES_VALUES_SQL}) AS c
+        JOIN bricks AS b
+          ON b.scope = 'system' AND b.status = 'active' AND b.code = c.code
+        """,
+        # Указатель текущей версии и имя стартовой копии — одной транзакцией
+        # с созданием версии: переименования без обновления не бывает.
+        f"""
+        UPDATE templates
+        SET revision = (
+                SELECT g.new_version FROM migration_18_targets AS g
+                WHERE g.template_id = templates.id
+            ),
+            name = CASE
+                WHEN (
+                    SELECT g.rename_to_default FROM migration_18_targets AS g
+                    WHERE g.template_id = templates.id
+                ) = 1
+                THEN {_migration_18_literal(_M18_NEW_INITIAL_NAME)}
+                ELSE name
+            END,
+            updated_at = CURRENT_TIMESTAMP
+        WHERE id IN (SELECT template_id FROM migration_18_targets)
+        """,
+        "DROP TABLE migration_18_targets",
+    ),
+    requires_tables=(
+        "templates",
+        "template_versions",
+        "template_version_bricks",
+        "bricks",
+    ),
+)
+
+
 DEFAULT_MIGRATIONS: tuple[Migration, ...] = (
     MIGRATION_1_USERS_PLACES,
     MIGRATION_2_PLACE_CONTACTS_UI,
@@ -2452,6 +2644,7 @@ DEFAULT_MIGRATIONS: tuple[Migration, ...] = (
     MIGRATION_15_BRICK_DESCRIPTION_AND_ADDRESS,
     MIGRATION_16_ANNOUNCEMENT_DRAFT_ORIGIN,
     MIGRATION_17_ARCHIVE_LEGACY_DRAFTS,
+    MIGRATION_18_BUILTIN_TEMPLATES_V3,
 )
 
 LATEST_VERSION = DEFAULT_MIGRATIONS[-1].version if DEFAULT_MIGRATIONS else 0

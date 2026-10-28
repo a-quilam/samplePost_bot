@@ -36,7 +36,7 @@ from admin_state import clear_admin_session
 from brick_state import clear_brick_session
 from database import SessionLocal
 from models import PlaceName, User
-from permissions import can_manage_place
+from permissions import can_manage_place, is_superadmin
 from place_state import load_place_session, save_place_session
 from place_store import (
     PlaceDetails,
@@ -72,6 +72,7 @@ TEXT_INPUT_PHASES = {
     "create_input",
     "alias_input",
     "pick_search_input",
+    "manage_search_input",
 }
 
 PHASES = {
@@ -92,6 +93,12 @@ PHASES = {
     "pick",
     "pick_search_input",
     "pick_search_results",
+    # Poster 2.1 R2: справочник «Управление → Площадки» (без анонса).
+    "manage_list",
+    "manage_search_input",
+    "manage_search_results",
+    "manage_card",
+    "manage_admin_request",
 }
 
 
@@ -701,6 +708,61 @@ async def _render_phase(
                 text, keyboard = _search_results_content(session, state)
         elif phase == "all_places":
             text, keyboard = _all_places_content(session, state)
+        elif phase == "manage_list":
+            text, keyboard = _manage_list_content(session, state)
+        elif phase == "manage_search_input":
+            text = (
+                "🔎 Поиск места\n\n"
+                "Введите часть названия. Регистр, «е/ё», пробелы и пунктуация "
+                "не важны."
+            )
+            keyboard = InlineKeyboardMarkup(
+                [[InlineKeyboardButton("◀️ К списку", callback_data="plm_back")]]
+            )
+        elif phase == "manage_search_results":
+            if not state.get("query"):
+                state["phase"] = "manage_list"
+                text, keyboard = _manage_list_content(session, state)
+            else:
+                text, keyboard = _manage_search_content(session, state)
+        elif phase == "manage_card":
+            place_id = state.get("place_id")
+            details = (
+                get_place_details(session, int(place_id))
+                if isinstance(place_id, int)
+                else None
+            )
+            if details is None:
+                state.clear()
+                state.update(_new_manage())
+                notice = notice or "Место не существует или было удалено."
+                text, keyboard = _manage_list_content(session, state)
+            else:
+                text, keyboard = _manage_card_content(
+                    session,
+                    details,
+                    manages=can_manage_place(
+                        session, telegram_user_id, details.place_id
+                    ),
+                    superadmin=is_superadmin(telegram_user_id),
+                )
+        elif phase == "manage_admin_request":
+            place_id = state.get("place_id")
+            details = (
+                get_place_details(session, int(place_id))
+                if isinstance(place_id, int)
+                else None
+            )
+            if details is None:
+                state.clear()
+                state.update(_new_manage())
+                notice = notice or "Место не существует или было удалено."
+                text, keyboard = _manage_list_content(session, state)
+            else:
+                text = _admin_request_text(details)
+                keyboard = InlineKeyboardMarkup(
+                    [[InlineKeyboardButton("◀️ К карточке", callback_data="plm_back")]]
+                )
         elif phase == "create_input":
             text = (
                 "➕ Новое место\n\n"
@@ -709,8 +771,22 @@ async def _render_phase(
             )
             if state.get("candidate"):
                 text += f"\n\nТекущее название: «{_h(state['candidate'])}»"
+            if state.get("manage_mode"):
+                text += (
+                    "\n\nУ нового места сразу появится стандартный шаблон "
+                    "анонса. Анонс не запускается."
+                )
             keyboard = InlineKeyboardMarkup(
-                [[InlineKeyboardButton("◀️ Назад", callback_data="pl_back")]]
+                [
+                    [
+                        InlineKeyboardButton(
+                            "◀️ Назад",
+                            callback_data=(
+                                "plm_back" if state.get("manage_mode") else "pl_back"
+                            ),
+                        )
+                    ]
+                ]
             )
         elif phase == "create_check":
             if not state.get("candidate"):
@@ -1017,6 +1093,222 @@ def _new_pick() -> dict:
     return {"phase": "pick", "pick_page": 0}
 
 
+# --- Poster 2.1 R2: справочник «Управление → Площадки» ----------------------
+
+MANAGE_STALE_TEXT = "Кнопка устарела: откройте «Управление → Площадки» заново."
+
+MANAGE_LIST_PHASES = frozenset(
+    {"manage_list", "manage_search_input", "manage_search_results", "manage_card"}
+)
+
+# Фазы, которые существуют только в справочнике «Управление → Площадки».
+# Нужны, чтобы обычный раздел «Места» не открывался по сохранённой сессии
+# справочника и чтобы «назад» справочника не отвечал «Кнопка устарела».
+MANAGE_ONLY_PHASES = MANAGE_LIST_PHASES | {"manage_admin_request"}
+
+
+def _new_manage() -> dict:
+    """Состояние справочника площадок (отдельно от выбора для анонса)."""
+    return {"phase": "manage_list", "page": 0}
+
+
+def _drop_manage_mode(state: dict) -> None:
+    """
+    Сбрасывает режим справочника при выходе в обычный сценарий «Места».
+
+    Иначе `manage_mode` из «Управление → Площадки → Добавить место» протекал
+    в общие экраны: «◀️ Назад» отправляла `plm_back` вместо `pl_back` и
+    уводила в справочник.
+    """
+    state.pop("manage_mode", None)
+
+
+def _manage_list_content(
+    session: Session, state: dict
+) -> tuple[str, InlineKeyboardMarkup]:
+    """Список площадок справочника: пагинация как в «Все места»."""
+    offset = _page_value(state)
+    places, total = list_places(session, offset=max(offset, 0), limit=PLACES_PAGE_SIZE)
+    if not places and total > 0 and offset > 0:
+        offset = 0
+        places, total = list_places(session, offset=0, limit=PLACES_PAGE_SIZE)
+    state["page"] = offset
+
+    if total == 0:
+        text = (
+            "📍 Площадки\n\n"
+            "В справочнике пока нет площадок. Добавьте первую — у неё сразу "
+            "появится стандартный шаблон анонса."
+        )
+        keyboard = InlineKeyboardMarkup(
+            [
+                [InlineKeyboardButton("➕ Добавить место", callback_data="plm_add")],
+                [InlineKeyboardButton("◀️ Назад", callback_data="manage")],
+            ]
+        )
+        return text, keyboard
+
+    text = f"📍 Площадки — {total}\n\n"
+    for index, item in enumerate(places, start=offset + 1):
+        text += f"{index}. {_h(item.canonical_name)}\n"
+    text += "\n" + _page_note(offset, len(places), total, PLACES_PAGE_SIZE)
+    text += (
+        "\nТап по площадке открывает карточку справочника: название, "
+        "альтернативные названия, адрес и ссылка."
+    )
+
+    rows: list[list[InlineKeyboardButton]] = []
+    for index, item in enumerate(places, start=offset + 1):
+        rows.append(
+            [
+                InlineKeyboardButton(
+                    _button_name(f"{index}. ", item.canonical_name),
+                    callback_data=f"plm_open:{item.place_id}",
+                )
+            ]
+        )
+    nav: list[InlineKeyboardButton] = []
+    if offset > 0:
+        nav.append(
+            InlineKeyboardButton(
+                "⬅️ Назад",
+                callback_data=f"plm_page:{max(offset - PLACES_PAGE_SIZE, 0)}",
+            )
+        )
+    if offset + len(places) < total:
+        nav.append(
+            InlineKeyboardButton(
+                "Вперёд ➡️",
+                callback_data=f"plm_page:{offset + len(places)}",
+            )
+        )
+    if nav:
+        rows.append(nav)
+    rows.append([InlineKeyboardButton("🔎 Найти место", callback_data="plm_search")])
+    rows.append([InlineKeyboardButton("➕ Добавить место", callback_data="plm_add")])
+    rows.append([InlineKeyboardButton("◀️ Назад", callback_data="manage")])
+    return text, InlineKeyboardMarkup(rows)
+
+
+def _manage_search_content(
+    session: Session, state: dict
+) -> tuple[str, InlineKeyboardMarkup]:
+    """Результаты поиска в справочнике: только открытие карточки."""
+    query = str(state.get("query") or "")
+    results = search_places(session, query)
+    total = len(results)
+    offset = _clamp_offset(_page_value(state), total, SEARCH_PAGE_SIZE)
+    state["page"] = offset
+    page_results = results[offset : offset + SEARCH_PAGE_SIZE]
+
+    if not results:
+        text = (
+            f"🔎 Поиск: «{_h(query)}»\n\n"
+            "Ничего не найдено. Место не создаётся автоматически — его можно "
+            "добавить отдельно, после проверки дублей."
+        )
+        keyboard = InlineKeyboardMarkup(
+            [
+                [InlineKeyboardButton("➕ Добавить место", callback_data="plm_add")],
+                [InlineKeyboardButton("🔁 Искать снова", callback_data="plm_search")],
+                [InlineKeyboardButton("◀️ К списку", callback_data="plm_back")],
+            ]
+        )
+        return text, keyboard
+
+    text = f"🔎 Результаты поиска: «{_h(query)}»\n\n"
+    for index, result in enumerate(page_results, start=offset + 1):
+        text += f"{index}. {_h(result.canonical_name)} — {_result_label(result)}\n"
+    text += "\n" + _page_note(offset, len(page_results), total)
+
+    rows: list[list[InlineKeyboardButton]] = []
+    for index, result in enumerate(page_results, start=offset + 1):
+        rows.append(
+            [
+                InlineKeyboardButton(
+                    _button_name(f"{index}. ", result.canonical_name),
+                    callback_data=f"plm_open:{result.place_id}",
+                )
+            ]
+        )
+    nav: list[InlineKeyboardButton] = []
+    if offset > 0:
+        nav.append(
+            InlineKeyboardButton(
+                "⬅️ Назад",
+                callback_data=f"plm_spage:{max(offset - SEARCH_PAGE_SIZE, 0)}",
+            )
+        )
+    if offset + len(page_results) < total:
+        nav.append(
+            InlineKeyboardButton(
+                "Вперёд ➡️",
+                callback_data=f"plm_spage:{offset + len(page_results)}",
+            )
+        )
+    if nav:
+        rows.append(nav)
+    rows.append([InlineKeyboardButton("🔁 Искать снова", callback_data="plm_search")])
+    rows.append([InlineKeyboardButton("◀️ К списку", callback_data="plm_back")])
+    return text, InlineKeyboardMarkup(rows)
+
+
+def _manage_card_content(
+    session: Session, details: PlaceDetails, *, manages: bool, superadmin: bool
+) -> tuple[str, InlineKeyboardMarkup]:
+    """
+    Карточка места справочника: данные и действия по актуальным правам.
+
+    `manages`/`superadmin` вычислены по БД в момент отрисовки: callback не
+    передаёт роль, а видимость кнопки — только удобство.
+    """
+    alternatives = [item for item in details.names if not item.is_canonical]
+    lines = [f"📍 {_h(details.canonical_name)}", ""]
+    lines.append(f"Альтернативные названия: {len(alternatives)}")
+    lines.append(f"Адрес: {_h(details.address) if details.address else 'не указан'}")
+    lines.append(f"Ссылка: {_safe_link(details.url) if details.url else 'не указана'}")
+    lines.append("")
+    if manages:
+        lines.append("Вы можете редактировать данные места и его стандартный шаблон.")
+    else:
+        lines.append(
+            "Это просмотр справочника: редактирование доступно администратору "
+            "места и суперадминистратору Poster."
+        )
+
+    rows: list[list[InlineKeyboardButton]] = []
+    if manages:
+        rows.append(
+            [
+                InlineKeyboardButton(
+                    "✏️ Редактировать",
+                    callback_data=f"plm_edit:{details.place_id}",
+                )
+            ]
+        )
+    if superadmin:
+        rows.append(
+            [
+                InlineKeyboardButton(
+                    "👥 Администраторы",
+                    callback_data=f"plm_admins:{details.place_id}",
+                )
+            ]
+        )
+    if not manages:
+        rows.append(
+            [
+                InlineKeyboardButton(
+                    "🛡 Я админ места",
+                    callback_data=f"plm_admin_request:{details.place_id}",
+                )
+            ]
+        )
+    rows.append([InlineKeyboardButton("◀️ К списку", callback_data="plm_back")])
+    rows.append([InlineKeyboardButton("🏠 Главное меню", callback_data="main_menu")])
+    return "\n".join(lines), InlineKeyboardMarkup(rows)
+
+
 async def open_place_picker(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """
     «📍 Создать для площадки»: список площадок первым экраном.
@@ -1150,6 +1442,316 @@ async def _auto_start_pick_announcement(
     remember_conversation_state(update, context, state)
 
 
+# --- Poster 2.1 R2: справочник «Управление → Площадки» ----------------------
+
+
+async def open_places_manage(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> None:
+    """
+    «Управление → Площадки»: справочник, а НЕ выбор места для анонса.
+
+    Сохранённая фаза pick не восстанавливается: раздел всегда открывается
+    списком, тап по площадке ведёт в карточку, а не в конструктор (дефект №26).
+    """
+    query = getattr(update, "callback_query", None)
+    if query is not None:
+        await query.answer()
+    await screen.reanchor_screen(update, context)
+    user_id = ctx.user(update).id
+    clear_admin_session(user_id)
+    clear_brick_session(user_id)
+    clear_template_session(user_id)
+    state = load_place_session(user_id)
+    if not isinstance(state, dict) or state.get("phase") not in MANAGE_LIST_PHASES:
+        state = _new_manage()
+    await _render_phase(update, context, state, drop_input=True)
+
+
+async def handle_manage_page(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> None:
+    """Пагинация списка площадок справочника."""
+    query = ctx.query(update)
+    state = load_place_session(ctx.user(update).id)
+    if state is None or state.get("phase") != "manage_list":
+        await query.answer(MANAGE_STALE_TEXT, show_alert=True)
+        return
+    offset = _parse_offset(query.data or "", "plm_page:")
+    if offset is None:
+        await query.answer(MANAGE_STALE_TEXT, show_alert=True)
+        return
+    await query.answer()
+    state["page"] = offset
+    await _render_phase(update, context, state)
+
+
+async def handle_manage_search(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> None:
+    """Поиск в справочнике — отдельное действие, место не создаётся."""
+    query = ctx.query(update)
+    state = load_place_session(ctx.user(update).id)
+    if state is None or state.get("phase") not in MANAGE_LIST_PHASES:
+        await query.answer(MANAGE_STALE_TEXT, show_alert=True)
+        return
+    await query.answer()
+    state["phase"] = "manage_search_input"
+    state["page"] = 0
+    state.pop("query", None)
+    await _render_phase(update, context, state)
+
+
+async def handle_manage_search_page(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> None:
+    """Пагинация результатов поиска справочника."""
+    query = ctx.query(update)
+    state = load_place_session(ctx.user(update).id)
+    if state is None or state.get("phase") != "manage_search_results":
+        await query.answer(MANAGE_STALE_TEXT, show_alert=True)
+        return
+    offset = _parse_offset(query.data or "", "plm_spage:")
+    if offset is None:
+        await query.answer(MANAGE_STALE_TEXT, show_alert=True)
+        return
+    await query.answer()
+    state["page"] = offset
+    await _render_phase(update, context, state)
+
+
+def _manage_visible_place_ids(session: Session, state: dict) -> set[int] | None:
+    """
+    Места, кнопки которых показаны в текущей фазе справочника.
+
+    Для выдачи поиска список пересчитывается: устаревшая кнопка не откроет
+    место, которого в актуальном результате уже нет. Для полного списка
+    (`manage_list`) и карточки достаточно существования места.
+    """
+    if state.get("phase") != "manage_search_results":
+        return None
+    query = state.get("query")
+    if not isinstance(query, str) or not query:
+        return set()
+    return {item.place_id for item in search_places(session, query)}
+
+
+async def handle_manage_back(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> None:
+    """
+    «Назад» справочника: карточка/поиск → список, список → «Управление».
+
+    Фазы карточки, заявки на админа места и создания из справочника входят в
+    allow-list: у каждого экрана раздела должна быть рабочая навигация, а не
+    ответ «Кнопка устарела» и тупик (дефекты №26).
+    """
+    query = ctx.query(update)
+    state = load_place_session(ctx.user(update).id)
+    phase = state.get("phase") if state is not None else None
+    allowed = MANAGE_ONLY_PHASES | {"create_input"}
+    if (
+        state is None
+        or phase not in allowed
+        or (phase == "create_input" and not state.get("manage_mode"))
+    ):
+        await query.answer(MANAGE_STALE_TEXT, show_alert=True)
+        return
+    if phase == "manage_list":
+        # «Назад» из списка справочника — выход в «Управление»; open_manage
+        # сам отвечает на callback, поэтому второй answer здесь не нужен.
+        from handlers.main_menu import open_manage
+
+        await open_manage(update, context)
+        return
+    await query.answer()
+    if phase == "manage_admin_request":
+        # «◀️ К карточке»: место то же, возвращаем карточку без сброса id.
+        state["phase"] = "manage_card"
+        await _render_phase(update, context, state)
+        return
+    state.clear()
+    state.update(_new_manage())
+    await _render_phase(update, context, state)
+
+
+async def handle_manage_open(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> None:
+    """Тап по площадке в справочнике открывает КАРТОЧКУ, не анонс."""
+    query = ctx.query(update)
+    state = load_place_session(ctx.user(update).id)
+    if state is None or state.get("phase") not in {
+        "manage_list",
+        "manage_search_results",
+    }:
+        await query.answer(MANAGE_STALE_TEXT, show_alert=True)
+        return
+    data = query.data or ""
+    try:
+        place_id = int(data[len("plm_open:") :])
+    except (TypeError, ValueError):
+        await query.answer(MANAGE_STALE_TEXT, show_alert=True)
+        return
+    session = SessionLocal()
+    try:
+        visible = _manage_visible_place_ids(session, state)
+        details = get_place_details(session, place_id)
+    finally:
+        session.close()
+    if visible is not None and place_id not in visible:
+        await query.answer(MANAGE_STALE_TEXT, show_alert=True)
+        return
+    if details is None:
+        await query.answer()
+        state.clear()
+        state.update(_new_manage())
+        await _render_phase(
+            update, context, state, notice="Место не существует или удалено."
+        )
+        return
+    await query.answer()
+    state["phase"] = "manage_card"
+    state["place_id"] = place_id
+    await _render_phase(update, context, state)
+
+
+async def handle_manage_edit(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> None:
+    """
+    «✏️ Редактировать»: переход в существующее меню правки кабинета места.
+
+    Права проверяются заново по БД (IDOR): чужое место не открывает
+    административный экран даже подделанной кнопкой.
+    """
+    query = ctx.query(update)
+    state = load_place_session(ctx.user(update).id)
+    if state is None or state.get("phase") != "manage_card":
+        await query.answer(MANAGE_STALE_TEXT, show_alert=True)
+        return
+    data = query.data or ""
+    try:
+        place_id = int(data[len("plm_edit:") :])
+    except (TypeError, ValueError):
+        await query.answer(MANAGE_STALE_TEXT, show_alert=True)
+        return
+    if state.get("place_id") != place_id:
+        await query.answer(MANAGE_STALE_TEXT, show_alert=True)
+        return
+    user_id = ctx.user(update).id
+    session = SessionLocal()
+    try:
+        details = get_place_details(session, place_id)
+        allowed = can_manage_place(session, user_id, place_id)
+    finally:
+        session.close()
+    if details is None:
+        await query.answer("Место не существует или удалено.", show_alert=True)
+        return
+    if not allowed:
+        await query.answer(
+            "Редактирование доступно администратору места.", show_alert=True
+        )
+        return
+    # Ответ на callback даёт сам переход: повторный `answer` на тот же
+    # callback Telegram отклоняет, и ошибка выглядела бы как сбой экрана.
+    from handlers.admin import open_place_admin_editor
+
+    await open_place_admin_editor(update, context, place_id)
+
+
+async def handle_manage_admins(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> None:
+    """«👥 Администраторы»: только суперадмин — карточка места кабинета."""
+    query = ctx.query(update)
+    state = load_place_session(ctx.user(update).id)
+    if state is None or state.get("phase") != "manage_card":
+        await query.answer(MANAGE_STALE_TEXT, show_alert=True)
+        return
+    data = query.data or ""
+    try:
+        place_id = int(data[len("plm_admins:") :])
+    except (TypeError, ValueError):
+        await query.answer(MANAGE_STALE_TEXT, show_alert=True)
+        return
+    if state.get("place_id") != place_id:
+        await query.answer(MANAGE_STALE_TEXT, show_alert=True)
+        return
+    user_id = ctx.user(update).id
+    if not is_superadmin(user_id):
+        await query.answer(
+            "Назначение администраторов доступно только суперадминистратору.",
+            show_alert=True,
+        )
+        return
+    session = SessionLocal()
+    try:
+        details = get_place_details(session, place_id)
+    finally:
+        session.close()
+    if details is None:
+        await query.answer("Место не существует или удалено.", show_alert=True)
+        return
+    # Ответ на callback даёт переход в кабинет: второй `answer` на тот же
+    # callback Telegram отклоняет.
+    from handlers.admin import open_place_admin_card
+
+    await open_place_admin_card(update, context, place_id)
+
+
+async def handle_manage_admin_request(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> None:
+    """«🛡 Я админ места»: только объяснение, роль не меняется."""
+    query = ctx.query(update)
+    state = load_place_session(ctx.user(update).id)
+    if state is None or state.get("phase") != "manage_card":
+        await query.answer(MANAGE_STALE_TEXT, show_alert=True)
+        return
+    data = query.data or ""
+    try:
+        place_id = int(data[len("plm_admin_request:") :])
+    except (TypeError, ValueError):
+        await query.answer(MANAGE_STALE_TEXT, show_alert=True)
+        return
+    if state.get("place_id") != place_id:
+        await query.answer(MANAGE_STALE_TEXT, show_alert=True)
+        return
+    user_id = ctx.user(update).id
+    session = SessionLocal()
+    try:
+        details = get_place_details(session, place_id)
+        manages = can_manage_place(session, user_id, place_id)
+    finally:
+        session.close()
+    if details is None:
+        await query.answer("Место не существует или удалено.", show_alert=True)
+        return
+    if manages:
+        await query.answer("У вас уже есть права на управление этим местом.")
+        await _render_phase(update, context, state)
+        return
+    await query.answer()
+    state["phase"] = "manage_admin_request"
+    await _render_phase(update, context, state)
+
+
+async def handle_manage_add(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """«➕ Добавить место» из справочника: создание без автозапуска анонса."""
+    state = load_place_session(ctx.user(update).id)
+    if state is None or state.get("phase") not in (
+        MANAGE_LIST_PHASES | {"manage_search_input"}
+    ):
+        await _stale(update, MANAGE_STALE_TEXT)
+        return
+    await ctx.query(update).answer()
+    state.clear()
+    state.update({"phase": "create_input", "manage_mode": True})
+    await _render_phase(update, context, state)
+
+
 async def open_places(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Вход в раздел: кнопка меню, /places или восстановление после рестарта."""
     query = getattr(update, "callback_query", None)
@@ -1164,6 +1766,13 @@ async def open_places(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     state = load_place_session(ctx.user(update).id)
     if not isinstance(state, dict) or state.get("phase") not in PHASES:
         state = _new_hub()
+    elif state.get("phase") in MANAGE_ONLY_PHASES:
+        # Сохранённая фаза справочника не возобновляется в обычном разделе.
+        state = _new_hub()
+    else:
+        # Обычный раздел «Места» — не справочник: режим управления сбрасывается,
+        # иначе кнопка «◀️ Назад» уводила бы в `plm_back`/справочник.
+        _drop_manage_mode(state)
     await _render_phase(update, context, state, drop_input=True)
 
 
@@ -1531,6 +2140,7 @@ async def handle_create_confirm(
         await _stale(update)
         return
     pick_mode = bool(state.get("pick_mode"))
+    manage_mode = bool(state.get("manage_mode"))
     await query.answer()
 
     session = SessionLocal()
@@ -1579,6 +2189,23 @@ async def handle_create_confirm(
         # Poster 2.0 S2: создание площадки из «Создать для площадки» сразу
         # открывает анонс по её стандартному шаблону.
         await _auto_start_pick_announcement(update, context, place_id)
+        return
+    if manage_mode:
+        # Poster 2.1 R2: создание из справочника открывает КАРТОЧКУ места.
+        # Стандартный шаблон уже создан в `create_place`; анонс не стартует.
+        state.clear()
+        state.update(_new_manage())
+        state["phase"] = "manage_card"
+        state["place_id"] = place_id
+        await _render_phase(
+            update,
+            context,
+            state,
+            notice=(
+                "✅ Место добавлено вместе со стандартным шаблоном. "
+                "Оно сразу доступно всем пользователям."
+            ),
+        )
         return
     await _render_phase(
         update,
@@ -1752,9 +2379,23 @@ async def handle_back(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     phase = state.get("phase")
     if phase == "search_results":
         state["phase"] = "search_input"
-    elif phase in {"search_input", "all_places", "create_input", "create_check"}:
+    elif phase == "manage_search_results":
+        state["phase"] = "manage_search_input"
+    elif phase == "manage_search_input":
+        state["phase"] = "manage_list"
+        state.pop("query", None)
+    elif phase == "manage_admin_request":
+        state["phase"] = "manage_card"
+    elif phase in {"search_input", "all_places"}:
         state.clear()
         state.update(_new_hub())
+    elif phase in {"create_input", "create_check"}:
+        if state.get("manage_mode"):
+            state.clear()
+            state.update(_new_manage())
+        else:
+            state.clear()
+            state.update(_new_hub())
     elif phase == "existing_choice":
         state["phase"] = "create_check"
     elif phase == "confirm":
@@ -1850,6 +2491,31 @@ async def handle_place_text(update: Update, context: ContextTypes.DEFAULT_TYPE) 
             return
         state["query"] = display_query
         state["phase"] = "search_results"
+        state["page"] = 0
+        cleanup = _failed_take(state)
+        await _render_phase(
+            update,
+            context,
+            state,
+            cleanup_ids=cleanup,
+            drop_input=True,
+        )
+        return
+
+    if phase == "manage_search_input":
+        try:
+            display_query = clean_display_name(raw)
+            session = SessionLocal()
+            try:
+                search_places(session, display_query)
+            finally:
+                session.close()
+        except PlaceNameError as exc:
+            _failed_add(state, update)
+            await _render_phase(update, context, state, notice=str(exc))
+            return
+        state["query"] = display_query
+        state["phase"] = "manage_search_results"
         state["page"] = 0
         cleanup = _failed_take(state)
         await _render_phase(
@@ -2024,6 +2690,19 @@ def places_handlers() -> list[BaseHandler]:
         CallbackQueryHandler(handle_pick_search_page, pattern=r"^pl_picksp:\d+$"),
         CallbackQueryHandler(handle_pick_back, pattern=r"^pl_pick_back$"),
         CallbackQueryHandler(handle_pick_add, pattern=r"^pl_pick_add$"),
+        # Poster 2.1 R2: справочник «Управление → Площадки» (без анонса).
+        # Точка входа `manage_places` зарегистрирована в main_menu_handlers.
+        CallbackQueryHandler(handle_manage_page, pattern=r"^plm_page:\d+$"),
+        CallbackQueryHandler(handle_manage_search, pattern=r"^plm_search$"),
+        CallbackQueryHandler(handle_manage_search_page, pattern=r"^plm_spage:\d+$"),
+        CallbackQueryHandler(handle_manage_back, pattern=r"^plm_back$"),
+        CallbackQueryHandler(handle_manage_open, pattern=r"^plm_open:\d+$"),
+        CallbackQueryHandler(handle_manage_edit, pattern=r"^plm_edit:\d+$"),
+        CallbackQueryHandler(handle_manage_admins, pattern=r"^plm_admins:\d+$"),
+        CallbackQueryHandler(
+            handle_manage_admin_request, pattern=r"^plm_admin_request:\d+$"
+        ),
+        CallbackQueryHandler(handle_manage_add, pattern=r"^plm_add$"),
         CallbackQueryHandler(handle_hub, pattern=r"^pl_hub$"),
         CallbackQueryHandler(handle_search_prompt, pattern=r"^pl_search$"),
         CallbackQueryHandler(handle_all_places, pattern=r"^pl_all$"),

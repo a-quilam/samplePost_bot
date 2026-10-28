@@ -246,7 +246,7 @@ class TemplatesUiTests(unittest.TestCase):
         await h.text("/templates", user_id=OWNER_TG)
         await h.callback(f"tp_open:{tid}", user_id=OWNER_TG)
         await h.callback(f"tp_reset:{tid}", user_id=OWNER_TG)
-        self.assertIn("Сбросить к стандартному?", h.screen_text())
+        self.assertIn("Восстановить стандарт?", h.screen_text())
         await h.callback(f"tp_reset_yes:{tid}", user_id=OWNER_TG)
         self.assertIn("Сбрасываемый", h.screen_text())
         rows = self.personal_templates(h)
@@ -368,7 +368,7 @@ class TemplatesUiTests(unittest.TestCase):
                 expected_revision=2,
             )
         await h.callback(f"tp_reset:{template_id}", user_id=admin_tg)
-        self.assertIn("Сбросить к стандартному?", h.screen_text())
+        self.assertIn("Восстановить стандарт?", h.screen_text())
         await h.callback(f"tp_reset_yes:{template_id}", user_id=admin_tg)
         row = self.template_row(h, template_id)
         assert row is not None

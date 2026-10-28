@@ -100,6 +100,7 @@ class MigrationMechanismTests(unittest.TestCase):
                 (15, "brick_description_and_address"),
                 (16, "announcement_draft_origin"),
                 (17, "archive_legacy_drafts"),
+                (18, "builtin_templates_v3"),
             ],
         )
 
@@ -201,6 +202,7 @@ class MigrationMechanismTests(unittest.TestCase):
                 (15, "brick_description_and_address"),
                 (16, "announcement_draft_origin"),
                 (17, "archive_legacy_drafts"),
+                (18, "builtin_templates_v3"),
             ],
         )
 

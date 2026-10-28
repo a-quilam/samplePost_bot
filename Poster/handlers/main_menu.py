@@ -328,14 +328,19 @@ async def open_manage(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
 
 
 async def manage_places(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """«Управление» → «Площадки»: справочник мест."""
-    from handlers.places import open_places
+    """«Управление» → «Площадки»: справочник мест (не выбор для анонса)."""
+    from handlers.places import open_places_manage
 
-    await open_places(update, context)
+    await open_places_manage(update, context)
 
 
 async def manage_templates(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """«Управление» → «Шаблоны»: личные шаблоны и стандарты мест."""
+    """
+    «Управление» → «Шаблоны»: только управление шаблонами.
+
+    Вход не возобновляет сохранённую фазу `pick` и никогда не запускает
+    создание анонса (R2, дефект №25): раздел открывается списком управления.
+    """
     from handlers.templates import open_templates
 
     await open_templates(update, context)

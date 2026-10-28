@@ -2276,6 +2276,81 @@ async def open_admin(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     await _render_phase(update, context, state, drop_input=True)
 
 
+async def open_place_admin_editor(
+    update: Update, context: ContextTypes.DEFAULT_TYPE, place_id: int
+) -> None:
+    """
+    Переход из карточки справочника в меню редактирования места кабинета.
+
+    Вход в существующее меню правки (`adm_edit_name`/`adm_aliases`/
+    `adm_edit_address`/`adm_edit_url`), а не второй редактор. Роль и место
+    перепроверяются по БД: чужой id не открывает административный экран
+    (IDOR), даже если callback подделан.
+    """
+    query = ctx.query(update)
+    user_id = ctx.user(update).id
+    session = SessionLocal()
+    try:
+        allowed = can_access_admin_panel(session, user_id) and can_manage_place(
+            session, user_id, place_id
+        )
+        exists = get_place_details(session, place_id) is not None
+    except Exception as e:  # noqa: BLE001 — отказ безопаснее открытия
+        logger.error("Не удалось проверить доступ к редактированию места: %s", e)
+        allowed = False
+        exists = False
+    finally:
+        session.close()
+    if not exists:
+        await query.answer("Место не существует или удалено.", show_alert=True)
+        return
+    if not allowed:
+        await query.answer(DENIED_ALERT, show_alert=True)
+        return
+    await query.answer()
+    clear_place_session(user_id)
+    clear_brick_session(user_id)
+    clear_template_session(user_id)
+    state = _new_state()
+    state["phase"] = "edit_menu"
+    state["place_id"] = place_id
+    save_admin_session(user_id, state)
+    await _render_phase(update, context, state, drop_input=True)
+
+
+async def open_place_admin_card(
+    update: Update, context: ContextTypes.DEFAULT_TYPE, place_id: int
+) -> None:
+    """
+    Карточка места кабинета из справочника: назначение/замена администратора.
+
+    Доступна только суперадминистратору (проверяется заново здесь и в
+    `_render_phase`); обычный админ места получает отказ.
+    """
+    query = ctx.query(update)
+    user_id = ctx.user(update).id
+    if not is_superadmin(user_id):
+        await query.answer(DENIED_ALERT, show_alert=True)
+        return
+    session = SessionLocal()
+    try:
+        exists = get_place_details(session, place_id) is not None
+    finally:
+        session.close()
+    if not exists:
+        await query.answer("Место не существует или удалено.", show_alert=True)
+        return
+    await query.answer()
+    clear_place_session(user_id)
+    clear_brick_session(user_id)
+    clear_template_session(user_id)
+    state = _new_state()
+    state["phase"] = "place"
+    state["place_id"] = place_id
+    save_admin_session(user_id, state)
+    await _render_phase(update, context, state, drop_input=True)
+
+
 async def handle_places_page(
     update: Update, context: ContextTypes.DEFAULT_TYPE
 ) -> None:

@@ -273,7 +273,10 @@ class Stage22ACompatibilityTests(unittest.TestCase):
         finally:
             backup_connection.close()
 
-        self.assertEqual(journal(self.path)[-1], (17, "archive_legacy_drafts"))
+        self.assertIn((17, "archive_legacy_drafts"), journal(self.path))
+        self.assertEqual(
+            journal(self.path)[-1], (LATEST_VERSION, "builtin_templates_v3")
+        )
         # Миграция 17 переименовала легаси-таблицу: строки прежнего черновика
         # читаются из архива как есть, `drafts` в рабочей схеме нет.
         self.assertIsNone(

@@ -422,7 +422,8 @@ class InitialTemplateTests(unittest.TestCase):
         with h.session_factory() as session:
             templates = list_personal_templates(session, DEFAULT_USER_ID)
         self.assertEqual(len(templates), 1)
-        self.assertEqual(templates[0].display_name, "Мой шаблон")
+        # Poster 2.1 R2: стартовая копия называется «Дефолтный шаблон».
+        self.assertEqual(templates[0].display_name, "Дефолтный шаблон")
 
     @scenario_test
     async def test_repeated_start_does_not_duplicate(self, h):
@@ -778,10 +779,15 @@ class ManageSectionTests(unittest.TestCase):
 
     @scenario_test
     async def test_manage_opens_places_and_templates(self, h):
+        _seed_place(h, name="Дом культуры")
         await h.text("/start")
         await h.callback("manage")
         await h.callback("manage_places")
-        self.assertIn("Места", h.screen_text())
+        # R2b, дефект №26: раздел «Площадки» — справочник, а не выбор места
+        # для немедленного старта анонса.
+        self.assertIn("📍 Площадки", h.screen_text())
+        self.assertIn("Дом культуры", h.screen_text())
+        self.assertNotIn("pl_pick:", [data for _label, data in h.screen_buttons()])
         await h.callback("main_menu")
         await h.callback("manage")
         await h.callback("manage_templates")

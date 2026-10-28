@@ -17,6 +17,7 @@ from sqlalchemy.exc import IntegrityError, OperationalError
 
 from migrations import LATEST_VERSION
 from models import Place, Template, TemplateVersion
+from template_types import BUILTIN_TEMPLATE, BUILTIN_TEMPLATE_VERSION
 from tests.stage19a_helpers import connect
 from tests.stage23_helpers import (
     OTHER_TG,
@@ -54,7 +55,7 @@ class TemplateSchemaTests(TemplateDatabaseTestCase):
 
     def test_template_migrations_apply_and_are_idempotent(self) -> None:
         self.assertEqual(self.migrations_applied, LATEST_VERSION)
-        self.assertEqual(LATEST_VERSION, 17)
+        self.assertEqual(LATEST_VERSION, 18)
         self.assertIn((12, "announcement_wizard"), self.journal())
         self.assertIn((13, "announcement_photos_publication"), self.journal())
         self.assertIn((8, "templates_versions_snapshots"), self.journal())
@@ -63,6 +64,8 @@ class TemplateSchemaTests(TemplateDatabaseTestCase):
         self.assertIn((11, "brick_proposals"), self.journal())
         self.assertIn((15, "brick_description_and_address"), self.journal())
         self.assertIn((16, "announcement_draft_origin"), self.journal())
+        self.assertIn((17, "archive_legacy_drafts"), self.journal())
+        self.assertIn((18, "builtin_templates_v3"), self.journal())
 
         tables = set(self.engine.dialect.get_table_names(self.engine.connect()))
         self.assertTrue(
@@ -118,12 +121,12 @@ class TemplateSchemaTests(TemplateDatabaseTestCase):
             ),
             {"tid": template_id},
         ).one()
-        # Poster 2.0 S1: точный эталон §6.1.1 — жирная шапка, `//`,
-        # гиперссылка на названии и отдельный `[адрес]`.
-        self.assertEqual(row[0], "**[название]**")
+        # Poster 2.1 R2: точный эталон Части III — жирная шапка и строка
+        # даты/времени, `//`, жирная гиперссылка и отдельный `[адрес]`.
+        self.assertEqual(row[0], BUILTIN_TEMPLATE.header)
         self.assertIn("[дата]", str(row[1]))
         self.assertIn("[описание]", str(row[1]))
-        self.assertEqual(row[3], 2)
+        self.assertEqual(row[3], BUILTIN_TEMPLATE_VERSION)
 
         bricks = self.session.execute(
             text(

@@ -31,6 +31,8 @@ from __future__ import annotations
 import logging
 from typing import Any, TypeGuard
 
+from sqlalchemy import delete, func, select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import (
@@ -54,7 +56,7 @@ from brick_types import (
     BRICK_TYPE_TITLES,
 )
 from database import SessionLocal
-from models import User
+from models import AnnouncementDraft, Template, TemplateSnapshot, User
 from permissions import can_access_admin_panel, can_manage_place
 from place_state import clear_place_session
 from place_store import get_place_details
@@ -76,6 +78,7 @@ from template_store import (
     create_personal_template,
     get_accessible_template,
     get_builtin_template,
+    get_personal_template,
     get_standard_template,
     list_personal_templates,
     reset_personal_template,
@@ -109,6 +112,9 @@ ERROR_TEXT_LIMIT = 1400
 PHASE_HUB = "hub"
 # Poster 2.0 S2: список личных шаблонов как вход в анонс. Тап по названию
 # сразу начинает конструктор, «✏️» открывает карточку для правки.
+# R2b, дефект №25: фаза живёт ТОЛЬКО у входа «📝 Создать по личному
+# шаблону» (`pick_template`). «Управление → Шаблоны» и `/templates`
+# открывают hub управления и никогда не запускают конструктор.
 PHASE_PICK = "pick"
 PHASE_CARD = "card"
 PHASE_SECTION_EDIT = "section_edit"
@@ -117,6 +123,9 @@ PHASE_SECTION_ERROR = "section_error"
 PHASE_RESOLVE_AMBIGUITY = "resolve_ambiguity"
 PHASE_PREVIEW = "preview"
 PHASE_RESET_CONFIRM = "reset_confirm"
+# Poster 2.1 R2: удаление личного шаблона — только после подтверждения и
+# только если у шаблона нет неизменяемой истории (снимки/анонсы).
+PHASE_DELETE_CONFIRM = "delete_confirm"
 PHASE_BRICK_LIST = "brick_list"
 PHASE_HELP = "help"
 PHASE_AWAIT_NAME = "await_new_name"
@@ -124,6 +133,7 @@ PHASE_CREATE_CHOICE = "create_choice"
 PHASE_CREATE_CONFIRM = "create_confirm"
 PHASE_SAVING = "saving"
 PHASE_CREATE_SAVING = "create_saving"
+PHASE_DELETING = "deleting"
 
 # Фазы, в которых сценарий принимает обычный текст. Все остальные фазы —
 # экранные: текст в них не должен попадать в шаблон.
@@ -146,9 +156,11 @@ _TEMPLATE_PHASES = frozenset(
         PHASE_RESOLVE_AMBIGUITY,
         PHASE_PREVIEW,
         PHASE_RESET_CONFIRM,
+        PHASE_DELETE_CONFIRM,
         PHASE_BRICK_LIST,
         PHASE_HELP,
         PHASE_SAVING,
+        PHASE_DELETING,
     }
 )
 
@@ -345,6 +357,8 @@ def _valid_state(state: object) -> TypeGuard[dict[str, Any]]:
         phase = PHASE_CONFIRM_SAVE
     elif phase == PHASE_CREATE_SAVING:
         phase = PHASE_CREATE_CONFIRM
+    elif phase == PHASE_DELETING:
+        phase = PHASE_DELETE_CONFIRM
     if phase not in PHASES:
         return False
 
@@ -651,14 +665,27 @@ def _card_content(
             ],
             [
                 InlineKeyboardButton(
-                    "♻️ Сбросить к стандартному",
+                    "♻️ Восстановить стандарт",
                     callback_data=f"tp_reset:{template.template_id}",
                 )
             ],
             [_card_back_button(template)],
         ]
     )
-    return "\n".join(lines), keyboard
+    rows = [list(row) for row in keyboard.inline_keyboard]
+    if template.kind == TEMPLATE_KIND_PERSONAL:
+        # Стандарт места не удаляется: место не может остаться без шаблона
+        # (это гарантирует триггер схемы). У личного удаление — в конце списка.
+        rows.insert(
+            -1,
+            [
+                InlineKeyboardButton(
+                    "🗑 Удалить шаблон",
+                    callback_data=f"tp_delete:{template.template_id}",
+                )
+            ],
+        )
+    return "\n".join(lines), InlineKeyboardMarkup(rows)
 
 
 def _preview_content(
@@ -723,7 +750,7 @@ def _reset_confirm_content(
         else "личного шаблона"
     )
     text = (
-        "♻️ Сбросить к стандартному?\n\n"
+        "♻️ Восстановить стандарт?\n\n"
         f"Шаблон: «{_h(template.display_name)}»\n"
         f"Текущая версия: {template.revision}\n\n"
         f"Содержимое {kind_title} будет заменено встроенным стандартом Poster. "
@@ -734,7 +761,7 @@ def _reset_confirm_content(
         [
             [
                 InlineKeyboardButton(
-                    "✅ Подтвердить сброс",
+                    "✅ Подтвердить восстановление",
                     callback_data=f"tp_reset_yes:{template.template_id}",
                 )
             ],
@@ -750,6 +777,117 @@ def _reset_confirm_content(
 
 
 # --- Экраны: редактирование секции ------------------------------------------
+
+
+def _delete_confirm_content(
+    template: TemplateDetails,
+) -> tuple[str, InlineKeyboardMarkup]:
+    text = (
+        "🗑 Удалить шаблон?\n\n"
+        f"Шаблон: «{_h(template.display_name)}»\n"
+        f"Текущая версия: {template.revision}\n\n"
+        "Шаблон исчезнет из списка личных шаблонов. Уже созданные по нему "
+        "анонсы и их история не изменятся.\n\n"
+        "Если шаблон уже использовался в анонсах, удаление невозможно: "
+        "история анонсов должна сохраняться. В этом случае останется "
+        "«♻️ Восстановить стандарт»."
+    )
+    keyboard = InlineKeyboardMarkup(
+        [
+            [
+                InlineKeyboardButton(
+                    "✅ Удалить",
+                    callback_data=f"tp_delete_yes:{template.template_id}",
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    "◀️ Отмена",
+                    callback_data=f"tp_open:{template.template_id}",
+                )
+            ],
+        ]
+    )
+    return text, keyboard
+
+
+DELETE_BLOCKED_TEXT = (
+    "Шаблон нельзя удалить: по нему уже создавались анонсы, а их история "
+    "должна сохраняться. Шаблон можно отредактировать или восстановить к "
+    "встроенному стандарту."
+)
+
+
+def _template_usage(session: Session, template_id: int) -> tuple[int, int]:
+    """
+    Сколько неизменяемых следов ссылается на шаблон.
+
+    Снимок в анонсе (`template_snapshots`) и сам анонс
+    (`announcement_drafts`) держат шаблон FK `ON DELETE RESTRICT`. Пока хотя
+    бы один след есть, физическое удаление запрещено: иначе пострадает
+    история анонсов.
+    """
+    snapshots = int(
+        session.scalar(
+            select(func.count(TemplateSnapshot.id)).where(
+                TemplateSnapshot.source_template_id == template_id
+            )
+        )
+        or 0
+    )
+    drafts = int(
+        session.scalar(
+            select(func.count(AnnouncementDraft.id)).where(
+                AnnouncementDraft.template_id == template_id
+            )
+        )
+        or 0
+    )
+    return snapshots, drafts
+
+
+def _delete_personal_template(
+    session: Session,
+    *,
+    telegram_user_id: int,
+    template_id: int,
+    expected_revision: int,
+) -> str:
+    """
+    Удаляет личный шаблон без истории версий/снимков/анонсов.
+
+    Возвращает исход: `deleted`, `stale`, `blocked`, `not_found`.
+    Вся проверка и удаление — в одной транзакции: чужая правка, снимок или
+    анонс не дают удалить шаблон по устаревшему экрану.
+    """
+    template = get_personal_template(session, telegram_user_id, template_id)
+    if template is None:
+        return "not_found"
+    if template.revision != expected_revision:
+        return "stale"
+    snapshots, drafts = _template_usage(session, template_id)
+    if snapshots or drafts:
+        return "blocked"
+    try:
+        result = session.execute(
+            delete(Template).where(
+                Template.id == template_id,
+                Template.kind == TEMPLATE_KIND_PERSONAL,
+                Template.revision == expected_revision,
+            )
+        )
+    except IntegrityError:
+        session.rollback()
+        return "blocked"
+    if getattr(result, "rowcount", 0) != 1:
+        session.rollback()
+        return "stale"
+    try:
+        session.commit()
+    except IntegrityError:
+        session.rollback()
+        return "blocked"
+    return "deleted"
 
 
 def _section_edit_content(
@@ -1337,6 +1475,11 @@ async def _render_phase(
             "Создание не было подтверждено. Проверьте, не создан ли шаблон "
             "ранее, и повторите при необходимости."
         )
+    elif phase == PHASE_DELETING:
+        state["phase"] = phase = PHASE_DELETE_CONFIRM
+        notice = notice or (
+            "Удаление не было подтверждено. Проверьте список и повторите."
+        )
 
     telegram_user_id = ctx.user(update).id
     session = SessionLocal()
@@ -1388,6 +1531,9 @@ async def _render_phase(
                 elif phase == PHASE_RESET_CONFIRM:
                     state["revision"] = template.revision
                     text, keyboard = _reset_confirm_content(template)
+                elif phase == PHASE_DELETE_CONFIRM:
+                    state["revision"] = template.revision
+                    text, keyboard = _delete_confirm_content(template)
                 elif phase == PHASE_SECTION_EDIT:
                     if check_revision and template.revision != state.get("revision"):
                         notice = notice or (
@@ -1644,7 +1790,15 @@ async def _validate_and_show(
 
 
 async def open_templates(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Вход в раздел: кнопка меню, /templates или продолжение после рестарта."""
+    """
+    Вход в раздел управления шаблонами: кнопка меню, /templates, рестарт.
+
+    R2b, дефект №25: «Управление → Шаблоны» и `/templates` — только
+    управление. Сохранённая фаза `pick` (вход в создание анонса) здесь НЕ
+    возобновляется: раздел открывается списком управления, а создать анонс
+    можно только из главного меню через «📝 Создать по личному шаблону».
+    Незавершённая правка/сохранение шаблона возобновляется как раньше.
+    """
     query = getattr(update, "callback_query", None)
     if query is not None:
         await query.answer()
@@ -1655,8 +1809,10 @@ async def open_templates(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     clear_brick_session(telegram_user_id)
 
     state = load_template_session(telegram_user_id)
-    if not _valid_state(state):
-        state = _new_hub()
+    if not _valid_state(state) or state.get("phase") == PHASE_PICK:
+        state = _new_hub(
+            _page_value(state.get("page") if isinstance(state, dict) else 0)
+        )
     await _render_phase(update, context, state, drop_input=True)
 
 
@@ -1725,6 +1881,7 @@ async def handle_hub(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         PHASE_CARD,
         PHASE_PREVIEW,
         PHASE_RESET_CONFIRM,
+        PHASE_DELETE_CONFIRM,
         PHASE_SECTION_ERROR,
         PHASE_BRICK_LIST,
         PHASE_HELP,
@@ -2022,6 +2179,145 @@ async def handle_reset_yes(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     except Exception as exc:  # noqa: BLE001
         logger.exception("Не удалось сбросить шаблон: %s", exc)
         alert = "Не удалось сбросить шаблон. Повторите попытку."
+    finally:
+        session.close()
+
+    if alert is not None:
+        await query.answer(alert, show_alert=True)
+        return
+    await query.answer()
+    if new_state is not None and keyboard is not None:
+        await _show(update, context, new_state, text, keyboard, notice=notice)
+
+
+# --- Обработчики: удаление личного шаблона ----------------------------------
+
+
+async def handle_delete(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """«🗑 Удалить шаблон» в карточке: только подтверждение, без удаления."""
+    query = ctx.query(update)
+    state = load_template_session(ctx.user(update).id)
+    if not _valid_state(state) or state.get("phase") != PHASE_CARD:
+        await query.answer(STALE_TEXT, show_alert=True)
+        return
+    template_id = _callback_id(query.data or "", "tp_delete:")
+    if template_id is None or template_id != state.get("template_id"):
+        await query.answer(STALE_TEXT, show_alert=True)
+        return
+    telegram_user_id = ctx.user(update).id
+    session = SessionLocal()
+    try:
+        template = _load_editable(session, telegram_user_id, template_id)
+        if template is None:
+            await query.answer("Шаблон не найден.", show_alert=True)
+            return
+        if template.kind != TEMPLATE_KIND_PERSONAL:
+            await query.answer(
+                "Стандартный шаблон удалить нельзя: место не может остаться "
+                "без шаблона.",
+                show_alert=True,
+            )
+            return
+        await query.answer()
+        state.update(
+            {
+                "phase": PHASE_DELETE_CONFIRM,
+                "revision": template.revision,
+                "origin": _template_origin(template),
+                "place_id": template.place_id,
+            }
+        )
+        text, keyboard = _delete_confirm_content(template)
+    finally:
+        session.close()
+    await _show(update, context, state, text, keyboard)
+
+
+async def handle_delete_yes(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """
+    Подтверждённое удаление личного шаблона.
+
+    Снимки и анонсы не удаляются и не переписываются: если они есть,
+    пользователь получает явный исход «удалить нельзя» и остаётся в карточке.
+    """
+    query = ctx.query(update)
+    telegram_user_id = ctx.user(update).id
+    state = load_template_session(telegram_user_id)
+    if not _valid_state(state) or state.get("phase") != PHASE_DELETE_CONFIRM:
+        await query.answer(STALE_TEXT, show_alert=True)
+        return
+    template_id = _callback_id(query.data or "", "tp_delete_yes:")
+    if template_id is None or template_id != state.get("template_id"):
+        await query.answer(STALE_TEXT, show_alert=True)
+        return
+    # Защита от двойного нажатия: повторный callback увидит другую фазу.
+    state["phase"] = PHASE_DELETING
+    save_template_session(telegram_user_id, state)
+
+    session = SessionLocal()
+    notice: str | None = None
+    alert: str | None = None
+    new_state: dict | None = None
+    text = ""
+    keyboard: InlineKeyboardMarkup | None = None
+    try:
+        outcome = _delete_personal_template(
+            session,
+            telegram_user_id=telegram_user_id,
+            template_id=template_id,
+            expected_revision=int(state.get("revision") or 0),
+        )
+        page = _page_value(state.get("page"))
+        if outcome == "deleted":
+            new_state = _new_hub(page)
+            templates = list_personal_templates(session, telegram_user_id)
+            text, keyboard = _hub_content(templates, page)
+            notice = "Шаблон удалён."
+        elif outcome == "not_found":
+            new_state = _new_hub(page)
+            templates = list_personal_templates(session, telegram_user_id)
+            text, keyboard = _hub_content(templates, page)
+            notice = "Шаблон уже удалён."
+        elif outcome == "stale":
+            template = get_personal_template(session, telegram_user_id, template_id)
+            if template is None:
+                new_state = _new_hub(page)
+                templates = list_personal_templates(session, telegram_user_id)
+                text, keyboard = _hub_content(templates, page)
+                notice = "Шаблон уже удалён."
+            else:
+                new_state = _card_state(
+                    template,
+                    origin=_template_origin(template),
+                    page=page,
+                )
+                text, keyboard = _card_content(
+                    template, place_name=_place_name(session, template.place_id)
+                )
+                notice = (
+                    "Удаление не выполнено: шаблон уже изменился в другом "
+                    "окне. Проверьте актуальную версию и повторите."
+                )
+        else:  # blocked
+            template = get_personal_template(session, telegram_user_id, template_id)
+            if template is None:
+                new_state = _new_hub(page)
+                templates = list_personal_templates(session, telegram_user_id)
+                text, keyboard = _hub_content(templates, page)
+                notice = "Шаблон уже удалён."
+            else:
+                new_state = _card_state(
+                    template,
+                    origin=_template_origin(template),
+                    page=page,
+                )
+                text, keyboard = _card_content(
+                    template, place_name=_place_name(session, template.place_id)
+                )
+                notice = DELETE_BLOCKED_TEXT
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("Не удалось удалить шаблон: %s", exc)
+        alert = "Не удалось удалить шаблон. Повторите попытку."
     finally:
         session.close()
 
@@ -2840,6 +3136,8 @@ def templates_handlers() -> list[BaseHandler]:
         CallbackQueryHandler(handle_preview, pattern=r"^tp_preview:\d+$"),
         CallbackQueryHandler(handle_reset, pattern=r"^tp_reset:\d+$"),
         CallbackQueryHandler(handle_reset_yes, pattern=r"^tp_reset_yes:\d+$"),
+        CallbackQueryHandler(handle_delete, pattern=r"^tp_delete:\d+$"),
+        CallbackQueryHandler(handle_delete_yes, pattern=r"^tp_delete_yes:\d+$"),
         CallbackQueryHandler(handle_create, pattern=r"^tp_create$"),
         CallbackQueryHandler(handle_create_standard, pattern=r"^tp_cstd$"),
         CallbackQueryHandler(handle_create_empty, pattern=r"^tp_cempty$"),

@@ -352,7 +352,10 @@ class LegacyArchiveMigrationTests(unittest.TestCase):
         self._create_legacy_schema()
         self._init_like_production()
         versions = self._journal()
-        self.assertEqual(versions[-1], (17, "archive_legacy_drafts"))
+        # Poster 2.1 R2 добавила миграцию 18: архив остаётся на месте,
+        # последней в журнале теперь идёт обновление встроенного шаблона.
+        self.assertIn((17, "archive_legacy_drafts"), versions)
+        self.assertEqual(versions[-1], (LATEST_VERSION, "builtin_templates_v3"))
 
         # Повторные запуски (рестарты) архив не переименовывают и не теряют.
         for _ in range(2):
@@ -388,7 +391,8 @@ class LegacyArchiveMigrationTests(unittest.TestCase):
         tables = table_names(self.path)
         self.assertNotIn("drafts", tables)
         self.assertNotIn("legacy_drafts_backup", tables)
-        self.assertEqual(self._journal()[-1], (LATEST_VERSION, "archive_legacy_drafts"))
+        self.assertIn((17, "archive_legacy_drafts"), self._journal())
+        self.assertEqual(self._journal()[-1], (LATEST_VERSION, "builtin_templates_v3"))
 
     def _journal(self) -> list[tuple[int, str]]:
         connection = connect(self.path)

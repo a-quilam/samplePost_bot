@@ -103,7 +103,7 @@ class AnnouncementRedeliveryMigrationTests(unittest.TestCase):
         create_old_schema(self.path)
 
         self.assertEqual(run_migrations(self.engine), LATEST_VERSION)
-        self.assertEqual(LATEST_VERSION, 17)
+        self.assertEqual(LATEST_VERSION, 18)
 
         journal = _journal(self.path)
         self.assertEqual(

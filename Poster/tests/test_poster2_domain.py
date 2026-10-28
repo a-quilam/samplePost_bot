@@ -174,7 +174,7 @@ class MigrationFifteenAndSixteenTests(_MigrationTestCase):
     """Миграции 15–17 на заполненной временной БД версии 13."""
 
     def test_migration_keeps_rows_links_checks_and_passes_integrity(self) -> None:
-        self.assertEqual(LATEST_VERSION, 17)
+        self.assertEqual(LATEST_VERSION, 18)
         self.assertEqual(run_migrations(self.engine), LATEST_VERSION)
 
         connection = sqlite3.connect(self.path)
@@ -189,7 +189,7 @@ class MigrationFifteenAndSixteenTests(_MigrationTestCase):
                 connection.execute(
                     "SELECT max(version) FROM schema_migrations"
                 ).fetchone()[0],
-                17,
+                LATEST_VERSION,
             )
             # Таблицы-копии миграции 16 удалены: остатков перестройки нет.
             tables = {
@@ -637,7 +637,7 @@ class InitialPersonalTemplateTests(AnnouncementDatabaseTestCase):
         self.assertEqual(version.header, BUILTIN_TEMPLATE.header)
         self.assertEqual(version.body, BUILTIN_TEMPLATE.body)
         self.assertEqual(version.footer, BUILTIN_TEMPLATE.footer)
-        self.assertEqual(BUILTIN_TEMPLATE_VERSION, 2)
+        self.assertEqual(BUILTIN_TEMPLATE_VERSION, 3)
         # Чужой пользователь получает свою копию, а не шаблон владельца.
         other = ensure_initial_personal_template(
             self.session, actor_telegram_user_id=OTHER_TG
