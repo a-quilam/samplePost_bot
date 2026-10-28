@@ -1,1097 +1,646 @@
 # tests/test_stage17_calendar_flow.py
 """
-Stage 17: кнопочный календарь даты — сценарии через Application.process_update.
+Stage 17 (актуализировано в Poster 2.0 S5): кнопочный календарь даты
+в конструкторе анонса.
 
-Проверяется НАСТОЯЩАЯ цепочка обработчиков (bot.build_application) поверх
-FakeBot и временной SQLite:
-- три кнопки на шаге «Дата» и в промпте правки даты;
-- «На этой неделе» / «На следующей неделе» (пн–вс, без прошедших дней);
-- «Другая» → два двухнедельных диапазона → недели → дни;
-- «Дальше» → пары месяцев, в том числе остаток ноября после диапазонов;
-- месяц → недели месяца → дни (без выхода за месяц и горизонт);
-- возврат на каждом уровне, изменение ТОЛЬКО существующего экрана;
-- текстовый ввод при открытом календаре (дата и ошибка формата);
-- WIP, рестарт на промежуточном уровне, правка даты из превью;
-- устаревшие, повторные и подделанные callback;
-- переход через полночь: прошедшая дата не сохраняется;
-- сквозной сценарий: создание → календарь → черновик → открытие →
-  правка даты кнопками → сохранение.
+Легаси-мастер удалён: календарь живёт в едином конструкторе, поэтому
+сценарии идут через настоящее приложение (`bot.build_application`), FakeBot
+и временную SQLite, а дата берётся из кирпичика типа `date`.
+
+Проверяется:
+- календарь сразу на вопросе даты (дни текущей недели, недели, «другая
+  дата», месяцы, полный экран календаря);
+- «На этой неделе» / «Следующей» — ровно дни календарной недели;
+- «Другая дата» → двухнедельные диапазоны → дни и возвраты;
+- месяцы → недели месяца → дни (без выхода за месяц и горизонт);
+- выбранный день сохраняется в кирпичик, живой блок обновляется;
+- текстовый ввод при открытом календаре, ошибка формата не теряет календарь;
+- прошедшая/внегоризонтная/подделанная дата отклоняется, значение не пишется;
+- рестарт на промежуточном экране восстанавливает вопрос с календарём;
+- навигация меняет только существующий экран, один answer на callback.
 
 Запуск из каталога Poster:
     python -m unittest tests.test_stage17_calendar_flow -v
 """
 
-import json
-import unittest
+from __future__ import annotations
 
-from telegram.error import BadRequest
+import unittest
+from datetime import date, timedelta
 
 try:
-    from handlers.post_creation import EDIT_FIELD, POST_CREATION, POST_STEPS
+    from announcement_store import (
+        build_announcement_fields,
+        list_announcement_drafts,
+    )
+    from brick_store import create_personal_brick
+    from template_store import create_personal_template
     from tests.integration_harness import (
+        DEFAULT_USER_ID,
         HARNESS_IMPORT_ERROR,
         frozen_today,
-        goto_preview,
         scenario_test,
     )
+    from user_store import get_or_create_user
+    from utils import calendar_view
 
     INTEGRATION_IMPORT_ERROR = HARNESS_IMPORT_ERROR
-except Exception as e:  # noqa: BLE001 — причина попадает в сообщение пропуска
-    INTEGRATION_IMPORT_ERROR = str(e)
+except Exception as exc:  # noqa: BLE001 — причина попадает в skip-сообщение
+    INTEGRATION_IMPORT_ERROR = str(exc)
+
+TODAY = date(2026, 10, 22)
 
 
-def step_index(key: str) -> int:
-    """Индекс шага по ключу поля."""
-    return next(i for i, step in enumerate(POST_STEPS) if step["key"] == key)
+def _seed_date_announcement(h, *, title: str = "Концерт") -> int:
+    """Личный шаблон «[title] — [day]»: вопрос заголовка, затем даты."""
+    with h.session_factory() as session:
+        get_or_create_user(session, DEFAULT_USER_ID, username="calendar")
+        for code, brick_title, value_type in (
+            ("title", "Заголовок", "short_text"),
+            ("day", "Дата", "date"),
+        ):
+            create_personal_brick(
+                session,
+                actor_telegram_user_id=DEFAULT_USER_ID,
+                code=code,
+                title=brick_title,
+                value_type=value_type,
+                rules={},
+            )
+        template = create_personal_template(
+            session,
+            actor_telegram_user_id=DEFAULT_USER_ID,
+            name="С датой",
+            header="",
+            body="[title] — [day]",
+            footer="",
+        )
+        session.commit()
+        return template.template_id
 
 
-def step_title(key: str) -> str:
-    """Заголовок экрана шага («Шаг N из 9 — Название»)."""
-    index = step_index(key)
-    return f"Шаг {index + 1} из {len(POST_STEPS)} — {POST_STEPS[index]['label']}"
+async def _open_date_question(h, *, title: str = "Концерт"):
+    """Открывает анонс и доходит до вопроса даты (2 из 2)."""
+    template_id = _seed_date_announcement(h, title=title)
+    await h.text("/start")
+    await h.callback(f"tp_pick:{template_id}")
+    await h.text(title)
+    if "Вопрос 2 из 2" not in h.screen_text():
+        raise AssertionError(f"не вопрос даты: {h.screen_text()[:120]!r}")
 
 
-def screen_sends(h) -> list[dict]:
-    """Только СОЗДАННЫЕ сообщения экрана (не правки)."""
-    return [call for call in h.screens() if call["type"] == "message"]
+def _callbacks(h, prefix: str) -> list[str]:
+    return [
+        data for _label, data in h.screen_buttons() if data and data.startswith(prefix)
+    ]
 
 
-def buttons(h) -> list[tuple[str, str | None]]:
-    """Кнопки текущего экрана."""
-    return h.screen_buttons()
+def _callback(h, prefix: str) -> str:
+    found = _callbacks(h, prefix)
+    if not found:
+        raise AssertionError(f"нет callback {prefix!r}: {h.screen_buttons()}")
+    return found[0]
 
 
-def datas(h) -> list[str | None]:
-    """callback_data кнопок текущего экрана."""
-    return [data for _, data in buttons(h)]
+def _field_prefix(h) -> str:
+    """`draft_id:revision:brick_id` из callback'а дня."""
+    return _callback(h, "aw_calday").split(":", 1)[1].rsplit(":", 1)[0]
 
 
-def last_answer(h) -> str:
-    """Текст последнего ответа на callback (тост/алерт)."""
+def _day_buttons(h) -> list[date]:
+    return [
+        date.fromisoformat(data.rsplit(":", 1)[1])
+        for data in _callbacks(h, "aw_calday")
+    ]
+
+
+def _answer_text(h) -> str:
     return str(h.answers()[-1].get("text") or "")
 
 
-def payload_date(h) -> str | None:
-    """Дата из WIP-снимка в user_states (что реально сохранено в БД)."""
-    states = h.user_states()
-    if not states or not states[0].payload:
-        return None
-    return json.loads(states[0].payload).get("date")
+def _saved_values(h, *, today: date) -> dict[str, object]:
+    with h.session_factory() as session:
+        draft = list_announcement_drafts(
+            session, actor_telegram_user_id=DEFAULT_USER_ID
+        )[0]
+        fields = build_announcement_fields(
+            session,
+            actor_telegram_user_id=DEFAULT_USER_ID,
+            draft_id=draft.draft_id,
+            today=today,
+        )
+    return {field.code: field.raw_value for field in fields}
+
+
+def _screen_sends(h) -> list[dict]:
+    return [call for call in h.screens() if call["type"] == "message"]
 
 
 @unittest.skipIf(
     INTEGRATION_IMPORT_ERROR is not None,
     f"интеграционное окружение недоступно: {INTEGRATION_IMPORT_ERROR}",
 )
-class CalendarRootTests(unittest.TestCase):
-    """Точки входа календаря: шаг создания и правка даты."""
+class CalendarOnQuestionTests(unittest.TestCase):
+    """Календарь виден сразу на вопросе даты — отдельного входа нет."""
 
     @scenario_test
-    async def test_date_step_has_three_calendar_buttons(self, h):
+    async def test_date_question_shows_current_week_and_navigation(self, h):
         with frozen_today(2026, 10, 22):
-            await h.start_dialog()
-            await h.text("Концерт")
+            await _open_date_question(h)
+            text = h.screen_text()
+            self.assertIn("Вопрос 2 из 2", text)
+            self.assertIn("Выберите дату", text)
 
-            self.assertTrue(h.screen_text().startswith(step_title("date")))
+            # Дни текущей недели — кнопками, подписи календарные.
             self.assertEqual(
-                datas(h),
-                [
-                    "cal_week",
-                    "cal_nextweek",
-                    "cal_other",
-                    "skip",
-                    "back",
-                    "main_menu",
-                ],
+                _day_buttons(h),
+                calendar_view.days_between(*calendar_view.current_week(TODAY)),
             )
-            self.assertIn(("На этой неделе", "cal_week"), buttons(h))
-            self.assertIn(("На следующей неделе", "cal_nextweek"), buttons(h))
-            self.assertIn(("Другая", "cal_other"), buttons(h))
-            # прежние кнопки шага сохранены
-            self.assertIn(("⏭ Пропустить", "skip"), buttons(h))
-            self.assertIn(("◀️ Назад", "back"), buttons(h))
-            self.assertIn(("🏠 Меню", "main_menu"), buttons(h))
-            self.assertEqual(len(screen_sends(h)), 1, "один экран")
-
-    @scenario_test
-    async def test_date_edit_prompt_has_calendar(self, h):
-        await goto_preview(h, title="Концерт")
-
-        await h.callback("edit_post")
-        await h.callback("edit_date")
-
-        self.assertEqual(h.dialog_state(), EDIT_FIELD)
-        self.assertIn("Текущее значение:", h.screen_text())
-        self.assertIn(("На этой неделе", "cal_week"), buttons(h))
-        self.assertIn(("На следующей неделе", "cal_nextweek"), buttons(h))
-        self.assertIn(("Другая", "cal_other"), buttons(h))
-        self.assertIn(("Пропустить", "skip"), buttons(h))
-
-    @scenario_test
-    async def test_other_requires_no_parallel_scenario(self, h):
-        """Календарь не меняет сценарий: шаг и состояние те же."""
-        await h.start_dialog()
-        await h.text("Концерт")
-        await h.callback("cal_other")
-
-        self.assertEqual(h.dialog_state(), POST_CREATION)
-        self.assertEqual(h.user_data()["current_step"], step_index("date"))
-        self.assertEqual(h.user_data().get("date"), None)
-
-
-@unittest.skipIf(
-    INTEGRATION_IMPORT_ERROR is not None,
-    f"интеграционное окружение недоступно: {INTEGRATION_IMPORT_ERROR}",
-)
-class CurrentAndNextWeekTests(unittest.TestCase):
-    """«На этой неделе» и «На следующей неделе» для 22.10.2026."""
-
-    @scenario_test
-    async def test_thursday_current_week_example(self, h):
-        with frozen_today(2026, 10, 22):
-            await h.start_dialog()
-            await h.text("Концерт")
-            await h.callback("cal_week")
-
-            self.assertEqual(
-                buttons(h),
-                [
-                    ("22.10 (чт)", "cal_day:2026-10-22"),
-                    ("23.10 (пт)", "cal_day:2026-10-23"),
-                    ("24.10 (сб)", "cal_day:2026-10-24"),
-                    ("25.10 (вс)", "cal_day:2026-10-25"),
-                    ("◀️ Назад", "cal_root"),
-                ],
+            self.assertTrue(
+                all(
+                    data.startswith("aw_calday:") for data in _callbacks(h, "aw_calday")
+                )
             )
-            self.assertIn("22.10–25.10", h.screen_text())
-            self.assertNotIn("21.10", str(buttons(h)), "прошедший день не показан")
-            self.assertEqual(len(screen_sends(h)), 1, "экран не пересоздавался")
-
-    @scenario_test
-    async def test_monday_current_week_has_seven_days(self, h):
-        with frozen_today(2026, 10, 19):
-            await h.start_dialog()
-            await h.text("Концерт")
-            await h.callback("cal_week")
-
-            day_buttons = [
-                value for value in buttons(h) if value[1].startswith("cal_day:")
+            labels = [
+                label
+                for label, data in h.screen_buttons()
+                if data and data.startswith("aw_calday")
             ]
-            self.assertEqual(len(day_buttons), 7)
-            self.assertEqual(day_buttons[0][0], "19.10 (пн)")
-            self.assertEqual(day_buttons[-1][0], "25.10 (вс)")
-
-    @scenario_test
-    async def test_wednesday_current_week(self, h):
-        with frozen_today(2026, 10, 21):
-            await h.start_dialog()
-            await h.text("Концерт")
-            await h.callback("cal_week")
-
-            labels = [text for text, data in buttons(h) if data.startswith("cal_day:")]
-            self.assertEqual(
-                labels,
-                ["21.10 (ср)", "22.10 (чт)", "23.10 (пт)", "24.10 (сб)", "25.10 (вс)"],
-            )
-
-    @scenario_test
-    async def test_sunday_current_week_has_only_today(self, h):
-        with frozen_today(2026, 10, 25):
-            await h.start_dialog()
-            await h.text("Концерт")
-            await h.callback("cal_week")
-
-            self.assertEqual(
-                buttons(h),
-                [
-                    ("25.10 (вс)", "cal_day:2026-10-25"),
-                    ("◀️ Назад", "cal_root"),
-                ],
-            )
-
-    @scenario_test
-    async def test_next_week_all_seven_days(self, h):
-        with frozen_today(2026, 10, 22):
-            await h.start_dialog()
-            await h.text("Концерт")
-            await h.callback("cal_nextweek")
-
-            self.assertEqual(
-                buttons(h),
-                [
-                    ("26.10 (пн)", "cal_day:2026-10-26"),
-                    ("27.10 (вт)", "cal_day:2026-10-27"),
-                    ("28.10 (ср)", "cal_day:2026-10-28"),
-                    ("29.10 (чт)", "cal_day:2026-10-29"),
-                    ("30.10 (пт)", "cal_day:2026-10-30"),
-                    ("31.10 (сб)", "cal_day:2026-10-31"),
-                    ("01.11 (вс)", "cal_day:2026-11-01"),
-                    ("◀️ Назад", "cal_root"),
-                ],
-            )
-            self.assertIn("26.10–01.11", h.screen_text())
-
-    @scenario_test
-    async def test_select_day_from_current_week_advances(self, h):
-        with frozen_today(2026, 10, 22):
-            await h.start_dialog()
-            await h.text("Концерт")
-            sends = len(screen_sends(h))
-            await h.callback("cal_week")
-            await h.callback("cal_day:2026-10-23")
-
-            self.assertEqual(h.user_data()["date"], "23.10.2026")
-            self.assertEqual(h.user_data()["current_step"], step_index("time_start"))
-            self.assertTrue(h.screen_text().startswith(step_title("time_start")))
-            self.assertEqual(len(screen_sends(h)), sends, "новых экранов нет")
-            self.assertEqual(h.dialog_state(), POST_CREATION)
-            self.assertEqual(payload_date(h), "23.10.2026")
-
-    @scenario_test
-    async def test_back_from_week_and_next_week(self, h):
-        with frozen_today(2026, 10, 22):
-            await h.start_dialog()
-            await h.text("Концерт")
-            await h.callback("cal_week")
-            await h.callback("cal_root")
-            self.assertTrue(h.screen_text().startswith(step_title("date")))
-            self.assertIn(("На этой неделе", "cal_week"), buttons(h))
-
-            await h.callback("cal_nextweek")
-            await h.callback("cal_root")
-            self.assertTrue(h.screen_text().startswith(step_title("date")))
-
-
-@unittest.skipIf(
-    INTEGRATION_IMPORT_ERROR is not None,
-    f"интеграционное окружение недоступно: {INTEGRATION_IMPORT_ERROR}",
-)
-class OtherRangesTests(unittest.TestCase):
-    """«Другая»: диапазоны, их недели и дни."""
-
-    @scenario_test
-    async def test_other_shows_two_ranges_and_next(self, h):
-        with frozen_today(2026, 10, 22):
-            await h.start_dialog()
-            await h.text("Концерт")
-            await h.callback("cal_other")
-
-            self.assertEqual(
-                buttons(h),
-                [
-                    ("02.11–15.11", "cal_range:0"),
-                    ("16.11–29.11", "cal_range:1"),
-                    ("Дальше", "cal_months:0"),
-                    ("◀️ Назад", "cal_root"),
-                ],
-            )
-            self.assertIn("Другая дата", h.screen_text())
-
-    @scenario_test
-    async def test_range_shows_two_weeks(self, h):
-        with frozen_today(2026, 10, 22):
-            await h.start_dialog()
-            await h.text("Концерт")
-            await h.callback("cal_other")
-            await h.callback("cal_range:0")
-
-            self.assertEqual(
-                buttons(h),
-                [
-                    ("02.11–08.11", "cal_rweek:0:2026-11-02"),
-                    ("09.11–15.11", "cal_rweek:0:2026-11-09"),
-                    ("◀️ Назад", "cal_other"),
-                ],
-            )
-            await h.callback("cal_range:1")
-            self.assertEqual(
-                buttons(h),
-                [
-                    ("16.11–22.11", "cal_rweek:1:2026-11-16"),
-                    ("23.11–29.11", "cal_rweek:1:2026-11-23"),
-                    ("◀️ Назад", "cal_other"),
-                ],
-            )
-
-    @scenario_test
-    async def test_week_shows_seven_days_and_back(self, h):
-        with frozen_today(2026, 10, 22):
-            await h.start_dialog()
-            await h.text("Концерт")
-            await h.callback("cal_other")
-            await h.callback("cal_range:0")
-            await h.callback("cal_rweek:0:2026-11-02")
-
-            labels = [text for text, data in buttons(h) if data.startswith("cal_day:")]
             self.assertEqual(
                 labels,
                 [
-                    "02.11 (пн)",
-                    "03.11 (вт)",
-                    "04.11 (ср)",
-                    "05.11 (чт)",
-                    "06.11 (пт)",
-                    "07.11 (сб)",
-                    "08.11 (вс)",
+                    calendar_view.format_day(day)
+                    for day in calendar_view.days_between(
+                        *calendar_view.current_week(TODAY)
+                    )
                 ],
             )
-            self.assertIn(("◀️ Назад", "cal_range:0"), buttons(h))
-
-            await h.callback("cal_range:0")
-            self.assertIn(("02.11–08.11", "cal_rweek:0:2026-11-02"), buttons(h))
-            await h.callback("cal_other")
-            self.assertIn(("02.11–15.11", "cal_range:0"), buttons(h))
+            # Следующая неделя, другая дата, месяцы и полный экран календаря.
+            self.assertTrue(_callbacks(h, "aw_calweek"))
+            self.assertTrue(_callbacks(h, "aw_calother"))
+            self.assertTrue(_callbacks(h, "aw_calmonths"))
+            self.assertTrue(_callbacks(h, "aw_calroot"))
+            # Ручной ввод и пропуск сохранены.
+            self.assertTrue(_callbacks(h, "aw_qskip"))
+            self.assertTrue(_callbacks(h, "aw_qback"))
+            # Экран один на диалог: шаги перерисовываются правкой, новый
+            # send возможен только при смене сообщения-экрана.
+            sends_after_date_question = len(_screen_sends(h))
+            await h.callback(f"aw_calweek:{_field_prefix(h)}:cur")
+            self.assertEqual(
+                len(_screen_sends(h)),
+                sends_after_date_question,
+                "навигация календаря не создаёт новое сообщение-экран",
+            )
 
     @scenario_test
-    async def test_select_day_from_range(self, h):
+    async def test_selected_day_is_saved_and_live_block_updates(self, h):
         with frozen_today(2026, 10, 22):
-            await h.start_dialog()
-            await h.text("Концерт")
-            await h.callback("cal_other")
-            await h.callback("cal_range:1")
-            await h.callback("cal_rweek:1:2026-11-23")
-            await h.callback("cal_day:2026-11-29")
+            await _open_date_question(h)
+            chosen = TODAY + timedelta(days=3)
+            await h.callback(f"aw_calday:{_field_prefix(h)}:{chosen.isoformat()}")
 
-            self.assertEqual(h.user_data()["date"], "29.11.2026")
-            self.assertEqual(h.user_data()["current_step"], step_index("time_start"))
-            self.assertEqual(payload_date(h), "29.11.2026")
-
-    @scenario_test
-    async def test_year_boundary_range_is_understandable(self, h):
-        with frozen_today(2026, 12, 15):
-            await h.start_dialog()
-            await h.text("Концерт")
-            await h.callback("cal_other")
-
-            self.assertIn(("28.12.2026–10.01.2027", "cal_range:0"), buttons(h))
-            await h.callback("cal_range:0")
-            labels = [text for text, _ in buttons(h)]
-            self.assertIn("28.12.2026–03.01.2027", labels)
-            self.assertIn("04.01–10.01", labels)
+            self.assertEqual(
+                _saved_values(h, today=TODAY)["day"], chosen.strftime("%d.%m.%Y")
+            )
+            self.assertIn("Фотографии анонса", h.screen_text())
+            live = [
+                call
+                for call in h.calls
+                if call.get("disable_web_page_preview") is False
+                and call["type"] in {"message", "edit_message"}
+                and call.get("reply_markup") is None
+            ]
+            self.assertTrue(live, "живой блок анонса не отправлен")
+            self.assertIn(chosen.strftime("%d.%m.%Y"), live[-1].get("text") or "")
 
 
 @unittest.skipIf(
     INTEGRATION_IMPORT_ERROR is not None,
     f"интеграционное окружение недоступно: {INTEGRATION_IMPORT_ERROR}",
 )
-class MonthsLevelTests(unittest.TestCase):
-    """Пары месяцев, остаток ноября, недели месяцев и «Дальше»."""
+class CalendarNavigationTests(unittest.TestCase):
+    """Недели, диапазоны и месяцы: ровно свои дни и корректные возвраты."""
 
     @scenario_test
-    async def test_first_pair_is_november_december(self, h):
+    async def test_current_and_next_week_days(self, h):
         with frozen_today(2026, 10, 22):
-            await h.start_dialog()
-            await h.text("Концерт")
-            await h.callback("cal_other")
-            await h.callback("cal_months:0")
+            await _open_date_question(h)
+            prefix = _field_prefix(h)
 
+            await h.callback(f"aw_calweek:{prefix}:cur")
+            self.assertIn("Текущая неделя", h.screen_text())
             self.assertEqual(
-                buttons(h),
-                [
-                    ("Ноябрь 2026", "cal_month:2026-11"),
-                    ("Декабрь 2026", "cal_month:2026-12"),
-                    ("Дальше", "cal_months:1"),
-                    ("◀️ Назад", "cal_other"),
-                ],
+                _day_buttons(h),
+                calendar_view.days_between(*calendar_view.current_week(TODAY)),
             )
-            self.assertIn("Выберите месяц", h.screen_text())
+            self.assertIn(f"aw_calroot:{prefix}", _callbacks(h, "aw_calroot"))
+
+            await h.callback(f"aw_calroot:{prefix}")
+            await h.callback(f"aw_calweek:{prefix}:next")
+            self.assertIn("Следующая неделя", h.screen_text())
+            self.assertEqual(
+                _day_buttons(h),
+                calendar_view.days_between(*calendar_view.next_week(TODAY)),
+            )
+            # Недели стыкуются без повторных и пропущенных дней.
+            current = calendar_view.days_between(*calendar_view.current_week(TODAY))
+            following = calendar_view.days_between(*calendar_view.next_week(TODAY))
+            self.assertEqual(current[-1] + timedelta(days=1), following[0])
+            self.assertEqual(len(current) + len(following), 11)
 
     @scenario_test
-    async def test_november_keeps_thirtieth_after_ranges(self, h):
-        """30.11 доступно: диапазоны закончились 29.11, пропуска нет."""
+    async def test_other_ranges_open_days_and_return(self, h):
         with frozen_today(2026, 10, 22):
-            await h.start_dialog()
-            await h.text("Концерт")
-            await h.callback("cal_other")
-            await h.callback("cal_months:0")
-            await h.callback("cal_month:2026-11")
+            await _open_date_question(h)
+            prefix = _field_prefix(h)
+            ranges = calendar_view.other_ranges(TODAY)
+            self.assertEqual(len(ranges), 2)
 
-            labels = [text for text, _ in buttons(h)]
-            self.assertIn("30.11", labels)
-            self.assertIn("23.11–29.11", labels)
-            # первая неполная неделя ноября не уходит в октябрь
-            self.assertIn("01.11", labels)
-            self.assertNotIn("26.10–01.11", labels)
-
-            # «Назад» ведёт к паре месяцев, а не на тот же уровень
-            self.assertIn(("◀️ Назад", "cal_months:0"), buttons(h))
-
-            await h.callback("cal_mweek:2026-11-30")
+            await h.callback(f"aw_calother:{prefix}")
+            # callback диапазона несёт ИНДЕКС, а не дату: подписи сверяются
+            # с calendar_view.other_ranges, а данные — короткие и стабильные.
             self.assertEqual(
-                buttons(h),
-                [
-                    ("30.11 (пн)", "cal_day:2026-11-30"),
-                    ("◀️ Назад", "cal_month:2026-11"),
-                ],
-            )
-            await h.callback("cal_day:2026-11-30")
-            self.assertEqual(h.user_data()["date"], "30.11.2026")
-
-    @scenario_test
-    async def test_months_pagination_forward_and_back(self, h):
-        with frozen_today(2026, 10, 22):
-            await h.start_dialog()
-            await h.text("Концерт")
-            await h.callback("cal_other")
-            await h.callback("cal_months:0")
-            await h.callback("cal_months:1")
-
-            self.assertIn(("Январь 2027", "cal_month:2027-01"), buttons(h))
-            self.assertIn(("Февраль 2027", "cal_month:2027-02"), buttons(h))
-            self.assertIn(("◀️ Назад", "cal_months:0"), buttons(h))
-
-            await h.callback("cal_months:0")
-            self.assertIn(("Ноябрь 2026", "cal_month:2026-11"), buttons(h))
-            self.assertIn(("◀️ Назад", "cal_other"), buttons(h))
-
-    @scenario_test
-    async def test_last_pair_has_no_next_and_clips_october(self, h):
-        with frozen_today(2026, 10, 22):
-            await h.start_dialog()
-            await h.text("Концерт")
-            await h.callback("cal_other")
-            for index in range(1, 6):
-                await h.callback(f"cal_months:{index}")
-
-            self.assertEqual(
-                buttons(h),
-                [
-                    ("Сентябрь 2027", "cal_month:2027-09"),
-                    ("Октябрь 2027", "cal_month:2027-10"),
-                    ("◀️ Назад", "cal_months:4"),
-                ],
-            )
-            self.assertNotIn("Дальше", str(buttons(h)))
-
-            await h.callback("cal_month:2027-10")
-            labels = [text for text, _ in buttons(h)]
-            self.assertEqual(labels[0], "01.10–03.10")
-            self.assertEqual(labels[-2], "18.10–22.10")
-            await h.callback("cal_mweek:2027-10-18")
-            self.assertEqual(
-                buttons(h)[:-1],
-                [
-                    ("18.10 (пн)", "cal_day:2027-10-18"),
-                    ("19.10 (вт)", "cal_day:2027-10-19"),
-                    ("20.10 (ср)", "cal_day:2027-10-20"),
-                    ("21.10 (чт)", "cal_day:2027-10-21"),
-                    ("22.10 (пт)", "cal_day:2027-10-22"),
-                ],
-            )
-            self.assertNotIn("23.10 (сб)", str(buttons(h)))
-
-    @scenario_test
-    async def test_month_back_returns_to_own_pair(self, h):
-        with frozen_today(2026, 10, 22):
-            await h.start_dialog()
-            await h.text("Концерт")
-            await h.callback("cal_other")
-            await h.callback("cal_months:2")
-            await h.callback("cal_month:2027-03")
-            await h.callback("cal_months:2")
-            self.assertIn(("Март 2027", "cal_month:2027-03"), buttons(h))
-
-            await h.callback("cal_month:2027-04")
-            self.assertIn(("◀️ Назад", "cal_months:2"), buttons(h))
-
-    @scenario_test
-    async def test_leap_february_2028_from_months(self, h):
-        """Високосный февраль 2028: неделя 28.02–29.02 и выбор 29 февраля."""
-        with frozen_today(2027, 12, 15):
-            await h.start_dialog()
-            await h.text("Концерт")
-            await h.callback("cal_other")
-            await h.callback("cal_months:0")
-
-            self.assertIn(("Январь 2028", "cal_month:2028-01"), buttons(h))
-            self.assertIn(("Февраль 2028", "cal_month:2028-02"), buttons(h))
-            await h.callback("cal_month:2028-02")
-            labels = [text for text, _ in buttons(h)]
-            self.assertIn("28.02–29.02", labels)
-            await h.callback("cal_mweek:2028-02-28")
-            self.assertEqual(
-                buttons(h)[:-1],
-                [
-                    ("28.02 (пн)", "cal_day:2028-02-28"),
-                    ("29.02 (вт)", "cal_day:2028-02-29"),
-                ],
-            )
-            await h.callback("cal_day:2028-02-29")
-            self.assertEqual(h.user_data()["date"], "29.02.2028")
-
-    @scenario_test
-    async def test_horizon_february_2029_is_not_leap(self, h):
-        """Февраль 2029 за горизонтом: виден только 01.02 (горизонт включителен)."""
-        with frozen_today(2028, 2, 1):
-            await h.start_dialog()
-            await h.text("Концерт")
-            await h.callback("cal_other")
-            # пары начинаются с месяца первой неохваченной даты — марта 2028;
-            # до пары с февралём 2029 добираемся кнопкой «Дальше»
-            seen_february = False
-            for index in range(12):
-                if index > 0 and f"cal_months:{index}" not in datas(h):
-                    break
-                await h.callback(f"cal_months:{index}")
-                if ("Февраль 2029", "cal_month:2029-02") in buttons(h):
-                    seen_february = True
-                    break
-            self.assertTrue(seen_february, "февраль 2029 должен быть в парах")
-            await h.callback("cal_month:2029-02")
-            labels = [text for text, _ in buttons(h)]
-            self.assertEqual(labels[0], "01.02")
-            self.assertNotIn("29.02", labels, "2029 не високосный")
-
-    @scenario_test
-    async def test_single_month_final_pair_has_no_empty_month(self, h):
-        """Последняя пара из одного месяца: второй (пустой) не показывается."""
-        with frozen_today(2026, 10, 31):
-            await h.start_dialog()
-            await h.text("Концерт")
-            await h.callback("cal_other")
-            await h.callback("cal_months:0")
-            self.assertEqual(buttons(h)[0][0], "Декабрь 2026")
-
-            for index in range(1, 6):
-                await h.callback(f"cal_months:{index}")
-            self.assertEqual(
-                buttons(h),
-                [
-                    ("Октябрь 2027", "cal_month:2027-10"),
-                    ("◀️ Назад", "cal_months:4"),
-                ],
+                _callbacks(h, "aw_calrange"),
+                [f"aw_calrange:{prefix}:{index}" for index in range(len(ranges))],
             )
 
-            await h.callback("cal_month:2027-10")
-            labels = [text for text, _ in buttons(h)]
-            self.assertIn("25.10–31.10", labels)
-            await h.callback("cal_mweek:2027-10-25")
-            self.assertEqual(
-                len([data for _, data in buttons(h) if data.startswith("cal_day:")]),
-                7,
+            for index, (start, end) in enumerate(ranges):
+                await h.callback(f"aw_calrange:{prefix}:{index}")
+                self.assertEqual(
+                    _day_buttons(h), calendar_view.days_between(start, end)
+                )
+                self.assertIn(f"aw_calother:{prefix}", _callbacks(h, "aw_calother"))
+                await h.callback(f"aw_calother:{prefix}")
+
+            # Возврат к вопросу из «Другой даты» — полный экран календаря.
+            await h.callback(f"aw_calroot:{prefix}")
+            self.assertIn(f"aw_calweek:{prefix}:cur", _callbacks(h, "aw_calweek"))
+
+    @scenario_test
+    async def test_months_open_weeks_of_month_and_return(self, h):
+        with frozen_today(2026, 10, 22):
+            await _open_date_question(h)
+            prefix = _field_prefix(h)
+            horizon = calendar_view.horizon_end(TODAY)
+
+            await h.callback(f"aw_calmonths:{prefix}")
+            month_keys = [
+                (int(data.rsplit(":", 2)[-2]), int(data.rsplit(":", 1)[-1]))
+                for data in _callbacks(h, "aw_calmonth:")
+            ]
+            expected = []
+            current = (
+                calendar_view.first_uncovered(TODAY).year,
+                calendar_view.first_uncovered(TODAY).month,
             )
-            await h.callback("cal_day:2027-10-31")
-            self.assertEqual(h.user_data()["date"], "31.10.2027")
+            while current <= (horizon.year, horizon.month):
+                expected.append(current)
+                current = calendar_view.add_months_key(current, 1)
+            self.assertEqual(month_keys, expected)
+
+            key = expected[0]
+            await h.callback(f"aw_calmonth:{prefix}:{key[0]}:{key[1]}")
+            self.assertIn(
+                f"{calendar_view.MONTH_NAMES[key[1]]} {key[0]}", h.screen_text()
+            )
+            weeks = calendar_view.month_weeks(key, (TODAY, horizon))
+            self.assertTrue(weeks)
+            self.assertEqual(len(_callbacks(h, "aw_calweekdays")), len(weeks))
+
+            start, end = weeks[0]
+            await h.callback(f"aw_calweekdays:{prefix}:{key[0]}:{key[1]}:0")
+            self.assertEqual(_day_buttons(h), calendar_view.days_between(start, end))
+            # Возврат на недели месяца и на список месяцев.
+            await h.callback(f"aw_calmonth:{prefix}:{key[0]}:{key[1]}")
+            self.assertIn("Выберите неделю", h.screen_text())
+            await h.callback(f"aw_calmonths:{prefix}")
+            self.assertTrue(_callbacks(h, "aw_calmonth:"))
 
     @scenario_test
-    async def test_forged_month_outside_horizon_rejected(self, h):
+    async def test_month_days_do_not_leave_month_or_horizon(self, h):
         with frozen_today(2026, 10, 22):
-            await h.start_dialog()
-            await h.text("Концерт")
-            await h.callback("cal_other")
-            answers_before = len(h.answers())
+            await _open_date_question(h)
+            prefix = _field_prefix(h)
+            horizon = calendar_view.horizon_end(TODAY)
+            await h.callback(f"aw_calmonths:{prefix}")
 
-            await h.callback("cal_month:2027-11")
-
-            self.assertEqual(len(h.answers()), answers_before + 1)
-            self.assertIn("устарела", last_answer(h))
-            self.assertEqual(h.user_data().get("date"), None)
-            self.assertEqual(h.user_data()["current_step"], step_index("date"))
-            self.assertTrue(h.screen_text().startswith(step_title("date")))
-
-    @scenario_test
-    async def test_forged_pair_index_rejected(self, h):
-        with frozen_today(2026, 10, 22):
-            await h.start_dialog()
-            await h.text("Концерт")
-            await h.callback("cal_months:99")
-
-            self.assertIn("устарела", last_answer(h))
-            self.assertEqual(h.user_data().get("date"), None)
+            keys = [
+                (int(data.rsplit(":", 2)[-2]), int(data.rsplit(":", 1)[-1]))
+                for data in _callbacks(h, "aw_calmonth:")
+            ]
+            for key in keys:
+                await h.callback(f"aw_calmonth:{prefix}:{key[0]}:{key[1]}")
+                weeks = calendar_view.month_weeks(key, (TODAY, horizon))
+                for week_index, (week_start, week_end) in enumerate(weeks):
+                    await h.callback(
+                        f"aw_calweekdays:{prefix}:{key[0]}:{key[1]}:{week_index}"
+                    )
+                    days = _day_buttons(h)
+                    self.assertTrue(days, f"пустая неделя месяца {key}")
+                    for day in days:
+                        self.assertEqual((day.year, day.month), key)
+                        self.assertTrue(TODAY <= day <= horizon)
+                        self.assertTrue(week_start <= day <= week_end)
+                    await h.callback(f"aw_calmonth:{prefix}:{key[0]}:{key[1]}")
+                await h.callback(f"aw_calmonths:{prefix}")
 
 
 @unittest.skipIf(
     INTEGRATION_IMPORT_ERROR is not None,
     f"интеграционное окружение недоступно: {INTEGRATION_IMPORT_ERROR}",
 )
-class TextInputWhileCalendarOpenTests(unittest.TestCase):
-    """Текстовый ввод продолжает работать при открытом календаре."""
+class CalendarInputTests(unittest.TestCase):
+    """Текстовый ввод и защита от недопустимых дат."""
 
     @scenario_test
     async def test_text_date_accepted_while_calendar_open(self, h):
         with frozen_today(2026, 10, 22):
-            await h.start_dialog()
-            await h.text("Концерт")
-            await h.callback("cal_other")
-            await h.callback("cal_months:0")
+            await _open_date_question(h)
+            await h.callback(f"aw_calroot:{_field_prefix(h)}")
+            typed = await h.text("31.12.2026")
 
-            # пользователь передумал и просто написал дату
-            await h.text("17 ноября")
-
-            self.assertEqual(h.user_data()["date"], "17.11.2026")
-            self.assertEqual(h.user_data()["current_step"], step_index("time_start"))
-            self.assertTrue(h.screen_text().startswith(step_title("time_start")))
-
-    @scenario_test
-    async def test_compact_date_accepted_while_calendar_open(self, h):
-        with frozen_today(2026, 10, 22):
-            await h.start_dialog()
-            await h.text("Концерт")
-            await h.callback("cal_week")
-            await h.text("1711")
-            self.assertEqual(h.user_data()["date"], "17.11.2026")
+            self.assertEqual(_saved_values(h, today=TODAY)["day"], "31.12.2026")
+            self.assertIn("Фотографии анонса", h.screen_text())
+            self.assertIn(typed.effective_message.message_id, h.deleted_ids())
 
     @scenario_test
     async def test_invalid_text_keeps_calendar_available(self, h):
         with frozen_today(2026, 10, 22):
-            await h.start_dialog()
-            await h.text("Концерт")
-            await h.callback("cal_week")
-            await h.text("не дата")
+            await _open_date_question(h)
+            bad = await h.text("31.02.2026")
 
-            self.assertIn("Некорректный формат", h.screen_text())
-            self.assertEqual(h.user_data()["current_step"], step_index("date"))
-            self.assertIn(("На этой неделе", "cal_week"), buttons(h))
-            failed = h.user_data().get("failed_input_messages", {}).get("date", [])
-            self.assertEqual(len(failed), 1)
+            self.assertIn("⚠️", h.screen_text())
+            self.assertIn("Вопрос 2 из 2", h.screen_text())
+            self.assertTrue(_callbacks(h, "aw_calday"), "календарь остался доступен")
+            self.assertNotIn(
+                bad.effective_message.message_id,
+                h.deleted_ids(),
+                "ошибочный ввод не удаляется",
+            )
+            self.assertIsNone(_saved_values(h, today=TODAY)["day"])
 
-            # выбор кнопкой принимает поле → неудачный ввод уходит в очистку
-            await h.callback("cal_week")
-            await h.callback("cal_day:2026-10-23")
-            self.assertIn(failed[0], h.deleted_ids())
-            self.assertNotIn("failed_input_messages", h.user_data())
+    @scenario_test
+    async def test_past_and_beyond_horizon_days_are_rejected(self, h):
+        with frozen_today(2026, 10, 22):
+            await _open_date_question(h)
+            prefix = _field_prefix(h)
+            horizon = calendar_view.horizon_end(TODAY)
+
+            await h.callback(
+                f"aw_calday:{prefix}:{(TODAY - timedelta(days=1)).isoformat()}"
+            )
+            self.assertIn("вне допустимого диапазона", _answer_text(h))
+            self.assertIsNone(_saved_values(h, today=TODAY)["day"])
+
+            await h.callback(
+                f"aw_calday:{prefix}:{(horizon + timedelta(days=1)).isoformat()}"
+            )
+            self.assertIn("вне допустимого диапазона", _answer_text(h))
+            self.assertIsNone(_saved_values(h, today=TODAY)["day"])
+
+            # Последний день горизонта — допустим.
+            await h.callback(f"aw_calday:{prefix}:{horizon.isoformat()}")
+            self.assertEqual(
+                _saved_values(h, today=TODAY)["day"], horizon.strftime("%d.%m.%Y")
+            )
+
+    @scenario_test
+    async def test_malformed_and_foreign_callbacks_are_safe(self, h):
+        with frozen_today(2026, 10, 22):
+            await _open_date_question(h)
+            prefix = _field_prefix(h)
+            before = _saved_values(h, today=TODAY)
+
+            for data in (
+                f"aw_calday:{prefix}:not-a-date",
+                f"aw_calday:{prefix}",
+                "aw_calday:1",
+                f"aw_calrange:{prefix}:9",
+                f"aw_calrange:{prefix}:abc",
+                f"aw_calweekdays:{prefix}:2026:11:9",
+                f"aw_calmonth:{prefix}:2031:5",
+                f"aw_calweek:{prefix}:unknown",
+            ):
+                await h.callback(data)
+                self.assertTrue(_answer_text(h), f"нет ответа на {data}")
+                self.assertIn("Вопрос 2 из 2", h.screen_text())
+                self.assertEqual(_saved_values(h, today=TODAY), before)
+
+    @scenario_test
+    async def test_stale_callback_after_value_saved(self, h):
+        """Кнопка дня с прошлым revision не перезаписывает значение."""
+        with frozen_today(2026, 10, 22):
+            await _open_date_question(h)
+            stale = _callback(h, "aw_calday")
+            chosen = TODAY + timedelta(days=2)
+            await h.callback(f"aw_calday:{_field_prefix(h)}:{chosen.isoformat()}")
+            before = _saved_values(h, today=TODAY)
+
+            await h.callback(stale)
+            self.assertEqual(_saved_values(h, today=TODAY), before)
+            self.assertIn("устарел", _answer_text(h).lower())
 
 
 @unittest.skipIf(
     INTEGRATION_IMPORT_ERROR is not None,
     f"интеграционное окружение недоступно: {INTEGRATION_IMPORT_ERROR}",
 )
-class PersistenceAndRestartTests(unittest.TestCase):
-    """WIP и рестарт на промежуточном уровне календаря."""
+class CalendarScreenIntegrityTests(unittest.TestCase):
+    """Один экран, один ответ на callback, без пустых экранов и лишних сообщений."""
 
     @scenario_test
-    async def test_restart_mid_calendar_restores_date_step(self, h):
+    async def test_navigation_edits_existing_screen_only(self, h):
         with frozen_today(2026, 10, 22):
-            await h.start_dialog()
-            await h.text("Концерт")
-            await h.callback("cal_other")
-            await h.callback("cal_range:0")
-            await h.callback("cal_rweek:0:2026-11-02")
-            sends_before = len(screen_sends(h))
+            await _open_date_question(h)
+            prefix = _field_prefix(h)
+            sends = len(_screen_sends(h))
+            answers = len(h.answers())
+            sequence = [
+                f"aw_calroot:{prefix}",
+                f"aw_calweek:{prefix}:cur",
+                f"aw_calroot:{prefix}",
+                f"aw_calother:{prefix}",
+                f"aw_calrange:{prefix}:0",
+                f"aw_calother:{prefix}",
+                f"aw_calmonths:{prefix}",
+                f"aw_calmonth:{prefix}:2026:11",
+                f"aw_calweekdays:{prefix}:2026:11:0",
+                f"aw_calmonth:{prefix}:2026:11",
+                f"aw_calmonths:{prefix}",
+                f"aw_calroot:{prefix}",
+                f"aw_calback:{prefix}",
+            ]
+            for index, data in enumerate(sequence, start=1):
+                await h.callback(data)
+                self.assertTrue(h.screen_text().strip(), f"пустой экран после {data}")
+                self.assertEqual(
+                    len(h.answers()),
+                    answers + index,
+                    f"на {data} должен быть ровно один answer",
+                )
+
+            self.assertEqual(len(_screen_sends(h)), sends, "экран не пересоздавался")
+            # Единственное отдельное сообщение — живой блок анонса.
+            self.assertEqual(len(h.replies()), 1)
+
+    @scenario_test
+    async def test_back_from_calendar_returns_to_question(self, h):
+        with frozen_today(2026, 10, 22):
+            await _open_date_question(h)
+            prefix = _field_prefix(h)
+            await h.callback(f"aw_calroot:{prefix}")
+            await h.callback(f"aw_calback:{prefix}")
+
+            self.assertIn("Вопрос 2 из 2", h.screen_text())
+            self.assertTrue(_callbacks(h, "aw_calday"))
+
+    @scenario_test
+    async def test_restart_restores_date_question_with_calendar(self, h):
+        with frozen_today(2026, 10, 22):
+            await _open_date_question(h)
+            prefix = _field_prefix(h)
+            await h.callback(f"aw_calweek:{prefix}:next")
+            draft_id = _field_prefix(h).split(":", 1)[0]
 
             await h.restart()
             await h.text("/start")
-            self.assertIn(("▶️ Продолжить пост", "restore_wip"), buttons(h))
-            await h.callback("restore_wip")
+            await h.callback("my_announcements")
+            await h.callback(f"aw_open:{draft_id}")
 
-            self.assertEqual(h.dialog_state(), POST_CREATION)
-            self.assertEqual(h.user_data()["current_step"], step_index("date"))
-            self.assertEqual(h.user_data().get("title"), "Концерт")
-            self.assertTrue(h.screen_text().startswith(step_title("date")))
-            self.assertIn(("На этой неделе", "cal_week"), buttons(h))
+            self.assertIn("Вопрос 2 из 2", h.screen_text())
+            # Промежуточный уровень календаря («следующая неделя») — чистая
+            # навигация, а не данные анонса: в БД он не сохраняется. После
+            # рестарта вопрос даты открывается с базового уровня текущей
+            # недели (как при первом заходе), а не с покинутого экрана.
             self.assertEqual(
-                len(screen_sends(h)),
-                sends_before,
-                "экран редактируется, не дублируется",
+                _day_buttons(h),
+                calendar_view.days_between(*calendar_view.current_week(TODAY)),
+                "после рестарта календарь открывается с базового уровня",
             )
-
-            # после рестарта календарь продолжает работать
-            await h.callback("cal_nextweek")
-            await h.callback("cal_day:2026-10-30")
-            self.assertEqual(h.user_data()["date"], "30.10.2026")
-            self.assertEqual(payload_date(h), "30.10.2026")
-
-    @scenario_test
-    async def test_wip_keeps_selected_date_after_restart(self, h):
-        with frozen_today(2026, 10, 22):
-            await h.start_dialog()
-            await h.text("Концерт")
-            await h.callback("cal_week")
-            await h.callback("cal_day:2026-10-24")
-            self.assertEqual(payload_date(h), "24.10.2026")
-
-            await h.restart()
-            await h.callback("restore_wip")
-
-            self.assertEqual(h.user_data()["date"], "24.10.2026")
-            self.assertEqual(h.user_data()["current_step"], step_index("time_start"))
-            self.assertTrue(h.screen_text().startswith(step_title("time_start")))
-
-    @scenario_test
-    async def test_restart_during_date_edit_restores_calendar(self, h):
-        with frozen_today(2026, 10, 22):
-            await goto_preview(h, title="Концерт")
-            await h.callback("edit_post")
-            await h.callback("edit_date")
-            await h.callback("cal_other")
-
-            await h.restart()
-            await h.callback("restore_wip")
-
-            self.assertEqual(h.dialog_state(), EDIT_FIELD)
-            self.assertEqual(h.user_data().get("edit_field"), "date")
-            self.assertIn("Текущее значение:", h.screen_text())
-            self.assertIn(("На этой неделе", "cal_week"), buttons(h))
-
-            await h.callback("cal_nextweek")
-            await h.callback("cal_day:2026-10-30")
-            self.assertEqual(h.dialog_state(), POST_CREATION)
-            self.assertEqual(h.user_data()["date"], "30.10.2026")
-            self.assertIn("Дата</b>: 30.10.2026", h.posts()[-1])
-
-    @scenario_test
-    async def test_restart_after_calendar_date_edit_shows_preview(self, h):
-        """Завершённая правка даты кнопкой не возвращается после рестарта."""
-        with frozen_today(2026, 10, 22):
-            await goto_preview(h, title="Концерт")
-            await h.callback("edit_post")
-            await h.callback("edit_date")
-            await h.callback("cal_nextweek")
-            await h.callback("cal_day:2026-10-30")
-            self.assertNotIn("edit_field", h.user_data())
-
-            await h.restart()
-            await h.callback("restore_wip")
-
-            self.assertEqual(h.dialog_state(), POST_CREATION)
-            self.assertNotIn("edit_field", h.user_data())
-            self.assertIn("Пост готов к действию", h.screen_text())
-            self.assertIn("Дата</b>: 30.10.2026", h.posts()[-1])
+            # Сохранённое значение поля при этом не теряется.
+            self.assertIsNone(_saved_values(h, today=TODAY)["day"])
 
 
 @unittest.skipIf(
     INTEGRATION_IMPORT_ERROR is not None,
     f"интеграционное окружение недоступно: {INTEGRATION_IMPORT_ERROR}",
 )
-class StaleAndForgedCallbackTests(unittest.TestCase):
-    """Устаревшие, повторные и подделанные callback календаря."""
+class CalendarHorizonCoverageTests(unittest.TestCase):
+    """
+    Полнота календаря на уровне отрисованных кнопок (перенесено из
+    удалённого test_stage17_calendar_coverage.py, легаси-мастер S5).
 
-    @scenario_test
-    async def test_stale_calendar_after_day_selected(self, h):
-        with frozen_today(2026, 10, 22):
-            await h.start_dialog()
-            await h.text("Концерт")
-            await h.callback("cal_week")
-            await h.callback("cal_day:2026-10-23")
-            date_before = h.user_data()["date"]
+    Обходятся ВСЕ уровни так, как это делает пользователь: дни на вопросе,
+    недели, два диапазона, месяцы и недели месяцев. Собираются даты,
+    подписи и callback-данные.
+    """
 
-            await h.callback("cal_day:2026-10-24")
+    async def _collect(self, h, today: date) -> dict:
+        horizon = calendar_view.horizon_end(today)
+        result: dict = {"days": set(), "callbacks": set(), "groups": []}
 
-            self.assertIn("устарела", last_answer(h))
-            self.assertEqual(h.user_data()["date"], date_before)
-            self.assertEqual(h.user_data()["current_step"], step_index("time_start"))
-            self.assertIn("Время начала", h.screen_text())
-
-    @scenario_test
-    async def test_stale_calendar_after_dialog_end(self, h):
-        await goto_preview(h, title="Концерт")
-        await h.callback("save_draft")
-        self.assertIsNone(h.dialog_state())
-
-        await h.callback("cal_week")
-
-        self.assertIn("Кнопка устарела", last_answer(h))
-        self.assertIsNone(h.dialog_state())
-
-    @scenario_test
-    async def test_screen_recovery_when_edit_unavailable(self, h):
-        """Экран удалён/недоступен: календарь безопасно создаёт новый экран."""
-        with frozen_today(2026, 10, 22):
-            await h.start_dialog()
-            await h.text("Концерт")
-            old_id = h.screen_message_id()
-            sends = len(screen_sends(h))
-
-            h.bot.errors_by_type["edit_message"] = BadRequest(
-                "Message to edit not found"
-            )
-            await h.callback("cal_week")
-            h.bot.errors_by_type.pop("edit_message", None)
-
-            new_id = h.screen_message_id()
-            self.assertNotEqual(new_id, old_id, "экран пересоздан")
-            self.assertEqual(len(screen_sends(h)), sends + 1)
-            self.assertIn("Текущая неделя", h.screen_text())
-
-            # дальнейшая навигация и выбор даты правят уже новый экран
-            await h.callback("cal_day:2026-10-23")
-            self.assertEqual(h.screen_message_id(), new_id)
-            self.assertEqual(h.user_data()["date"], "23.10.2026")
-
-            # ref нового экрана сохранён в WIP: рестарт продолжает с него
-            await h.restart()
-            await h.callback("restore_wip")
-            self.assertEqual(h.screen_message_id(), new_id)
-            self.assertTrue(h.screen_text().startswith(step_title("time_start")))
-
-    @scenario_test
-    async def test_repeated_calendar_callback_is_safe(self, h):
-        with frozen_today(2026, 10, 22):
-            await h.start_dialog()
-            await h.text("Концерт")
-            sends = len(screen_sends(h))
-            await h.callback("cal_week")
-            await h.callback("cal_week")
-
-            self.assertEqual(len(screen_sends(h)), sends, "дубля экрана нет")
+        def collect(name: str) -> None:
+            days = _day_buttons(h)
+            labels = [
+                label
+                for label, data in h.screen_buttons()
+                if data and data.startswith("aw_calday")
+            ]
             self.assertEqual(
-                h.screen_text().splitlines()[0],
-                "📅 Текущая неделя: 22.10–25.10. Выберите дату:",
+                labels,
+                [calendar_view.format_day(day) for day in days],
+                f"{name}: подписи кнопок-дней",
             )
-            self.assertEqual(len(h.answers()), 2)
-
-    @scenario_test
-    async def test_forged_past_day_rejected(self, h):
-        with frozen_today(2026, 10, 22):
-            await h.start_dialog()
-            await h.text("Концерт")
-            await h.callback("cal_day:2026-10-21")
-
-            self.assertIn("уже прошла", last_answer(h))
-            self.assertIsNone(h.user_data().get("date"))
-            self.assertEqual(h.user_data()["current_step"], step_index("date"))
-
-    @scenario_test
-    async def test_forged_day_beyond_horizon_rejected(self, h):
-        with frozen_today(2026, 10, 22):
-            await h.start_dialog()
-            await h.text("Концерт")
-            await h.callback("cal_day:2027-10-23")
-
-            self.assertIn("за пределами горизонта", last_answer(h))
-            self.assertIsNone(h.user_data().get("date"))
-            self.assertEqual(h.user_data()["current_step"], step_index("date"))
-
-    @scenario_test
-    async def test_horizon_last_day_is_accepted(self, h):
-        with frozen_today(2026, 10, 22):
-            await h.start_dialog()
-            await h.text("Концерт")
-            await h.callback("cal_day:2027-10-22")
-
-            self.assertEqual(h.user_data()["date"], "22.10.2027")
-            self.assertEqual(h.user_data()["current_step"], step_index("time_start"))
-
-    @scenario_test
-    async def test_malformed_callbacks_rejected_safely(self, h):
-        with frozen_today(2026, 10, 22):
-            await h.start_dialog()
-            await h.text("Концерт")
-            calls = (
-                "cal_day:not-a-date",
-                "cal_range:9",
-                "cal_rweek:0:2026-11-03",  # не начало недели диапазона
-                "cal_month:2026-13",
-                "cal_mweek:2026-11-15",  # не начало недели месяца
-                "cal_unknown",
+            self.assertEqual(len(days), len(set(days)), f"{name}: повтор даты")
+            self.assertTrue(
+                all(today <= day <= horizon for day in days),
+                f"{name}: дата вне горизонта",
             )
-            for data in calls:
-                with self.subTest(data=data):
-                    await h.callback(data)
-                    self.assertTrue(last_answer(h))
-                    self.assertIsNone(h.user_data().get("date"))
-                    self.assertEqual(h.user_data()["current_step"], step_index("date"))
-                    self.assertTrue(h.screen_text().startswith(step_title("date")))
+            result["days"].update(days)
+            result["groups"].append((name, days))
+            result["callbacks"].update(
+                data for _label, data in h.screen_buttons() if data
+            )
 
+        collect("question")
+        await h.callback(_callback(h, "aw_calweek"))
+        collect("current_week")
+        await h.callback(_callback(h, "aw_calroot"))
 
-@unittest.skipIf(
-    INTEGRATION_IMPORT_ERROR is not None,
-    f"интеграционное окружение недоступно: {INTEGRATION_IMPORT_ERROR}",
-)
-class MidnightRolloverTests(unittest.TestCase):
-    """Календарь открыт до полуночи, кнопка нажата после."""
+        await h.callback(_callback(h, "aw_calweek"))
+        prefix = _field_prefix(h)
+        await h.callback(f"aw_calweek:{prefix}:next")
+        collect("next_week")
+        await h.callback(_callback(h, "aw_calroot"))
+
+        await h.callback(_callback(h, "aw_calother"))
+        for index in range(len(_callbacks(h, "aw_calrange"))):
+            await h.callback(f"aw_calrange:{prefix}:{index}")
+            collect(f"range_{index}")
+            await h.callback(f"aw_calother:{prefix}")
+        await h.callback(f"aw_calroot:{prefix}")
+
+        await h.callback(f"aw_calmonths:{prefix}")
+        month_keys = [
+            (int(data.rsplit(":", 2)[-2]), int(data.rsplit(":", 1)[-1]))
+            for data in _callbacks(h, "aw_calmonth:")
+        ]
+        for key in month_keys:
+            await h.callback(f"aw_calmonth:{prefix}:{key[0]}:{key[1]}")
+            week_count = len(_callbacks(h, "aw_calweekdays"))
+            for week_index in range(week_count):
+                await h.callback(
+                    f"aw_calweekdays:{prefix}:{key[0]}:{key[1]}:{week_index}"
+                )
+                collect(f"month_{key[0]}_{key[1]}_week_{week_index}")
+                await h.callback(f"aw_calmonth:{prefix}:{key[0]}:{key[1]}")
+            await h.callback(f"aw_calmonths:{prefix}")
+        result["month_keys"] = month_keys
+        return result
 
     @scenario_test
-    async def test_day_that_became_past_is_not_saved(self, h):
+    async def test_every_horizon_date_is_reachable_by_buttons(self, h):
         with frozen_today(2026, 10, 22):
-            await h.start_dialog()
-            await h.text("Концерт")
-            await h.callback("cal_week")
-            self.assertIn(("22.10 (чт)", "cal_day:2026-10-22"), buttons(h))
+            today = TODAY
+            horizon = calendar_view.horizon_end(today)
+            await _open_date_question(h)
 
-        with frozen_today(2026, 10, 23):
-            await h.callback("cal_day:2026-10-22")  # вчерашняя кнопка
+            collected = await self._collect(h, today)
 
-            self.assertIn("уже прошла", last_answer(h))
-            self.assertIsNone(h.user_data().get("date"), "прошедшая дата не сохранена")
-            self.assertEqual(h.user_data()["current_step"], step_index("date"))
-            self.assertTrue(h.screen_text().startswith(step_title("date")))
-
-            # корень обновлён: новая текущая неделя начинается с 23.10
-            await h.callback("cal_week")
-            labels = [text for text, _ in buttons(h)]
-            self.assertEqual(labels[0], "23.10 (пт)")
-            self.assertNotIn("22.10 (чт)", labels)
+            expected = calendar_view.days_between(today, horizon)
+            self.assertEqual(
+                sorted(collected["days"]),
+                expected,
+                "объединение всех уровней календаря — весь горизонт без пропусков",
+            )
+            # Месяцы начинаются с первой неохваченной даты и доходят до
+            # месяца горизонта: стык «диапазоны → месяцы» непрерывен.
+            expected_months = []
+            current = (
+                calendar_view.first_uncovered(today).year,
+                calendar_view.first_uncovered(today).month,
+            )
+            while current <= (horizon.year, horizon.month):
+                expected_months.append(current)
+                current = calendar_view.add_months_key(current, 1)
+            self.assertEqual(collected["month_keys"], expected_months)
 
     @scenario_test
-    async def test_still_valid_day_after_midnight_is_saved(self, h):
+    async def test_calendar_callbacks_are_short_and_free_of_user_text(self, h):
         with frozen_today(2026, 10, 22):
-            await h.start_dialog()
-            await h.text("Концерт")
-            await h.callback("cal_nextweek")
+            await _open_date_question(h, title="Текст пользователя " * 12)
 
-        with frozen_today(2026, 10, 23):
-            await h.callback("cal_day:2026-10-27")
+            collected = await self._collect(h, TODAY)
 
-            self.assertEqual(h.user_data()["date"], "27.10.2026")
-            self.assertEqual(h.user_data()["current_step"], step_index("time_start"))
-
-    @scenario_test
-    async def test_month_boundary_after_midnight(self, h):
-        with frozen_today(2026, 10, 31):
-            await h.start_dialog()
-            await h.text("Концерт")
-            await h.callback("cal_other")
-            await h.callback("cal_months:0")
-
-        with frozen_today(2026, 11, 1):
-            await h.callback("cal_day:2026-10-31")
-            self.assertIn("уже прошла", last_answer(h))
-            self.assertIsNone(h.user_data().get("date"))
-
-            await h.callback("cal_day:2026-11-01")
-            self.assertEqual(h.user_data()["date"], "01.11.2026")
-
-
-@unittest.skipIf(
-    INTEGRATION_IMPORT_ERROR is not None,
-    f"интеграционное окружение недоступно: {INTEGRATION_IMPORT_ERROR}",
-)
-class EditDateCalendarTests(unittest.TestCase):
-    """Правка даты из превью: кнопки и текстовый ввод дают одно поле."""
-
-    @scenario_test
-    async def test_edit_date_via_calendar_updates_preview(self, h):
-        with frozen_today(2026, 10, 22):
-            await goto_preview(h, title="Концерт")
-            await h.callback("edit_post")
-            await h.callback("edit_date")
-            await h.callback("cal_nextweek")
-            await h.callback("cal_day:2026-10-30")
-
-            self.assertEqual(h.dialog_state(), POST_CREATION)
-            self.assertEqual(h.user_data()["date"], "30.10.2026")
-            self.assertNotIn("edit_field", h.user_data())
-            self.assertIn("Дата</b>: 30.10.2026", h.posts()[-1])
-            self.assertIn("Пост готов к действию", h.screen_text())
-
-    @scenario_test
-    async def test_edit_date_text_still_works(self, h):
-        with frozen_today(2026, 10, 22):
-            await goto_preview(h, title="Концерт")
-            await h.callback("edit_post")
-            await h.callback("edit_date")
-            await h.text("17 ноября")
-
-            self.assertEqual(h.dialog_state(), POST_CREATION)
-            self.assertEqual(h.user_data()["date"], "17.11.2026")
-            self.assertIn("Дата</b>: 17.11.2026", h.posts()[-1])
-
-    @scenario_test
-    async def test_edit_date_text_while_calendar_open(self, h):
-        """Правка даты текстом работает и когда открыт кнопочный календарь."""
-        with frozen_today(2026, 10, 22):
-            await goto_preview(h, title="Концерт")
-            await h.callback("edit_post")
-            await h.callback("edit_date")
-            await h.callback("cal_other")
-            await h.callback("cal_months:0")
-            await h.text("17 ноября")
-
-            self.assertEqual(h.dialog_state(), POST_CREATION)
-            self.assertEqual(h.user_data()["date"], "17.11.2026")
-            self.assertNotIn("edit_field", h.user_data())
-            self.assertIn("Дата</b>: 17.11.2026", h.posts()[-1])
-
-    @scenario_test
-    async def test_skip_in_date_edit_clears_field(self, h):
-        with frozen_today(2026, 10, 22):
-            await h.start_dialog()
-            await h.text("Концерт")
-            await h.callback("cal_week")
-            await h.callback("cal_day:2026-10-23")
-            for _ in range(len(POST_STEPS) - step_index("time_start")):
-                await h.text("Пропустить")
-            self.assertIn("Дата</b>: 23.10.2026", h.posts()[-1])
-
-            await h.callback("edit_post")
-            await h.callback("edit_date")
-            await h.callback("skip")
-
-            self.assertIsNone(h.user_data().get("date"))
-            self.assertEqual(h.dialog_state(), POST_CREATION)
-            self.assertNotIn("Дата</b>:", h.posts()[-1])
-
-
-@unittest.skipIf(
-    INTEGRATION_IMPORT_ERROR is not None,
-    f"интеграционное окружение недоступно: {INTEGRATION_IMPORT_ERROR}",
-)
-class FullCalendarScenarioTests(unittest.TestCase):
-    """Сквозной сценарий: создание кнопками → черновик → правка даты."""
-
-    @scenario_test
-    async def test_create_save_open_edit_date_via_calendar(self, h):
-        with frozen_today(2026, 10, 22):
-            await h.text("/start")
-            await h.callback("create_post")
-            await h.text("Концерт")
-
-            # дата кнопками: Другая → первый диапазон → неделя → день
-            await h.callback("cal_other")
-            await h.callback("cal_range:0")
-            await h.callback("cal_rweek:0:2026-11-02")
-            await h.callback("cal_day:2026-11-02")
-            self.assertEqual(h.user_data()["date"], "02.11.2026")
-
-            # остальные шаги пропускаем → превью
-            for _ in range(len(POST_STEPS) - step_index("time_start")):
-                await h.text("Пропустить")
-            self.assertIn("Пост готов к действию", h.screen_text())
-            self.assertIn("Дата</b>: 02.11.2026", h.posts()[-1])
-
-            # сохранение в черновики
-            await h.callback("save_draft")
-            self.assertIn("Пост сохранён в черновики", h.screen_text())
-            self.assertIsNone(h.dialog_state())
-            drafts = h.drafts()
-            self.assertEqual(len(drafts), 1)
-            self.assertEqual(drafts[0].date, "02.11.2026")
-
-            # открытие черновика и правка даты кнопками
-            await h.text("/drafts")
-            self.assertIn("Ваши черновики", h.screen_text())
-            await h.callback("editdraft_1")
-            self.assertEqual(h.user_data()["date"], "02.11.2026")
-            await h.callback("edit_post")
-            await h.callback("edit_date")
-            await h.callback("cal_nextweek")
-            self.assertIn(("30.10 (пт)", "cal_day:2026-10-30"), buttons(h))
-            await h.callback("cal_day:2026-10-30")
-
-            self.assertEqual(h.posts()[-1].count("30.10.2026"), 1)
-            await h.callback("save_draft")
-            self.assertIn("Черновик 1 обновлён", h.screen_text())
-            drafts = h.drafts()
-            self.assertEqual(len(drafts), 1, "обновление без копий")
-            self.assertEqual(drafts[0].date, "30.10.2026")
-
-    @scenario_test
-    async def test_calendar_day_equals_text_input_state(self, h):
-        """Кнопка и текст дают одинаковое состояние данных."""
-        with frozen_today(2026, 10, 22):
-            await h.start_dialog()
-            await h.text("Концерт")
-            await h.callback("cal_week")
-            await h.callback("cal_day:2026-10-23")
-            via_button = {
-                key: h.user_data().get(key)
-                for key in ("title", "date", "current_step", "editing_draft_id")
-            }
-            button_payload = payload_date(h)
-
-            # возвращаемся на шаг даты и вводим ту же дату текстом
-            await h.callback("back")
-            self.assertEqual(h.user_data()["current_step"], step_index("date"))
-            await h.text("23.10.2026")
-            via_text = {
-                key: h.user_data().get(key)
-                for key in ("title", "date", "current_step", "editing_draft_id")
-            }
-
-            self.assertEqual(via_button, via_text)
-            self.assertEqual(via_button["date"], "23.10.2026")
-            self.assertEqual(button_payload, payload_date(h))
+            for data in collected["callbacks"]:
+                self.assertLessEqual(
+                    len(data.encode("utf-8")),
+                    64,
+                    f"callback длиннее лимита Telegram: {data!r}",
+                )
+                self.assertNotIn("Текст пользователя", data)
+                self.assertRegex(data, r"^aw_[a-z0-9:_-]+$")
 
 
 if __name__ == "__main__":

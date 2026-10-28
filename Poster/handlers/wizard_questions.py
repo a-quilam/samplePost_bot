@@ -161,6 +161,11 @@ def selected_choices(field: AnnouncementFieldState) -> list[str]:
     return []
 
 
+def _description_text(value: object) -> str:
+    """Описание кирпичика для экрана: сжатые пробелы, без пустых строк."""
+    return " ".join(str(value or "").split())
+
+
 def question_text(
     field: AnnouncementFieldState,
     index: int,
@@ -170,11 +175,26 @@ def question_text(
     error: str | None = None,
     notice: str | None = None,
 ) -> str:
-    blocks = [
-        f"🧱 Вопрос {index + 1} из {total}: {h(field.title)}",
-        type_hint(field),
-        "Поле необязательное: его можно пропустить.",
-    ]
+    """
+    Текст вопроса по кирпичику: заголовок, описание автора, подсказка типа,
+    состояние значения, ошибка/уведомление.
+
+    Юмора здесь нет намеренно (S5 §5.7): редкая шутливая строка добавляется
+    вызывающим слоем уже после сборки клавиатуры, чтобы текст вопроса
+    оставался чистым, а `callback_data` — неизменными.
+    """
+    blocks = [f"🧱 Вопрос {index + 1} из {total}: {h(field.title)}"]
+    # Poster 2.0 S5: описание кирпичика — инструкция автору анонса. Текст
+    # задаёт человек, поэтому он экранируется как и любое значение экрана.
+    description = _description_text(field.description)
+    if description:
+        blocks.append(f"📝 {h(description)}")
+    blocks.extend(
+        [
+            type_hint(field),
+            "Поле необязательное: его можно пропустить.",
+        ]
+    )
     if field.status == FIELD_STATUS_VALID:
         value = field_value_text(field)
         blocks.append(f"Текущее значение: {h(value)}")

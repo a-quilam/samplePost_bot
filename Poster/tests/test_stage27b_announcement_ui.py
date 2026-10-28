@@ -34,7 +34,6 @@ try:
         CONVERSATION_NAME,
         PREVIEW_VISIBLE_LIMIT,
     )
-    from handlers.post_creation import POST_CREATION
     from models import (
         AnnouncementDraft,
         AnnouncementValue,
@@ -245,7 +244,7 @@ async def _preview(h) -> None:
 )
 class AnnouncementWizardMenuTests(unittest.TestCase):
     @scenario_test
-    async def test_new_menu_entry_keeps_old_wizard_and_wip(self, h) -> None:
+    async def test_new_menu_entry_and_removed_legacy_wizard(self, h) -> None:
         await h.text("/start")
         buttons = h.screen_buttons()
         # Poster 2.0 S2: в меню ровно пять кнопок, старых входов нет.
@@ -267,25 +266,24 @@ class AnnouncementWizardMenuTests(unittest.TestCase):
         self.assertIn("📂 Мои анонсы", h.screen_text())
         self.assertEqual(h.dialog_state(name=CONVERSATION_NAME), AW_PLACE)
 
-        # Старый мастер по-прежнему запускается командой и сохраняет WIP.
+        # Poster 2.0 S5: легаси-мастер удалён. /create_post больше не
+        # запускает диалог и не пишет WIP в user_states — команда неизвестна.
         await h.callback("main_menu")
         self.assertIsNone(h.dialog_state(name=CONVERSATION_NAME))
-        await h.start_dialog()
-        self.assertEqual(h.dialog_state(), POST_CREATION)
-        await h.text("Старый заголовок")
         with h.session_factory() as session:
             state = session.get(UserState, DEFAULT_USER_ID)
-            self.assertIsNotNone(state)
-            payload_before = state.payload
-            self.assertIn("Старый заголовок", payload_before or "")
+            payload_before = state.payload if state is not None else None
+        await h.text("/create_post")
+        self.assertIsNone(h.dialog_state(name=CONVERSATION_NAME))
+        self.assertIsNone(h.dialog_state(), "легаси-диалог не запустился")
+        with h.session_factory() as session:
+            state = session.get(UserState, DEFAULT_USER_ID)
+            payload_after = state.payload if state is not None else None
+        self.assertEqual(payload_after, payload_before, "WIP не создаётся")
 
-        # Вход в новый мастер завершает старый диалог, но не стирает WIP.
+        # Единственный мастер по-прежнему открывается командой /new_wizard.
         await h.text("/new_wizard")
         self.assertEqual(h.dialog_state(name=CONVERSATION_NAME), AW_PLACE)
-        self.assertIsNone(h.dialog_state())
-        with h.session_factory() as session:
-            state = session.get(UserState, DEFAULT_USER_ID)
-            self.assertEqual(state.payload, payload_before)
 
 
 @unittest.skipIf(

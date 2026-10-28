@@ -3,7 +3,8 @@
 Stage 27A: схема отдельного состояния адаптивного мастера.
 
 Проверяются миграция 12, независимые таблицы, ограничения/триггеры и
-сохранность старых `drafts`/`user_states`. Настоящая база не открывается.
+сохранность прежних данных: `drafts` уходит в архив миграцией 17 (S5),
+`user_states` не трогается. Настоящая база не открывается.
 """
 
 from __future__ import annotations
@@ -19,7 +20,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import sessionmaker
 
 from migrations import DEFAULT_MIGRATIONS, LATEST_VERSION, run_migrations
-from models import Draft, UserState
+from models import UserState
 from tests.stage19a_helpers import (
     OLD_DRAFT,
     OLD_WIP_PAYLOAD,
@@ -33,8 +34,8 @@ from tests.stage27_helpers import AnnouncementDatabaseTestCase
 class AnnouncementWizardMigrationTests(AnnouncementDatabaseTestCase):
     """Миграция 12 и ограничения новых таблиц."""
 
-    def test_latest_migration_is_sixteen_and_follows_brick_proposals(self) -> None:
-        self.assertEqual(LATEST_VERSION, 16)
+    def test_latest_migration_is_seventeen_and_follows_brick_proposals(self) -> None:
+        self.assertEqual(LATEST_VERSION, 17)
         self.assertEqual(
             [(migration.version, migration.name) for migration in DEFAULT_MIGRATIONS],
             [
@@ -54,6 +55,7 @@ class AnnouncementWizardMigrationTests(AnnouncementDatabaseTestCase):
                 (14, "announcement_redelivery"),
                 (15, "brick_description_and_address"),
                 (16, "announcement_draft_origin"),
+                (17, "archive_legacy_drafts"),
             ],
         )
         self.assertEqual(run_migrations(self.engine), LATEST_VERSION)
@@ -296,7 +298,12 @@ class AnnouncementWizardMigrationTests(AnnouncementDatabaseTestCase):
 
 
 class OldDraftCompatibilityTests(unittest.TestCase):
-    """Старые черновики и WIP не конвертируются миграцией 12."""
+    """Старые черновики и WIP не конвертируются в анонс.
+
+    Миграция 12 создаёт параллельные таблицы, а не переносит данные. В S5
+    легаси-таблица `drafts` переименована миграцией 17: содержимое остаётся
+    доступным в `legacy_drafts_backup` и в анонс не попадает.
+    """
 
     def setUp(self) -> None:
         self.path = temp_db_path("poster-27a-old-")
@@ -310,16 +317,27 @@ class OldDraftCompatibilityTests(unittest.TestCase):
         self.session = sessionmaker(bind=self.engine, expire_on_commit=False)()
         self.addCleanup(self.session.close)
 
-        draft = self.session.get(Draft, OLD_DRAFT["id"])
         state = self.session.get(UserState, OLD_DRAFT["user_id"])
-        self.assertIsNotNone(draft)
         self.assertIsNotNone(state)
-        assert draft is not None and state is not None
-        self.assertEqual(draft.title, OLD_DRAFT["title"])
-        self.assertEqual(draft.image, OLD_DRAFT["image"])
+        assert state is not None
         self.assertEqual(loads(state.payload or ""), OLD_WIP_PAYLOAD)
 
         with self.engine.connect() as connection:
+            archived = connection.execute(
+                text("SELECT title, image FROM legacy_drafts_backup WHERE id = :id"),
+                {"id": OLD_DRAFT["id"]},
+            ).fetchone()
+            drafts_table = connection.execute(
+                text(
+                    "SELECT name FROM sqlite_master "
+                    "WHERE type='table' AND name='drafts'"
+                )
+            ).fetchone()
+            self.assertIsNone(drafts_table, "легаси-таблица переименована")
+            self.assertIsNotNone(archived, "прежний черновик читается из архива")
+            assert archived is not None
+            self.assertEqual(archived[0], OLD_DRAFT["title"])
+            self.assertEqual(archived[1], OLD_DRAFT["image"])
             self.assertEqual(
                 connection.execute(
                     text("SELECT count(*) FROM announcement_drafts")

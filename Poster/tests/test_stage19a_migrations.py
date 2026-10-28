@@ -99,6 +99,7 @@ class MigrationMechanismTests(unittest.TestCase):
                 (14, "announcement_redelivery"),
                 (15, "brick_description_and_address"),
                 (16, "announcement_draft_origin"),
+                (17, "archive_legacy_drafts"),
             ],
         )
 
@@ -118,17 +119,20 @@ class MigrationMechanismTests(unittest.TestCase):
         self.assertEqual(run_migrations(restarted), LATEST_VERSION)
         self.assertEqual(len(_journal(self.path)), len(DEFAULT_MIGRATIONS))
 
-    def test_old_schema_drafts_survive_migration(self) -> None:
+    def test_old_schema_drafts_are_archived_readable(self) -> None:
+        """Миграция 17: строки прежних черновиков читаются из архива."""
         create_old_schema(self.path)
 
         run_migrations(self.engine)
 
+        self.assertNotIn("drafts", table_names(self.path))
+        self.assertIn("legacy_drafts_backup", table_names(self.path))
         connection = connect(self.path)
         try:
             row = connection.execute(
                 "SELECT title, date, time_start, time_end, place_name, "
                 "place_url, text, contact, image, photos, formats, created_at "
-                "FROM drafts WHERE id = ?",
+                "FROM legacy_drafts_backup WHERE id = ?",
                 (OLD_DRAFT["id"],),
             ).fetchone()
         finally:
@@ -172,9 +176,11 @@ class MigrationMechanismTests(unittest.TestCase):
         run_init_db_subprocess(self.path)
 
         tables = table_names(self.path)
-        self.assertTrue(
-            {"users", "places", "place_names", "drafts", "user_states"} <= tables
-        )
+        self.assertTrue({"users", "places", "place_names", "user_states"} <= tables)
+        # На свежей базе легаси-таблицы не было: миграция 17 фиксирует версию,
+        # но архив не создаёт (no-op вместо пустой таблицы).
+        self.assertNotIn("drafts", tables)
+        self.assertNotIn("legacy_drafts_backup", tables)
         self.assertEqual(
             _journal(self.path),
             [
@@ -194,6 +200,7 @@ class MigrationMechanismTests(unittest.TestCase):
                 (14, "announcement_redelivery"),
                 (15, "brick_description_and_address"),
                 (16, "announcement_draft_origin"),
+                (17, "archive_legacy_drafts"),
             ],
         )
 
@@ -201,7 +208,8 @@ class MigrationMechanismTests(unittest.TestCase):
         run_init_db_subprocess(self.path)
         self.assertEqual(len(_journal(self.path)), LATEST_VERSION)
 
-    def test_full_init_upgrades_ancient_drafts_columns(self) -> None:
+    def test_full_init_archives_ancient_drafts_columns(self) -> None:
+        """Древняя `drafts` (без photos/formats/updated_at) → архив как есть."""
         create_old_schema(self.path, ancient=True)
 
         run_init_db_subprocess(self.path)
@@ -209,11 +217,12 @@ class MigrationMechanismTests(unittest.TestCase):
         connection = connect(self.path)
         try:
             columns = {
-                row["name"] for row in connection.execute("PRAGMA table_info(drafts)")
+                row["name"]
+                for row in connection.execute("PRAGMA table_info(legacy_drafts_backup)")
             }
             row = connection.execute(
-                "SELECT title, date, text, photos, formats, updated_at "
-                "FROM drafts WHERE id = ?",
+                "SELECT title, date, text, image, created_at "
+                "FROM legacy_drafts_backup WHERE id = ?",
                 (OLD_DRAFT["id"],),
             ).fetchone()
             payload = connection.execute(
@@ -222,12 +231,17 @@ class MigrationMechanismTests(unittest.TestCase):
             ).fetchone()
         finally:
             connection.close()
-        self.assertTrue({"photos", "formats", "updated_at"} <= columns)
+        # RENAME не добавляет колонок: архив сохраняет форму той базы, в
+        # которой он появился. Живой `create_all` таблицу не воскрешает.
+        self.assertNotIn("photos", columns)
+        self.assertNotIn("formats", columns)
+        self.assertNotIn("updated_at", columns)
+        self.assertNotIn("drafts", table_names(self.path))
         self.assertEqual(row["title"], OLD_DRAFT["title"])
         self.assertEqual(row["date"], OLD_DRAFT["date"])
         self.assertEqual(row["text"], OLD_DRAFT["text"])
-        self.assertIsNone(row["photos"])  # старые записи не переписываются
-        self.assertIsNone(row["formats"])
+        self.assertEqual(row["image"], OLD_DRAFT["image"])
+        self.assertEqual(row["created_at"], OLD_DRAFT["created_at"])
         self.assertEqual(json.loads(payload["payload"]), OLD_WIP_PAYLOAD)
 
     def test_failed_run_rolls_back_all_pending_migrations(self) -> None:

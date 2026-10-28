@@ -33,9 +33,9 @@ from brick_store import (
     update_personal_brick,
 )
 from models import (
+    AnnouncementDraft,
     Brick,
     BrickProposal,
-    Draft,
     Place,
     PlaceAdmin,
     TemplateVersionBrick,
@@ -730,20 +730,23 @@ class BrickProposalFlowTests(unittest.TestCase):
         self.assertIn("bp_start", " ".join(self.callbacks(h)))
 
     @scenario_test
-    async def test_20_wip_post_and_draft_survive_proposal_and_decision(
+    async def test_20_wip_post_and_announcement_survive_proposal_and_decision(
         self, h: Harness
     ) -> None:
         place_id = self.make_place(h, "Зал WIP", admin_tg=ADMIN_TG)
         source = self.make_personal(h, OWNER_TG, code="wip_ui_26")
         owner_id = self.ensure_user(h, OWNER_TG)
         with h.session_factory() as session:
-            draft = Draft(
-                user_id=owner_id,
-                title="Черновик до Stage 26",
-                text="Текст",
-                image="photo-wip",
+            # S5: легаси-черновика больше нет — незавершённый анонс живёт в
+            # `announcement_drafts`, WIP пользователя — в `user_states`.
+            draft = AnnouncementDraft(
+                author_user_id=owner_id,
+                origin="personal",
+                stage="preview",
+                revision=1,
                 photos='["photo-wip"]',
-                formats='["Афиша"]',
+                created_at=utcnow(),
+                updated_at=utcnow(),
             )
             state = UserState(
                 user_id=owner_id,
@@ -767,9 +770,10 @@ class BrickProposalFlowTests(unittest.TestCase):
         await self.approve_place_via_ui(h, place_id, proposal_id, ADMIN_TG)
         self.assertEqual(self.proposal_status(h, proposal_id), "approved")
         with h.session_factory() as session:
-            stored_draft = session.get(Draft, draft_id)
+            stored_draft = session.get(AnnouncementDraft, draft_id)
             assert stored_draft is not None
-            self.assertEqual(stored_draft.title, "Черновик до Stage 26")
+            self.assertEqual(stored_draft.stage, "preview")
+            self.assertEqual(stored_draft.revision, 1)
             self.assertEqual(stored_draft.photos, '["photo-wip"]')
             stored_state = session.scalar(
                 select(UserState).where(UserState.user_id == owner_id)

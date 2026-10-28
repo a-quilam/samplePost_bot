@@ -31,9 +31,10 @@ class BrickManagementSchemaTests(BrickDatabaseTestCase):
 
     def test_migration_seven_has_revision_and_sessions(self) -> None:
         # Миграции 7 — эпоха управления кирпичиками; 15/16 добавлены этапом
-        # Poster 2.0 S1, поэтому «последняя» проверяется по LATEST_VERSION.
-        self.assertEqual(LATEST_VERSION, 16)
-        self.assertEqual(self.journal()[-1], (16, "announcement_draft_origin"))
+        # Poster 2.0 S1, 17 — S5, поэтому «последняя» проверяется по
+        # LATEST_VERSION.
+        self.assertEqual(LATEST_VERSION, 17)
+        self.assertEqual(self.journal()[-1], (17, "archive_legacy_drafts"))
         connection = connect(self.path)
         try:
             brick_columns = {
@@ -121,7 +122,7 @@ class BrickManagementSchemaTests(BrickDatabaseTestCase):
         self.assertEqual(run_migrations(self.engine), LATEST_VERSION)
         self.assertEqual(run_migrations(self.engine), LATEST_VERSION)
         self.assertEqual(len(self.journal()), LATEST_VERSION)
-        self.assertEqual(self.journal()[-1], (16, "announcement_draft_origin"))
+        self.assertEqual(self.journal()[-1], (17, "archive_legacy_drafts"))
 
 
 if __name__ == "__main__":

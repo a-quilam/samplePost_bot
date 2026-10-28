@@ -3,10 +3,10 @@
 import os
 
 from dotenv import load_dotenv
-from sqlalchemy import create_engine, event, inspect, text
+from sqlalchemy import create_engine, event
 from sqlalchemy.orm import sessionmaker
 
-import models  # noqa: F401 — регистрирует Draft/UserState/User/Place/PlaceName/PlaceSession
+import models  # noqa: F401 — регистрирует UserState/User/Place/PlaceName/...
 from base import Base
 from migrations import run_migrations
 
@@ -69,50 +69,18 @@ if SQLALCHEMY_DATABASE_URL.startswith("sqlite"):
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 
 
-def _migrate(bind) -> None:
-    """
-    Легаси-совместимость очень старых баз (до Stage 19A).
-
-    Нумерованные миграции (`migrations.py`) создают ТОЛЬКО новые таблицы и
-    выполняются до `create_all`. Но самые старые установки Poster пришли из
-    эпох, когда колонок `photos`, `formats`, `updated_at` в `drafts` ещё не
-    было, а `create_all` не умеет добавлять колонки в существующие таблицы.
-    Эти добавочные ALTER TABLE остаются здесь как разовый бэкфилл; новые
-    изменения схемы должны идти только через `migrations.py`.
-
-    Операция идемпотентна: выполняется только если колонки ещё нет.
-    """
-    inspector = inspect(bind)
-    if "drafts" in inspector.get_table_names():
-        columns = {column["name"] for column in inspector.get_columns("drafts")}
-        with bind.begin() as connection:
-            if "photos" not in columns:
-                connection.execute(text("ALTER TABLE drafts ADD COLUMN photos TEXT"))
-            if "updated_at" not in columns:
-                # NULL у существующих записей — норма: колонка informational
-                # (время последнего редактирования), TTL-очистка отключена
-                # (Stage 14: черновики хранятся бессрочно).
-                connection.execute(
-                    text("ALTER TABLE drafts ADD COLUMN updated_at DATETIME")
-                )
-            if "formats" not in columns:
-                # HTML-представления полей (Stage 10); у существующих записей
-                # NULL — они остаются на плоском тексте, данные не переписываем
-                connection.execute(text("ALTER TABLE drafts ADD COLUMN formats TEXT"))
-
-
 def init_db() -> None:
     """
-    Готовит базу к работе: миграции схемы → легаси-таблицы → старые колонки.
+    Готовит базу к работе: миграции схемы → недостающие таблицы моделей.
 
     Порядок важен:
     1. `run_migrations` создаёт фундамент Stage 19A/19B и журнал версий; на
        старой базе пользовательские данные не затрагиваются, а перед первым
-       ожидающим DDL автоматически создаётся WAL-aware копия;
-    2. `create_all` создаёт отсутствующие таблицы Draft/UserState (легаси-
-       базлайн; новые таблицы уже существуют и пропускаются);
-    3. `_migrate` добавляет колонки, которых нет в очень старых `drafts`.
+       ожидающим DDL автоматически создаётся WAL-aware копия. Здесь же
+       легаси-таблица `drafts` уходит в `legacy_drafts_backup` (миграция 17);
+    2. `create_all` создаёт отсутствующие таблицы моделей (новые таблицы уже
+       существуют и пропускаются). Легаси-таблиц (`Draft`) в моделях больше
+       нет (S5), поэтому `create_all` их не воскрешает.
     """
     run_migrations(engine)
     Base.metadata.create_all(bind=engine)
-    _migrate(engine)

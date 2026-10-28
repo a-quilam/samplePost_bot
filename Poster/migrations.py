@@ -65,11 +65,19 @@ _JOURNAL_DDL = (
 
 @dataclass(frozen=True)
 class Migration:
-    """Одна неизменяемая миграция: версия, имя и набор DDL/DML-шагов."""
+    """
+    Одна неизменяемая миграция: версия, имя и набор DDL/DML-шагов.
+
+    `requires_tables` — таблицы, без которых шаги неприменимы (например,
+    архив легаси-таблицы на давно очищенной базе). Если хотя бы одной нет,
+    шаги пропускаются, а версия всё равно фиксируется в журнале: миграция
+    идемпотентна и на пустой/новой базе, где таблица никогда не создавалась.
+    """
 
     version: int
     name: str
     statements: tuple[str, ...]
+    requires_tables: tuple[str, ...] = ()
 
     @property
     def checksum(self) -> str:
@@ -2402,6 +2410,30 @@ MIGRATION_16_ANNOUNCEMENT_DRAFT_ORIGIN = Migration(
 )
 
 
+# --- Версия 17: архив легаси-таблицы черновиков (Poster 2.0 S5) ------------
+#
+# Девятишаговый мастер и его WIP удалены из кода: `Draft` больше нет ни в
+# моделях, ни в живых сценариях. Таблица `drafts` не удаляется безвозвратно:
+# она переименовывается в `legacy_drafts_backup`, поэтому данные прежних
+# черновиков остаются в файле базы и доступны для ручного разбора.
+#
+# Идемпотентность: `requires_tables=('drafts',)` — на новой базе таблицы
+# никогда не было (create_all больше её не создаёт), на уже мигрированной
+# она называется иначе. В обоих случаях шаги пропускаются, а версия
+# фиксируется в журнале. `user_states` не трогается: это живая
+# инфраструктура экрана и снимков состояния, а не легаси.
+
+MIGRATION_17_ARCHIVE_LEGACY_DRAFTS = Migration(
+    version=17,
+    name="archive_legacy_drafts",
+    statements=(
+        # Переименование вместо DROP: данные не теряются, схема не копится.
+        "ALTER TABLE drafts RENAME TO legacy_drafts_backup",
+    ),
+    requires_tables=("drafts",),
+)
+
+
 DEFAULT_MIGRATIONS: tuple[Migration, ...] = (
     MIGRATION_1_USERS_PLACES,
     MIGRATION_2_PLACE_CONTACTS_UI,
@@ -2419,6 +2451,7 @@ DEFAULT_MIGRATIONS: tuple[Migration, ...] = (
     MIGRATION_14_ANNOUNCEMENT_REDELIVERY,
     MIGRATION_15_BRICK_DESCRIPTION_AND_ADDRESS,
     MIGRATION_16_ANNOUNCEMENT_DRAFT_ORIGIN,
+    MIGRATION_17_ARCHIVE_LEGACY_DRAFTS,
 )
 
 LATEST_VERSION = DEFAULT_MIGRATIONS[-1].version if DEFAULT_MIGRATIONS else 0
@@ -2623,6 +2656,19 @@ def create_database_backup(path: str) -> Path:
     return destination
 
 
+def _missing_tables(connection: sqlite3.Connection, names: Sequence[str]) -> list[str]:
+    """Каких из ожидаемых таблиц нет в базе (пустой список — все на месте)."""
+    missing: list[str] = []
+    for name in names:
+        row = connection.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name = ?",
+            (name,),
+        ).fetchone()
+        if row is None:
+            missing.append(name)
+    return missing
+
+
 def run_migrations(
     engine: Engine,
     migrations: Sequence[Migration] = DEFAULT_MIGRATIONS,
@@ -2677,16 +2723,27 @@ def run_migrations(
                     migration.version,
                     migration.name,
                 )
-                try:
-                    for statement in migration.statements:
-                        connection.execute(statement)
-                except Exception as exc:
-                    # Любая ошибка шага = миграция не применена;
-                    # внешний обработчик откатит ВСЮ транзакцию.
-                    raise MigrationError(
-                        f"Миграция {migration.version} ({migration.name}) "
-                        f"не применена: {exc}"
-                    ) from exc
+                missing = _missing_tables(connection, migration.requires_tables)
+                if missing:
+                    # Таблицы нет — шаги неприменимы. Версия фиксируется:
+                    # повторный запуск не должен пытаться снова.
+                    logger.info(
+                        "Миграция %s (%s) пропущена: нет таблиц %s.",
+                        migration.version,
+                        migration.name,
+                        ", ".join(missing),
+                    )
+                else:
+                    try:
+                        for statement in migration.statements:
+                            connection.execute(statement)
+                    except Exception as exc:
+                        # Любая ошибка шага = миграция не применена;
+                        # внешний обработчик откатит ВСЮ транзакцию.
+                        raise MigrationError(
+                            f"Миграция {migration.version} ({migration.name}) "
+                            f"не применена: {exc}"
+                        ) from exc
                 connection.execute(
                     "INSERT INTO schema_migrations (version, name, checksum) "
                     "VALUES (?, ?, ?)",

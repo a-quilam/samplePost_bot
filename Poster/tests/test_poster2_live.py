@@ -578,6 +578,8 @@ class HumorTests(unittest.TestCase):
     def test_hook_returns_stable_short_phrase(self) -> None:
         self.assertTrue(ui_humor.humor_enabled())
         first = ui_humor.empty_announcement_joke()
+        self.assertIsNotNone(first)
+        assert first is not None  # для mypy: дальше нужна строка
         self.assertEqual(first, ui_humor.empty_announcement_joke())
         self.assertEqual(ui_humor.get_humor_line(announcement_is_empty=True), first)
         self.assertIsNone(ui_humor.get_humor_line(announcement_is_empty=False))

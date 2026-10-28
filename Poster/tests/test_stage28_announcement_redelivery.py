@@ -99,11 +99,11 @@ class AnnouncementRedeliveryMigrationTests(unittest.TestCase):
         self.engine = make_engine(self.path)
         self.addCleanup(self.engine.dispose)
 
-    def test_migrations_one_to_sixteen_keep_legacy_data_and_checksums(self) -> None:
+    def test_migrations_one_to_seventeen_keep_legacy_data_and_checksums(self) -> None:
         create_old_schema(self.path)
 
         self.assertEqual(run_migrations(self.engine), LATEST_VERSION)
-        self.assertEqual(LATEST_VERSION, 16)
+        self.assertEqual(LATEST_VERSION, 17)
 
         journal = _journal(self.path)
         self.assertEqual(
@@ -119,7 +119,7 @@ class AnnouncementRedeliveryMigrationTests(unittest.TestCase):
         self.assertEqual(
             tuple(checksum for _, _, checksum in journal[:13]), CHECKSUMS_1_13
         )
-        # 14–16 — ровно код текущих миграций: ни переписаны, ни подменены.
+        # 14–17 — ровно код текущих миграций: ни переписаны, ни подменены.
         self.assertEqual(
             [checksum for _, _, checksum in journal[13:]],
             [migration.checksum for migration in DEFAULT_MIGRATIONS[13:]],
@@ -127,8 +127,11 @@ class AnnouncementRedeliveryMigrationTests(unittest.TestCase):
 
         connection = connect(self.path)
         try:
+            # S5: `drafts` переименована миграцией 17 — прежняя строка
+            # читается из архива без потерь.
             draft = connection.execute(
-                "SELECT * FROM drafts WHERE id = ?", (OLD_DRAFT["id"],)
+                "SELECT * FROM legacy_drafts_backup WHERE id = ?",
+                (OLD_DRAFT["id"],),
             ).fetchone()
             state = connection.execute(
                 "SELECT payload FROM user_states WHERE user_id = ?",

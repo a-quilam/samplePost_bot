@@ -1,7 +1,7 @@
 # Состояние команды Poster
 
-**Актуальное состояние (сверка 2026-10-28, машина hp):** S1–S4 выполнены,
-приняты и закоммичены. Реализация S5 не начиналась (разрешена владельцем).
+**Актуальное состояние (сверка 2026-10-28, машина hp):** S1–S5 выполнены,
+приняты и закоммичены. План Poster 2.0 (S1–S5) реализован полностью.
 GitHub-доступ с hp настроен, push и CI работают. Записи P0/P0.1/P0.2 и
 контрольная точка переноса ниже — исторический журнал.
 
@@ -28,6 +28,61 @@ Push: <нет | выполнено по разрешению>
 ---
 
 ## Журнал
+
+## Этап S5 — Удаление легаси, описания кирпичиков, тексты
+Дата: 2026-10-28
+Статус: done
+Задание: по плану (раздел S5): убрать старый девятишаговый конструктор,
+его WIP и мёртвый код без бессрочного слоя совместимости; закончить UX
+кирпичиков; читаемые справочные тексты; редкие безопасные шутки интерфейса.
+Изменено:
+- УДАЛЕНО: `Poster/handlers/post_creation.py`, `Poster/handlers/drafts.py`,
+  `Poster/handlers/callbacks.py` (маршрут main_menu перенесён в
+  main_menu.py); модель `Draft` и легаси-хелперы из models.py.
+- `Poster/migrations.py` — миграция 17: drafts → legacy_drafts_backup
+  (переименование-архив вместо DROP, requires_tables, идемпотентность);
+  `database.py` — init_db = run_migrations + create_all; docs/migrations.md.
+- `Poster/bot.py` — сняты легаси-обработчики; main_menu.py — help переписан
+  под Poster 2.0, /create_post и restore_wip устарели (ведут в меню,
+  обработчик stale-кнопки в announcement_wizard оставлен намеренно);
+  view_drafts → open_my_announcements.
+- `_show_media_preview` переведён с легаси send_rendered_post на
+  delivery.send_announcement_post (закрыто замечание ревизора S4).
+- Описание кирпичика: brick_store (description в CRUD), handlers/bricks.py
+  (фаза description_input, «⏭ Без описания», bk_edit_description,
+  объяснения трёх полей), AnnouncementFieldState.description →
+  wizard_questions.question_text с h()-экранированием.
+- Юмор: utils/ui_humor.py (HUMOR_JOKES, pick_variant на hashlib ≈1%,
+  humor_allowed — белый список question/button, запрет
+  error/rights/limits/data_loss), config.py UI_HUMOR_ENABLED (default on),
+  .env.example; подключение в _render_question — только текст, после
+  сборки клавиатуры, ключ user_id:draft_id:revision:brick_id стабилен.
+- Чистка мёртвого кода (долг S4 + ревизия S5): удалены
+  _flush_photo_batches, flush_pending/pending_keys, мёртвый параметр
+  humor_line.
+- README.md / docs/stage18_architecture.md — легаси помечен историческим,
+  структура кода актуализирована.
+- Тесты: удалены ~20 легаси-модулей (stage6, stage9_*, stage10_*, stage11_*,
+  stage12_reliability, stage14_drafts/input_limits, stage16_*, 17_coverage —
+  живое покрытие перенесено); переписаны stage13/17/19a/19b/21/22/25/26/27/
+  28 и LegacyDraftCompatibilityTests; новые test_poster2_legacy_removal (12),
+  test_poster2_humor (17), test_poster2_s5_tester (12, независимые).
+Проверки:
+- `make check PYTHON=.venv/bin/python` → `Ran 1095 tests ... OK
+  (skipped=1)`; ruff/black/mypy чисто (121 файл). Число тестов снизилось
+  с 1405: удалены только легаси-проверки удалённого поведения (перечень в
+  отчёте разработчика и комментариях тестов), живое покрытие сохранено.
+- poster-tester: 29+156+12 тестов OK; сквозные сценарии (полный путь,
+  описание с экранированием, устаревшие входы, флаг юмора off, миграция 17
+  на старой схеме, шутка не в live/publication_text); дефектов нет.
+Замечания ревизора: approve. Неблокирующие закрыты (мёртвый код, параметр
+humor_line); остались мелкие дубли _description_text/EMPTY_ANNOUNCEMENT_JOKES
+- не блокер.
+Открытые вопросы: нет.
+Коммит: см. git log (этап S5).
+Push: выполнен в origin/main.
+
+---
 
 ## Этап S4 — Фото, ограничения и финализация уже живого анонса
 Дата: 2026-10-28

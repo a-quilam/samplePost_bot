@@ -6,8 +6,6 @@
 - согласованность .env.example и чтения переменных (config/database/log_config);
 - разбор конфигурации в изолированном процессе (subprocess);
 - узкие (narrowing) хелперы типов PTB (utils/tg_context.py);
-- клавиатура списка черновиков (build_drafts_message);
-- roundtrip полей черновика (_post_fields/_apply_fields);
 - статические проверки Docker-артефактов (.env не попадает в образ!).
 
 Запуск из каталога Poster:
@@ -22,13 +20,9 @@ import subprocess
 import sys
 import tempfile
 import unittest
-from types import SimpleNamespace
 from typing import Any, cast
 
 import log_config
-from handlers.drafts import build_drafts_message
-from handlers.post_creation import _apply_fields, _clear_post_data, _post_fields
-from models import photos_to_json
 from utils import tg_context as ctx
 from utils.tg_context import data as ctx_data
 
@@ -276,85 +270,6 @@ class TgContextHelperTests(unittest.TestCase):
 
         with self.assertRaises(RuntimeError):
             ctx_data(cast(Any, StubContext()))
-
-
-class DraftsKeyboardTests(unittest.TestCase):
-    """build_drafts_message: кнопки редактирования/удаления и возврата в меню."""
-
-    @staticmethod
-    def _draft(draft_id: int) -> Any:
-        return SimpleNamespace(
-            id=draft_id,
-            title=f"Заголовок {draft_id}",
-            date="01.01.2026",
-            time_start="10:00",
-            time_end="12:00",
-            place_name="Зал",
-        )
-
-    def test_empty_list(self):
-        text, markup = build_drafts_message([], total=0)
-        self.assertIn("нет черновиков", text)
-        self.assertIsNone(markup)
-
-    def test_buttons_for_each_draft(self):
-        text, markup = build_drafts_message([self._draft(1), self._draft(2)], total=2)
-        datas = [
-            button.callback_data for row in markup.inline_keyboard for button in row
-        ]
-        for draft_id in (1, 2):
-            self.assertIn(f"editdraft_{draft_id}", datas)
-            self.assertIn(f"delete_{draft_id}", datas)
-        self.assertIn("main_menu", datas)
-        # callback_data внутри одного сообщения не дублируются
-        self.assertEqual(len(datas), len(set(datas)))
-        self.assertIn("Заголовок 1", text)
-
-
-class DraftFieldRoundtripTests(unittest.TestCase):
-    """Редактирование черновика: применение и чтение полей без потерь."""
-
-    def test_apply_and_read_fields(self):
-        from models import Draft
-
-        draft = Draft(user_id=1)
-        user_data = {
-            "title": "Новый заголовок",
-            "date": "15.09.2026",
-            "time_start": "18:00",
-            "time_end": "20:00",
-            "place_name": "Актовый зал",
-            "place_url": "https://example.com",
-            "text": "Описание",
-            "contact": "@contact",
-            "image": "file-id-1",
-        }
-        _apply_fields(draft, user_data)
-        fields = _post_fields(user_data)
-        # ни одно поле из user_data не потерялось при сборке колонок
-        for key, value in user_data.items():
-            self.assertEqual(fields[key], value, f"поле {key} потерялось")
-        # и всё доехало до черновика (включая двойную запись image/photos)
-        for key, value in fields.items():
-            self.assertEqual(getattr(draft, key), value, f"черновик: поле {key}")
-        self.assertEqual(draft.image, "file-id-1")
-        self.assertEqual(draft.photos, photos_to_json(["file-id-1"]))
-
-    def test_clear_post_data_removes_dialog_state(self):
-        user_data = {
-            "title": "T",
-            "editing_draft_id": 5,
-            "edit_field": "title",
-            "photos": ["f1"],
-            "pending_media": {"x": 1},
-        }
-        _clear_post_data(user_data)
-        self.assertEqual(user_data, {})
-
-    def test_photos_json_helper_still_consistent(self):
-        self.assertEqual(photos_to_json(["a", "b"]), '["a", "b"]')
-        self.assertIsNone(photos_to_json([]))
-        self.assertIsNone(photos_to_json(None))
 
 
 class DockerArtifactsTests(unittest.TestCase):

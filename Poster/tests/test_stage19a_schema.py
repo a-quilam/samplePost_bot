@@ -18,7 +18,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, sessionmaker
 
 from migrations import run_migrations
-from models import Draft, Place, PlaceName, User
+from models import Place, PlaceName, User
 from place_store import (
     PlaceNameError,
     clean_display_name,
@@ -339,13 +339,10 @@ class PlaceSchemaTests(unittest.TestCase):
         # кирпичиков уже входят в миграцию 11 Stage 26.
         self.assertFalse("draft_values" in tables)
         self.assertIn("brick_proposals", tables)
-        self.assertIn("photos", Draft.__table__.columns)
-        self.assertFalse(
-            any(
-                column_name.startswith("brick")
-                for column_name in Draft.__table__.columns.keys()
-            )
-        )
+        # Poster 2.0 S5: модели `Draft` и таблицы `drafts` больше нет —
+        # `create_all` её не воскрешает, а легаси-архив создаёт миграция 17.
+        self.assertNotIn("drafts", tables)
+        self.assertNotIn("legacy_drafts_backup", tables)
 
 
 if __name__ == "__main__":  # pragma: no cover

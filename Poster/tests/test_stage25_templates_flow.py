@@ -14,8 +14,9 @@ from unittest.mock import patch
 
 from sqlalchemy import select
 
+from announcement_store import list_announcement_drafts
 from brick_store import create_personal_brick, create_place_brick
-from models import Draft, PlaceAdmin, Template, TemplateSnapshot, utcnow
+from models import AnnouncementDraft, PlaceAdmin, Template, TemplateSnapshot, utcnow
 from place_store import create_place
 from template_state import (
     load_template_session,
@@ -68,6 +69,29 @@ class TemplatesUiTests(unittest.TestCase):
                 username=f"user{telegram_user_id}",
                 full_name=f"User {telegram_user_id}",
             )
+
+    def make_personal_template(self, h) -> int:
+        """Личный шаблон из одного кирпичика: минимальный конструктор."""
+        with h.session_factory() as session:
+            get_or_create_user(session, h.user_id, username="templates")
+            create_personal_brick(
+                session,
+                actor_telegram_user_id=h.user_id,
+                code="ttl",
+                title="Заголовок",
+                value_type="short_text",
+                rules={},
+            )
+            template = create_personal_template(
+                session,
+                actor_telegram_user_id=h.user_id,
+                name="Личный для теста",
+                header="",
+                body="[ttl]",
+                footer="",
+            )
+            session.commit()
+            return template.template_id
 
     def make_place_with_admin(self, h, admin_tg: int) -> tuple[int, int]:
         """Место со стандартным шаблоном и действующим админом."""
@@ -290,18 +314,30 @@ class TemplatesUiTests(unittest.TestCase):
         self.assertIsNone(load_template_session(h.user_id))
 
     @scenario_test
-    async def test_templates_command_in_post_wizard_keeps_wip(self, h) -> None:
-        """/templates внутри мастера поста сохраняет WIP и открывает шаблоны."""
+    async def test_templates_command_in_post_wizard_keeps_announcement(self, h) -> None:
+        """/templates во время конструктора не теряет начатый анонс (S5)."""
         self.make_user(h, h.user_id)
-        await h.start_dialog()
-        self.assertIsNotNone(h.dialog_state())
+        template_id = self.make_personal_template(h)
+        await h.text("/start")
+        await h.callback(f"tp_pick:{template_id}")
         await h.text("Незавершённый заголовок", user_id=h.user_id)
         await h.text("/templates", user_id=h.user_id)
         self.assertIsNone(h.dialog_state())
         self.assertIn("Мои шаблоны", h.screen_text())
+
         with h.session_factory() as session:
-            drafts = list(session.scalars(select(Draft)).all())
-        self.assertEqual([draft.title for draft in drafts], ["Незавершённый заголовок"])
+            drafts = list(session.scalars(select(AnnouncementDraft)).all())
+        self.assertEqual(len(drafts), 1)
+        # Значение сохранено в анонсе, а не в удалённом легаси-черновике.
+        with h.session_factory() as session:
+            details = list_announcement_drafts(
+                session, actor_telegram_user_id=h.user_id
+            )
+        self.assertEqual(len(details), 1)
+        self.assertEqual(
+            [value.payload for value in details[0].values],
+            [{"text": "Незавершённый заголовок"}],
+        )
 
     @scenario_test
     async def test_standard_template_admin_edit_reset_and_back(self, h) -> None:

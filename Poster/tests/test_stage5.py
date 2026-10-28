@@ -1,18 +1,20 @@
 # tests/test_stage5.py
 """
-Тесты Stage 5 (приёмка проекта в production):
+Инфраструктурные тесты (Stage 5, эксплуатационная часть).
+
+После удаления легаси-мастера (Poster 2.0 S5) здесь остались только
+проверки общей инфраструктуры:
 
 - models.utcnow(): наивный UTC вместо устаревшего datetime.utcnow;
 - PRAGMA SQLite (busy timeout, WAL, synchronous) — конкурентный доступ;
-- фоновая чистка старых черновиков (TTL);
-- split_long_text: отправка текста длиннее лимита Telegram (4096);
-- is_post_empty: пустой пост не отправляется;
-- UX диалога: подсказка на превью, «Черновики» завершают диалог,
-  дедупликация промптов альбома, единая клавиатура главного меню;
 - errors.py: уведомление пользователя об ошибке + троттлинг,
   подавление «message is not modified»;
-- порядок регистрации обработчиков (build_application);
-- список черновиков: сортировка, лимит страницы, пагинация draftpage_.
+- главное меню Poster 2.0: пять кнопок и справка /help.
+
+Девятишаговый мастер, его WIP, split_long_text/send_post, TTL и пагинация
+черновиков удалены вместе с легаси-кодом: доставка живёт в delivery.py
+(tests/test_poster2_delivery.py), список анонсов — в «📂 Мои анонсы»
+(tests/test_poster2_menu.py).
 
 Запуск из каталога Poster:
     python -m unittest discover -s tests -v
@@ -22,11 +24,9 @@
 
 import asyncio
 import os
-import re
 import tempfile
 import unittest
 import warnings
-from datetime import timedelta
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
@@ -36,33 +36,13 @@ from sqlalchemy.orm import sessionmaker
 import models  # noqa: F401  — регистрация таблиц в Base.metadata
 from base import Base
 from database import SQLITE_BUSY_TIMEOUT_SECONDS, apply_sqlite_pragmas
-from models import Draft, utcnow
+from models import User, utcnow
 
 # Импорт обработчиков требует config (.env с токеном) и telegram —
 # при недоступности соответствующие тесты пропускаются, а не падают.
 try:
-    import bot as bot_module
-    import handlers.post_creation as post_creation_module
     import utils.screen as screen_module
-    from handlers.drafts import (
-        DRAFTS_PAGE_SIZE,
-        build_drafts_message,
-        fetch_user_drafts,
-        handle_drafts_page,
-    )
     from handlers.main_menu import help_command, main_menu_keyboard
-    from handlers.post_creation import (
-        POST_CREATION,
-        POST_HEADING,
-        POST_STEPS,
-        handle_message,
-        handle_photo,
-        is_post_empty,
-        process_edit,
-        send_post,
-        split_long_text,
-        view_drafts_and_exit,
-    )
 
     HANDLERS_IMPORT_ERROR = None
 except Exception as e:  # noqa: BLE001 — причина попадает в сообщение пропуска
@@ -100,41 +80,6 @@ class _ScreenBot:
         self.calls.append(record)
 
 
-class _InMemoryDbMixin:
-    """Патчит SessionLocal на БД в памяти: post_bot.db тестами не трогается."""
-
-    def setUp(self):
-        import handlers.drafts as drafts_module
-        import handlers.post_creation as post_creation_module
-        import utils.screen as screen_module
-
-        self._modules = (post_creation_module, drafts_module, screen_module)
-        self._orig_session_local = tuple(m.SessionLocal for m in self._modules)
-        self.session_factory, self.engine = make_session_factory()
-        for m in self._modules:
-            m.SessionLocal = self.session_factory
-
-    def tearDown(self):
-        for m, orig in zip(self._modules, self._orig_session_local):
-            m.SessionLocal = orig
-        self.engine.dispose()
-
-
-def make_old_draft(session, user_id=111, age_days=40, title="Старый пост"):
-    created = utcnow() - timedelta(days=age_days)
-    draft = Draft(
-        user_id=user_id,
-        title=title,
-        created_at=created,
-        # «создан давно и с тех пор не правился»: TTL считается от updated_at
-        # (у настоящих старых записей он равен created_at или NULL)
-        updated_at=created,
-    )
-    session.add(draft)
-    session.commit()
-    return draft
-
-
 class UtcnowTests(unittest.TestCase):
     """models.utcnow(): наивный UTC, без DeprecationWarning."""
 
@@ -150,30 +95,33 @@ class UtcnowTests(unittest.TestCase):
         deprecations = [w for w in caught if issubclass(w.category, DeprecationWarning)]
         self.assertEqual(deprecations, [])
 
-    def test_draft_created_at_naive(self):
+    def test_model_created_at_naive(self):
         session_factory, engine = make_session_factory()
         session = session_factory()
         try:
-            draft = Draft(user_id=1, title="Пост")
-            session.add(draft)
+            user = User(telegram_user_id=1, full_name="Тест")
+            session.add(user)
             session.commit()
-            self.assertIsNone(draft.created_at.tzinfo)
+            self.assertIsNone(user.created_at.tzinfo)
         finally:
             session.close()
             engine.dispose()
 
-    def test_new_draft_gets_updated_at(self):
-        # A2: новые черновики корректно получают дату последнего изменения
+    def test_update_refreshes_updated_at(self):
+        # A2: правка строки обновляет updated_at (onupdate модели)
         session_factory, engine = make_session_factory()
         session = session_factory()
         try:
-            draft = Draft(user_id=1, title="Пост")
-            session.add(draft)
+            user = User(telegram_user_id=1, full_name="Старое")
+            session.add(user)
             session.commit()
-            self.assertIsNotNone(draft.updated_at)
-            self.assertIsNone(draft.updated_at.tzinfo)
+            self.assertIsNotNone(user.updated_at)
+
+            user.full_name = "Новое"
+            session.commit()
+            session.refresh(user)
             self.assertLess(
-                abs((datetime_now_utc() - draft.updated_at).total_seconds()), 5
+                abs((datetime_now_utc() - user.updated_at).total_seconds()), 5
             )
         finally:
             session.close()
@@ -221,339 +169,6 @@ class SqlitePragmaTests(unittest.TestCase):
                 connection.execute(text("SELECT 1"))
         finally:
             engine.dispose()
-
-
-class PerpetualDraftStorageTests(unittest.TestCase):
-    """
-    Черновики хранятся бессрочно (Stage 14): TTL-очистка отключена.
-
-    Регрессии против старого поведения (удаление старше 30 дней):
-    старый черновик переживает запуск/миграции и остаётся читаемым.
-    """
-
-    def setUp(self):
-        self.session_factory, self.engine = make_session_factory()
-
-    def tearDown(self):
-        self.engine.dispose()
-
-    def _titles(self):
-        session = self.session_factory()
-        try:
-            return {d.title for d in session.query(Draft).all()}
-        finally:
-            session.close()
-
-    def test_old_drafts_survive_init(self):
-        # Черновики старше любого разумного TTL (40 и 400 дней) с NULL и
-        # сброшенным updated_at — запуск (create_all + _migrate) их не трогает
-        from base import Base
-        from database import _migrate
-
-        session = self.session_factory()
-        try:
-            session.add_all(
-                [
-                    Draft(
-                        user_id=111,
-                        title="Давний без правок",
-                        created_at=utcnow() - timedelta(days=400),
-                        updated_at=None,
-                    ),
-                    Draft(
-                        user_id=111,
-                        title="Давний правленый",
-                        created_at=utcnow() - timedelta(days=40),
-                        updated_at=utcnow() - timedelta(days=35),
-                    ),
-                ]
-            )
-            session.commit()
-        finally:
-            session.close()
-
-        # Имитация старта бота на той же базе: init_db() = create_all + _migrate
-        Base.metadata.create_all(bind=self.engine)
-        _migrate(self.engine)
-
-        self.assertEqual(
-            self._titles(),
-            {"Давний без правок", "Давний правленый"},
-            "бессрочное хранение: возрастное удаление не выполняется",
-        )
-
-    def test_draft_queries_keep_old_rows_readable(self):
-        # Старая запись (created_at 40 дней назад, updated_at NULL) полностью
-        # читается ORM — updated_at informational, не условие выборки.
-        # NULL ставим сырым UPDATE: ORM при вставке подставляет default.
-        session = self.session_factory()
-        try:
-            session.add(
-                Draft(
-                    user_id=111,
-                    title="Старый читаемый",
-                    created_at=utcnow() - timedelta(days=40),
-                )
-            )
-            session.commit()
-            session.execute(
-                text("UPDATE drafts SET updated_at = NULL WHERE title = :title"),
-                {"title": "Старый читаемый"},
-            )
-            session.commit()
-            session.expire_all()
-            draft = session.query(Draft).filter_by(user_id=111).one()
-            self.assertEqual(draft.title, "Старый читаемый")
-            self.assertIsNone(draft.updated_at)
-            self.assertIsNotNone(draft.created_at)
-        finally:
-            session.close()
-
-    def test_update_refreshes_updated_at(self):
-        # A2: правка существующего черновика обновляет updated_at (onupdate)
-        session = self.session_factory()
-        try:
-            created = utcnow() - timedelta(days=40)
-            draft = Draft(user_id=111, title="Старый", created_at=created)
-            draft.updated_at = created  # не правился с момента создания
-            session.add(draft)
-            session.commit()
-
-            draft.title = "Новое название"  # правка
-            session.commit()
-            session.refresh(draft)
-
-            self.assertGreater(
-                draft.updated_at,
-                utcnow() - timedelta(days=1),
-                "после правки updated_at должен стать свежим",
-            )
-        finally:
-            session.close()
-
-
-class SplitLongTextTests(unittest.TestCase):
-    """split_long_text: текст длиннее лимита Telegram уходит частями."""
-
-    def test_short_text_unchanged(self):
-        self.assertEqual(split_long_text("короткий текст"), ["короткий текст"])
-
-    def test_multiline_short_unchanged_exactly(self):
-        text = "Строка 1\n\nСтрока 2"
-        self.assertEqual(split_long_text(text), [text])
-
-    def test_long_single_line_split_lossless(self):
-        text = "Важное событие начнётся в 14:00 (вход свободный)! " * 300
-        self.assertGreater(len(text), 8000)
-        chunks = split_long_text(text)
-        self.assertGreater(len(chunks), 1)
-        for chunk in chunks:
-            self.assertLessEqual(len(chunk), 4000)
-        # Ни один символ не потерян (границы — только переводы строк)
-        self.assertEqual("".join(chunks), text)
-
-    def test_html_tags_not_torn(self):
-        # Граница не должна рвать теги: каждая часть остаётся валидным HTML
-        # (пары тегов сходятся), а видимый текст не теряется и не дублируется
-        text = "<b>жирный <i>курсив</i> текст</b> " * 200
-        chunks = split_long_text(text, limit=101)
-        self.assertGreater(len(chunks), 1)
-        for chunk in chunks:
-            self.assertLessEqual(len(chunk), 101)
-            for tag in ("b", "i"):
-                self.assertEqual(
-                    chunk.count(f"<{tag}>"),
-                    chunk.count(f"</{tag}>"),
-                    f"разорванный тег <{tag}> в части: ...{chunk[-40:]!r}",
-                )
-
-        def visible(html: str) -> str:
-            return re.sub(r"<[^>]*>", "", html)
-
-        self.assertEqual("".join(visible(c) for c in chunks), visible(text))
-
-    def test_internal_newlines_preserved(self):
-        text = "а" * 10 + "\n" + "б" * 10 + "\n" + "В" * 300
-        chunks = split_long_text(text, limit=100)
-        self.assertTrue(all(len(c) <= 100 for c in chunks))
-        # Внутренние переводы строк внутри частей сохраняются,
-        # содержимое не теряет ни одного символа (кроме границ между сообщениями)
-        joined = "".join(chunks)
-        self.assertIn("\n", joined)
-        self.assertEqual(joined.replace("\n", ""), text.replace("\n", ""))
-
-
-@unittest.skipIf(
-    HANDLERS_IMPORT_ERROR is not None,
-    f"импорт обработчиков недоступен: {HANDLERS_IMPORT_ERROR}",
-)
-class SendPostLongTextTests(unittest.TestCase):
-    """send_post: длинный текст не превышает лимит сообщения Telegram."""
-
-    class StubBot:
-        def __init__(self):
-            self.calls = []
-
-        async def send_message(self, chat_id, text, parse_mode=None, reply_markup=None):
-            self.calls.append(
-                {"type": "message", "text": text, "reply_markup": reply_markup}
-            )
-
-        async def send_photo(
-            self, chat_id, photo, caption=None, parse_mode=None, reply_markup=None
-        ):
-            self.calls.append({"type": "photo", "caption": caption})
-
-        async def send_media_group(self, chat_id, media):
-            self.calls.append({"type": "media_group", "media": media})
-
-    def _send(self, post, photos=None, reply_markup=None):
-        bot = self.StubBot()
-        asyncio.run(
-            send_post(
-                bot,
-                -100500,
-                post,
-                photos or [],
-                heading=POST_HEADING,
-                reply_markup=reply_markup,
-            )
-        )
-        return bot.calls
-
-    def test_text_messages_within_limit(self):
-        long_post = {"title": "Анонс", "text": "Подробности события. " * 500}
-        calls = self._send(long_post)
-        messages = [c for c in calls if c["type"] == "message"]
-        self.assertGreater(len(messages), 1)
-        for call in messages:
-            self.assertLessEqual(len(call["text"]), 4000)
-        joined = "".join(c["text"] for c in messages)
-        self.assertIn("Подробности события", joined)
-
-    def test_markup_attached_to_first_chunk_only(self):
-        long_post = {"text": "Слово. " * 800}
-        calls = self._send(long_post, reply_markup="MARKUP")
-        messages = [c for c in calls if c["type"] == "message"]
-        self.assertEqual(messages[0]["reply_markup"], "MARKUP")
-        for call in messages[1:]:
-            self.assertIsNone(call["reply_markup"])
-
-    def test_single_photo_overflow_still_split(self):
-        # Длинный заголовок (4800 символов) не влезает в подпись к фото
-        # (лимит 1000 в UTF-16) — фото уходит без подписи, текст — частями
-        long_post = {"title": "Очень! " * 600}
-        calls = self._send(long_post, photos=["p1"])
-        self.assertEqual(calls[0]["type"], "photo")
-        self.assertIsNone(calls[0]["caption"])
-        messages = [c for c in calls if c["type"] == "message"]
-        self.assertGreater(len(messages), 1)
-        for call in messages:
-            self.assertLessEqual(len(call["text"]), 4000)
-
-
-class IsPostEmptyTests(unittest.TestCase):
-    """is_post_empty: пустой пост не отправляется по кнопке «Готово»."""
-
-    def test_empty_dict(self):
-        self.assertTrue(is_post_empty({}))
-
-    def test_all_placeholders(self):
-        self.assertTrue(
-            is_post_empty(
-                {
-                    "title": "Не указано",
-                    "date": "Не указано",
-                    "text": "Не указано",
-                    "place_url": None,
-                    "image": None,
-                    "photos": None,
-                }
-            )
-        )
-
-    def test_title_makes_not_empty(self):
-        self.assertFalse(is_post_empty({"title": "Встреча"}))
-
-    def test_whitespace_only_values_are_empty(self):
-        # Пробелы-только (без содержательного текста) — пустой пост
-        self.assertTrue(is_post_empty({"title": "   ", "text": "\n\t "}))
-        self.assertFalse(is_post_empty({"title": "   ", "text": " сюда"}))
-
-    def test_legacy_placeholder_with_spaces_is_empty(self):
-        self.assertTrue(is_post_empty({"title": "  Не указано  "}))
-
-    def test_text_makes_not_empty(self):
-        self.assertFalse(is_post_empty({"text": "Привет!"}))
-
-    def test_photo_only_not_empty(self):
-        self.assertFalse(is_post_empty({"image": "file_id_1"}))
-
-    def test_photos_json_only_not_empty(self):
-        self.assertFalse(is_post_empty({"photos": '["file_id_1"]'}))
-
-
-@unittest.skipIf(
-    HANDLERS_IMPORT_ERROR is not None,
-    f"импорт обработчиков недоступен: {HANDLERS_IMPORT_ERROR}",
-)
-class MainMenuKeyboardTests(unittest.TestCase):
-    """Главное меню: inline-клавиатура экрана + справка /help."""
-
-    def test_keyboard_structure(self):
-        from telegram import InlineKeyboardMarkup
-
-        keyboard = main_menu_keyboard()
-        self.assertIsInstance(keyboard, InlineKeyboardMarkup)
-        texts = [button.text for row in keyboard.inline_keyboard for button in row]
-        # Poster 2.0 S2: главное меню — ровно пять кнопок.
-        self.assertEqual(
-            texts,
-            [
-                "📍 Создать для площадки",
-                "📝 Создать по личному шаблону",
-                "📂 Мои анонсы",
-                "⚙️ Управление",
-                "❓ Помощь",
-            ],
-        )
-        callbacks = [
-            button.callback_data for row in keyboard.inline_keyboard for button in row
-        ]
-        self.assertEqual(
-            callbacks,
-            [
-                "pick_place",
-                "pick_template",
-                "my_announcements",
-                "manage",
-                "help",
-            ],
-        )
-
-    def test_help_lists_commands(self):
-        bot = _ScreenBot()
-        session_factory, engine = make_session_factory()
-        self.addCleanup(engine.dispose)
-        update = SimpleNamespace(
-            effective_message=SimpleNamespace(reply_text=AsyncMock()),
-            effective_user=SimpleNamespace(id=1),
-            effective_chat=SimpleNamespace(id=777),
-        )
-        with patch.object(screen_module, "SessionLocal", session_factory):
-            asyncio.run(help_command(update, SimpleNamespace(user_data={}, bot=bot)))
-        # справка рисуется на экране управления (send/edit), не reply-сообщением
-        self.assertEqual(len(bot.calls), 1)
-        text = bot.calls[0]["text"]
-        for command in ("/start", "/create_post", "/drafts", "/cancel", "/help"):
-            self.assertIn(command, text)
-        # Poster 2.0 S2: справка описывает кнопки нового меню и то, что
-        # готовый анонс приходит в личный чат.
-        self.assertIn("Создать для площадки", text)
-        self.assertIn("Создать по личному шаблону", text)
-        self.assertIn("Мои анонсы", text)
-        self.assertIn("Управление", text)
-        self.assertIn("готовый пост в этот чат", text)
 
 
 class ErrorNoticeTests(unittest.TestCase):
@@ -628,353 +243,63 @@ class ErrorNoticeTests(unittest.TestCase):
     HANDLERS_IMPORT_ERROR is not None,
     f"импорт обработчиков недоступен: {HANDLERS_IMPORT_ERROR}",
 )
-class DialogUxTests(_InMemoryDbMixin, unittest.TestCase):
-    """UX диалога: превью, альбомы, редактирование, кнопка «Черновики»."""
+class MainMenuKeyboardTests(unittest.TestCase):
+    """Главное меню: inline-клавиатура экрана + справка /help."""
 
-    def test_preview_text_keeps_dialog_open(self):
-        # Раньше текст на превью молча завершал диалог (END) — теперь подсказка
-        # на экране управления
-        bot = _ScreenBot()
-        update = SimpleNamespace(
-            effective_message=SimpleNamespace(
-                text="просто текст", reply_text=AsyncMock()
-            ),
-            effective_user=SimpleNamespace(id=1),
-            effective_chat=SimpleNamespace(id=777),
+    def test_keyboard_structure(self):
+        from telegram import InlineKeyboardMarkup
+
+        keyboard = main_menu_keyboard()
+        self.assertIsInstance(keyboard, InlineKeyboardMarkup)
+        texts = [button.text for row in keyboard.inline_keyboard for button in row]
+        # Poster 2.0 S2: главное меню — ровно пять кнопок.
+        self.assertEqual(
+            texts,
+            [
+                "📍 Создать для площадки",
+                "📝 Создать по личному шаблону",
+                "📂 Мои анонсы",
+                "⚙️ Управление",
+                "❓ Помощь",
+            ],
         )
-        context = SimpleNamespace(user_data={"current_step": len(POST_STEPS)}, bot=bot)
-
-        result = asyncio.run(handle_message(update, context))
-
-        self.assertEqual(result, POST_CREATION)
-        self.assertTrue(bot.calls, "подсказка должна появиться на экране")
-        self.assertIn("кнопк", bot.calls[-1]["text"])
-
-    def test_album_outside_image_step_prompts_once(self):
-        # Альбом не на шаге изображения: один рендер экрана на весь альбом,
-        # без спама сообщениями на каждое фото
-        bot = _ScreenBot()
-        context = SimpleNamespace(user_data={"current_step": 0}, bot=bot)
-
-        def make_message(message_id):
-            return SimpleNamespace(
-                photo=[SimpleNamespace(file_id="fid")],
-                media_group_id="mg-1",
-                message_id=message_id,
-                from_user=SimpleNamespace(is_bot=False),
-                chat=SimpleNamespace(id=777),
-                reply_text=AsyncMock(),
-            )
-
-        def make_update(message):
-            return SimpleNamespace(
-                effective_message=message,
-                effective_user=SimpleNamespace(id=1),
-                effective_chat=SimpleNamespace(id=777),
-                message=message,
-                callback_query=None,
-            )
-
-        first = make_message(11)
-        asyncio.run(handle_photo(make_update(first), context))
-        second = make_message(12)
-        asyncio.run(handle_photo(make_update(second), context))
-
-        self.assertEqual(len(bot.calls), 1, "подсказка — один рендер экрана")
-        self.assertIn("Фото можно добавить", bot.calls[0]["text"])
-        first.reply_text.assert_not_awaited()
-        second.reply_text.assert_not_awaited()
-
-    def test_edit_without_field_returns_to_preview(self):
-        # EDIT_FIELD без edit_field: не пишем мусор в user_data, а к превью
-        class StubBot:
-            def __init__(self):
-                self.calls = []
-
-            async def send_message(self, **kwargs):
-                self.calls.append(kwargs)
-
-            async def send_photo(self, **kwargs):
-                self.calls.append(kwargs)
-
-            async def send_media_group(self, **kwargs):
-                self.calls.append(kwargs)
-
-        bot = StubBot()
-        update = SimpleNamespace(
-            effective_message=SimpleNamespace(
-                text="какой-то текст", reply_text=AsyncMock()
-            ),
-            effective_user=SimpleNamespace(id=1),
-            effective_chat=SimpleNamespace(id=77),
+        callbacks = [
+            button.callback_data for row in keyboard.inline_keyboard for button in row
+        ]
+        self.assertEqual(
+            callbacks,
+            [
+                "pick_place",
+                "pick_template",
+                "my_announcements",
+                "manage",
+                "help",
+            ],
         )
-        context = SimpleNamespace(user_data={}, bot=bot)
 
-        result = asyncio.run(process_edit(update, context))
-
-        self.assertEqual(result, POST_CREATION)
-        self.assertTrue(bot.calls, "превью должно быть отправлено")
-        self.assertNotIn("", context.user_data, "мусорный ключ не должен появиться")
-
-    def test_drafts_button_inside_dialog_shows_list_and_ends(self):
-        from telegram.ext import ConversationHandler
-
+    def test_help_lists_commands(self):
         bot = _ScreenBot()
+        session_factory, engine = make_session_factory()
+        self.addCleanup(engine.dispose)
         update = SimpleNamespace(
             effective_message=SimpleNamespace(reply_text=AsyncMock()),
             effective_user=SimpleNamespace(id=1),
-            effective_chat=SimpleNamespace(id=77),
+            effective_chat=SimpleNamespace(id=777),
         )
-        context = SimpleNamespace(user_data={}, bot=bot)
-
-        result = asyncio.run(view_drafts_and_exit(update, context))
-
-        self.assertEqual(result, ConversationHandler.END)
-        # список черновиков — на экране, а не отдельным сообщением
-        self.assertTrue(bot.calls, "список должен появиться на экране")
-        self.assertIn("нет черновиков", bot.calls[-1]["text"])
-
-
-@unittest.skipIf(
-    HANDLERS_IMPORT_ERROR is not None,
-    f"импорт обработчиков недоступен: {HANDLERS_IMPORT_ERROR}",
-)
-class HandlerOrderTests(unittest.TestCase):
-    """
-    Порядок регистрации: ConversationHandler ПЕРВЫМ — иначе reply-кнопки
-    внутри диалога перехватываются глобальными хендлерами и состояние висит.
-    """
-
-    def test_conversation_registered_before_main_menu(self):
-        from telegram.ext import CommandHandler, ConversationHandler
-
-        application = bot_module.build_application()
-        handlers = application.handlers[0]
-
-        old_conversation = next(
-            h
-            for h in handlers
-            if isinstance(h, ConversationHandler) and getattr(h, "name", None) is None
-        )
-        conv_index = handlers.index(old_conversation)
-        start_index = next(
-            i
-            for i, h in enumerate(handlers)
-            if isinstance(h, CommandHandler) and "start" in (h.commands or set())
-        )
-        self.assertLess(conv_index, start_index)
-
-    def test_drafts_button_matched_first_in_conversation_states(self):
-        from datetime import datetime
-
-        from telegram import Chat, Message, Update
-        from telegram.ext import ConversationHandler, MessageHandler
-
-        application = bot_module.build_application()
-        conversation = next(
-            h
-            for h in application.handlers[0]
-            if isinstance(h, ConversationHandler) and getattr(h, "name", None) is None
-        )
-
-        update = Update(
-            update_id=1,
-            message=Message(
-                message_id=1,
-                date=datetime(2026, 1, 1),
-                chat=Chat(id=555, type="private"),
-                text="📝 Черновики",
-            ),
-        )
-
-        for state in (
-            post_creation_module.POST_CREATION,
-            post_creation_module.EDIT_FIELD,
-        ):
-            matched = [
-                h
-                for h in conversation.states[state]
-                if isinstance(h, MessageHandler) and h.check_update(update)
-            ]
-            self.assertTrue(matched, f"кнопка «Черновики» не обрабатывается в {state}")
-            # Первым должен идти УЗКИЙ обработчик кнопки (заканчивает диалог),
-            # а не generic TEXT — иначе текст кнопки запишется в поле поста.
-            # Проверяем поведением: первый сработавший обработчик не должен
-            # принимать произвольный текст.
-            probe = Update(
-                update_id=2,
-                message=Message(
-                    message_id=2,
-                    date=datetime(2026, 1, 1),
-                    chat=Chat(id=555, type="private"),
-                    text="просто текст",
-                ),
-            )
-            self.assertFalse(
-                matched[0].check_update(probe),
-                f"в состоянии {state} generic TEXT-хендлер идёт перед кнопкой",
-            )
-
-
-@unittest.skipIf(
-    HANDLERS_IMPORT_ERROR is not None,
-    f"импорт обработчиков недоступен: {HANDLERS_IMPORT_ERROR}",
-)
-class DraftsPaginationTests(_InMemoryDbMixin, unittest.TestCase):
-    """Список черновиков: сортировка, лимит страницы, навигация."""
-
-    def _seed(self, count: int, user_id: int = 111):
-        # та же ин-мемори БД, что патчится миксином для drafts/screen
-        session = self.session_factory()
-        try:
-            for i in range(count):
-                session.add(Draft(user_id=user_id, title=f"Пост {i}"))
-            session.commit()
-        finally:
-            session.close()
-        return self.session_factory, self.engine
-
-    @staticmethod
-    def _make_draft(draft_id: int):
-        return SimpleNamespace(
-            id=draft_id,
-            title=f"Заголовок {draft_id}",
-            date="01.01.2026",
-            time_start="10:00",
-            time_end="12:00",
-            place_name="Зал",
-        )
-
-    def test_first_page_newest_first_and_limited(self):
-        session_factory, engine = self._seed(20)
-        session = session_factory()
-        try:
-            drafts, total = fetch_user_drafts(session, 111, 0)
-            self.assertEqual(total, 20)
-            self.assertEqual(len(drafts), DRAFTS_PAGE_SIZE)
-            # Новые сверху: id 20..6
-            self.assertEqual([d.id for d in drafts], list(range(20, 5, -1)))
-        finally:
-            session.close()
-            engine.dispose()
-
-    def test_second_page_returns_rest(self):
-        session_factory, engine = self._seed(20)
-        session = session_factory()
-        try:
-            drafts, total = fetch_user_drafts(session, 111, DRAFTS_PAGE_SIZE)
-            self.assertEqual(total, 20)
-            self.assertEqual([d.id for d in drafts], [5, 4, 3, 2, 1])
-        finally:
-            session.close()
-            engine.dispose()
-
-    def test_out_of_range_page_is_empty(self):
-        session_factory, engine = self._seed(3)
-        session = session_factory()
-        try:
-            drafts, total = fetch_user_drafts(session, 111, 100)
-            self.assertEqual(drafts, [])
-            self.assertEqual(total, 3)
-        finally:
-            session.close()
-            engine.dispose()
-
-    def test_other_users_drafts_not_counted(self):
-        session_factory, engine = make_session_factory()
-        session = session_factory()
-        try:
-            session.add(Draft(user_id=111, title="Свой 1"))
-            session.add(Draft(user_id=111, title="Свой 2"))
-            session.add(Draft(user_id=999, title="Чужой"))
-            session.commit()
-            drafts, total = fetch_user_drafts(session, 111, 0)
-            self.assertEqual(total, 2)
-            self.assertEqual({d.user_id for d in drafts}, {111})
-        finally:
-            session.close()
-            engine.dispose()
-
-    def test_build_message_note_and_forward_button(self):
-        drafts = [self._make_draft(i) for i in range(1, DRAFTS_PAGE_SIZE + 1)]
-        text, markup = build_drafts_message(drafts, offset=0, total=20)
-        datas = [b.callback_data for row in markup.inline_keyboard for b in row]
-        self.assertIn("из 20", text)
-        self.assertIn("draftpage_15", datas)  # вперёд на вторую страницу
-        self.assertNotIn("draftpage_0", datas)  # «назад» с первой страницы не нужно
-        self.assertIn("main_menu", datas)
-
-    def test_build_message_back_button_on_later_page(self):
-        drafts = [self._make_draft(i) for i in range(16, 21)]
-        text, markup = build_drafts_message(drafts, offset=15, total=20)
-        datas = [b.callback_data for row in markup.inline_keyboard for b in row]
-        self.assertIn("draftpage_0", datas)  # назад — на первую страницу
-        self.assertNotIn("draftpage_20", datas)  # вперёд за конец списка не нужно
-
-    def test_no_navigation_when_all_drafts_shown(self):
-        # Вся выборка помещается на одну страницу — листание не нужно
-        drafts = [self._make_draft(1), self._make_draft(2)]
-        text, markup = build_drafts_message(drafts, total=2)
-        datas = [b.callback_data for row in markup.inline_keyboard for b in row]
-        self.assertFalse(any(d.startswith("draftpage_") for d in datas))
-        self.assertNotIn("листайте", text)
-
-    def test_page_handler_renders_requested_page(self):
-        _, engine = self._seed(20)
-        bot = _ScreenBot()
-        try:
-            query = SimpleNamespace(
-                data="draftpage_15",
-                answer=AsyncMock(),
-                from_user=SimpleNamespace(id=111),
-            )
-            update = SimpleNamespace(
-                callback_query=query,
-                effective_user=SimpleNamespace(id=111),
-                effective_chat=SimpleNamespace(id=777),
-            )
-            context = SimpleNamespace(
-                user_data={"screen": {"chat_id": 777, "message_id": 5}},
-                bot=bot,
-            )
-
-            asyncio.run(handle_drafts_page(update, context))
-
-            query.answer.assert_awaited()
-            # листание перерисовывает ЭКРАН, а не создаёт новое сообщение
-            self.assertEqual(bot.calls[-1]["type"], "edit_message")
-            self.assertIn("из 20", bot.calls[-1]["text"])
-            markup = bot.calls[-1]["reply_markup"]
-            datas = [b.callback_data for row in markup.inline_keyboard for b in row]
-            self.assertIn("draftpage_0", datas)
-        finally:
-            engine.dispose()
-
-    def test_page_handler_clamps_to_first_when_page_emptied(self):
-        _, engine = self._seed(20)
-        bot = _ScreenBot()
-        try:
-            query = SimpleNamespace(
-                data="draftpage_100",
-                answer=AsyncMock(),
-                from_user=SimpleNamespace(id=111),
-            )
-            update = SimpleNamespace(
-                callback_query=query,
-                effective_user=SimpleNamespace(id=111),
-                effective_chat=SimpleNamespace(id=777),
-            )
-            context = SimpleNamespace(
-                user_data={"screen": {"chat_id": 777, "message_id": 5}},
-                bot=bot,
-            )
-
-            asyncio.run(handle_drafts_page(update, context))
-
-            # Страница опустела → возврат к первой (новейшие черновики сверху)
-            self.assertIn("Пост 19", bot.calls[-1]["text"])
-        finally:
-            engine.dispose()
+        with patch.object(screen_module, "SessionLocal", session_factory):
+            asyncio.run(help_command(update, SimpleNamespace(user_data={}, bot=bot)))
+        # справка рисуется на экране управления (send/edit), не reply-сообщением
+        self.assertEqual(len(bot.calls), 1)
+        text = bot.calls[0]["text"]
+        for command in ("/start", "/new_wizard", "/drafts", "/cancel", "/help"):
+            self.assertIn(command, text)
+        # Poster 2.0 S2: справка описывает кнопки нового меню и то, что
+        # готовый анонс приходит в личный чат.
+        self.assertIn("Создать для площадки", text)
+        self.assertIn("Создать по личному шаблону", text)
+        self.assertIn("Мои анонсы", text)
+        self.assertIn("Управление", text)
+        self.assertIn("готовый пост в этот чат", text)
 
 
 if __name__ == "__main__":

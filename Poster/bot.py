@@ -17,11 +17,8 @@ from errors import error_handler
 from handlers.admin import admin_handlers
 from handlers.announcement_wizard import announcement_wizard_handlers
 from handlers.bricks import bricks_handlers
-from handlers.callbacks import callbacks_handlers
-from handlers.drafts import drafts_handlers
 from handlers.main_menu import main_menu_handlers
 from handlers.places import places_handlers
-from handlers.post_creation import post_creation_handlers
 from handlers.templates import templates_handlers
 from handlers.user_tracking import track_user
 from log_config import setup_logging
@@ -41,12 +38,12 @@ def build_application() -> Application:
     """
     Собирает приложение со ВСЕМИ обработчиками (без запуска — тестируемо).
 
-    Порядок регистрации важен: ConversationHandler создания поста идёт
-    ПЕРВЫМ. Так reply-кнопки главного меню («📝 Черновики»), нажатые
-    ВНУТРИ диалога, обрабатываются состояниями диалога (с завершением
-    диалога), а не глобальным хендлером main_menu — состояние не «висит».
-    Вне диалога ConversationHandler возвращает None, и update уходит
-    дальше по цепочке (main_menu → callbacks → drafts).
+    Порядок регистрации важен: ConversationHandler анонсов идёт ПЕРВЫМ.
+    Так reply-кнопки главного меню, нажатые ВНУТРИ диалога, обрабатываются
+    состояниями диалога (с его завершением), а не глобальным хендлером
+    main_menu — состояние не «висит». Вне диалога ConversationHandler
+    возвращает None, и update уходит дальше по цепочке (main_menu).
+    Легаси-мастер и его обработчики (/create_post, static WIP) удалены в S5.
     """
     # TELEGRAM_BOT_TOKEN проверяется в config при импорте; здесь — ещё и
     # нарровинг для mypy (build_application типизирован, в отличие от старого main)
@@ -67,11 +64,6 @@ def build_application() -> Application:
     # entry-точка aw_start и команда /new_wizard. Явный вход завершает
     # посторонние диалоги, но не удаляет их сохранённые черновики.
     for handler in announcement_wizard_handlers():
-        application.add_handler(handler)
-
-    # Прежний девятишаговый мастер остаётся без изменений и регистрируется
-    # после нового. Его callback create_post не пересекается с aw_*.
-    for handler in post_creation_handlers():
         application.add_handler(handler)
 
     # Справочник мест: после мастера (не перехватывает его тексты) и до
@@ -96,14 +88,6 @@ def build_application() -> Application:
 
     # Обработчики главного меню
     for handler in main_menu_handlers():
-        application.add_handler(handler)
-
-    # Обработчики CallbackQuery
-    for handler in callbacks_handlers():
-        application.add_handler(handler)
-
-    # Обработчики черновиков
-    for handler in drafts_handlers():
         application.add_handler(handler)
 
     # Обработчик неизвестных команд

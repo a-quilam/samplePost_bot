@@ -17,7 +17,6 @@ from sqlalchemy.exc import IntegrityError
 from brick_store import list_system_bricks
 from brick_types import SYSTEM_BRICKS
 from migrations import LATEST_VERSION, run_migrations
-from models import Draft
 from tests.stage19a_helpers import connect
 from tests.stage22a_helpers import BrickDatabaseTestCase
 
@@ -96,6 +95,7 @@ class BrickSchemaTests(BrickDatabaseTestCase):
                 (14, "announcement_redelivery"),
                 (15, "brick_description_and_address"),
                 (16, "announcement_draft_origin"),
+                (17, "archive_legacy_drafts"),
             ],
         )
         # 9 кирпичиков миграции 6 + системный `[адрес]` миграции 15
@@ -383,11 +383,8 @@ class BrickSchemaTests(BrickDatabaseTestCase):
             "ix_bricks_scope_status_code", " ".join(str(row["detail"]) for row in plan)
         )
 
-    def test_draft_table_still_contains_photos_and_no_brick_columns(self) -> None:
-        columns = set(Draft.__table__.columns.keys())
-        self.assertIn("image", columns)
-        self.assertIn("photos", columns)
-        self.assertFalse(any(column.startswith("brick") for column in columns))
+    def test_legacy_drafts_table_gone_and_no_brick_columns(self) -> None:
+        """S5: `drafts` удалена из моделей; кирпичики живут отдельной схемой."""
         with self.engine.connect() as connection:
             tables = {
                 str(row[0])
@@ -396,6 +393,8 @@ class BrickSchemaTests(BrickDatabaseTestCase):
                 )
             }
         self.assertIn("bricks", tables)
+        self.assertNotIn("drafts", tables, "легаси-таблицы нет в живой схеме")
+        self.assertNotIn("legacy_drafts_backup", tables, "свежая база: архива нет")
         self.assertNotIn("draft_values", tables)
         self.assertIn("templates", tables)
         self.assertIn("template_versions", tables)

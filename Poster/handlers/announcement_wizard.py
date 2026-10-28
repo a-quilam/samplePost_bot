@@ -11,16 +11,18 @@ Telegram-интерфейс адаптивного мастера анонсов
 - значения и дополнительные кирпичики сохраняются по `brick_id`;
 - предпросмотр собирается `build_announcement_preview` из снимка;
 - фотографии — отдельная коллекция вложений анонса, не кирпичики;
-- публикация замораживает готовый HTML/фото и отправляет их существующим
-  `send_rendered_post` (тот же формат и прогресс, что у старого мастера).
+- публикация замораживает готовый HTML/фото и отправляет их единым
+  доставщиком `delivery.send_announcement_post` (тот же формат и прогресс,
+  что у остальных сценариев).
 
 В `user_data` хранится только навигационное состояние интерфейса. Место,
 шаблон, снимок, ответы, extras, фото, этап, revision и прогресс публикации
-живут в SQLite. Поэтому рестарт процесса не теряет работу: после входа в
-«📝 Новый мастер» черновик открывается из базы. Кнопки содержат draft_id и
+живут в SQLite. Поэтому рестарт процесса не теряет работу: черновик
+открывается из базы в «📂 Мои анонсы». Кнопки содержат draft_id и
 revision; устаревший экран не перезаписывает данные.
 
-Старый девятишаговый мастер, его WIP и формат публикации не заменяются.
+Легаси-мастер, его WIP и формат публикации удалены в S5 — единственный
+конструктор и единственный доставщик.
 """
 
 from __future__ import annotations
@@ -186,7 +188,7 @@ SCOPE_LABELS = {
 
 STALE_TEXT = "Экран устарел: данные уже изменились. Показано актуальное состояние."
 EXPIRED_TEXT = (
-    "Кнопка устарела после перезапуска. Откройте «📝 Новый мастер» и "
+    "Кнопка устарела после перезапуска. Откройте «📂 Мои анонсы» и "
     "продолжите сохранённый черновик."
 )
 PRIVATE_CHAT_ONLY = (
@@ -1393,6 +1395,27 @@ def _load_fields(user_id: int, draft_id: int):
         )
 
 
+def _question_humor_line(
+    update: Update,
+    details,
+    field: AnnouncementFieldState,
+    *,
+    error: str | None,
+) -> str | None:
+    """
+    Редкая шутливая вариация для экрана вопроса — или `None`.
+
+    Экран с ошибкой получает запрещённый вид (`error`), поэтому шуток в
+    диагностике нет ни при каком ключе. Остальные ограничения (лимиты,
+    права, потеря данных) живут на своих экранах и сюда не обращаются.
+    """
+    screen_kind = ui_humor.SCREEN_ERROR if error else ui_humor.SCREEN_QUESTION
+    key = (
+        f"{_user_id(update)}:{details.draft_id}:" f"{details.revision}:{field.brick_id}"
+    )
+    return ui_humor.pick_variant(key, screen_kind=screen_kind)
+
+
 async def _render_question(
     update: Update,
     context: ContextTypes.DEFAULT_TYPE,
@@ -1514,7 +1537,15 @@ async def _render_question(
             )
         ]
     )
-    await _render(update, context, text, InlineKeyboardMarkup(rows))
+    keyboard = InlineKeyboardMarkup(rows)
+    # S5 §5.7: шутка подставляется в текст ТОЛЬКО после того, как собраны
+    # `callback_data` и клавиатура, — повлиять на действия она не может.
+    # Ключ стабилен между перерисовками одного экрана (только ID черновика,
+    # ревизии и кирпичика), поэтому текст не «прыгает».
+    humor_line = _question_humor_line(update, details, field, error=error)
+    if humor_line:
+        text = f"{text}\n\n{_h(humor_line)}"
+    await _render(update, context, text, keyboard)
     return AW_QUESTIONS
 
 
@@ -1799,6 +1830,7 @@ def _extra_field_state(details, extra, definition) -> AnnouncementFieldState:
         status=status,
         raw_value=raw,
         rules=dict(definition.rules),
+        description=definition.description,
     )
 
 
@@ -2645,8 +2677,11 @@ def _extra_value_text(extra, field: AnnouncementFieldState) -> str:
         f"➕ {_h(field.title)}",
         f"Секция: {SECTION_LABELS.get(extra.section, extra.section)}; "
         f"положение: {POSITION_LABELS.get(extra.position, extra.position)}.",
-        _type_hint(field),
     ]
+    description = " ".join(str(field.description or "").split())
+    if description:
+        lines.append(f"📝 {_h(description)}")
+    lines.append(_type_hint(field))
     if field.status == FIELD_STATUS_VALID:
         lines.append(f"Текущее значение: {_h(_field_value_text(field))}")
     elif field.status == FIELD_STATUS_SKIPPED:
@@ -3608,19 +3643,19 @@ async def _show_media_preview(
     if not preview.draft.photos:
         return False, "В анонсе нет фотографий."
     user_data = ctx.data(context)
-    delivery: dict = {}
+    # Контейнер продолжения: частичная отправка запоминается для очистки.
+    progress: dict = {}
     try:
-        from handlers.post_creation import send_rendered_post
-
-        message_ids = await send_rendered_post(
+        # Единый доставщик Poster 2.0 (S4): тот же отправитель, что у поста.
+        message_ids = await delivery.send_announcement_post(
             context.bot,
             ctx.chat(update).id,
             preview.html,
             list(preview.draft.photos),
-            progress=delivery,
+            progress=progress,
         )
     except Exception as exc:  # noqa: BLE001 — показываем честный сбой UI
-        partial = [int(mid) for mid in delivery.get("ids") or []]
+        partial = [int(mid) for mid in progress.get("ids") or []]
         if partial:
             old = [int(mid) for mid in (user_data.get("preview_messages") or [])]
             screen.track_preview(user_data, old + partial)
@@ -4732,25 +4767,6 @@ async def _close_photo_batch(
     return state
 
 
-async def _flush_photo_batches(
-    update: Update,
-    context: ContextTypes.DEFAULT_TYPE,
-) -> None:
-    """
-    Досылает незавершённую партию перед следующим действием пользователя.
-
-    Пользователь не должен ждать дебаунс, если уже нажал кнопку: партия
-    считается завершённой. Ошибка закрытия не мешает основному действию.
-    """
-    user_data = ctx.data(context)
-    wizard_photos.cancel_pending_task(user_data)
-    for key in wizard_photos.pending_keys(user_data):
-        try:
-            await _close_photo_batch(update, context, key)
-        except Exception as exc:  # noqa: BLE001 — основное действие важнее
-            logger.info("Незавершённая партия фото не закрыта: %s", exc)
-
-
 async def _exit_to_main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     _clear_ui(context)
     _clear_other_sessions(_user_id(update))
@@ -4767,8 +4783,8 @@ async def _close_wizard(update: Update, context: ContextTypes.DEFAULT_TYPE) -> i
     await _render(
         update,
         context,
-        "📝 Новый мастер закрыт. Сохранённый черновик не удалён — "
-        "продолжить можно через «📝 Новый мастер».",
+        "Конструктор анонса закрыт. Сохранённый черновик не удалён — "
+        "продолжить можно в «📂 Мои анонсы».",
         _main_menu_keyboard(),
     )
     await screen.drop_user_input(update, context)
@@ -4784,12 +4800,11 @@ async def handle_navigation_callback(
         await _answer(update)
         return await _exit_to_main_menu(update, context)
     if data == "drafts":
+        # /drafts и старый callback ведут в единый список «📂 Мои анонсы»:
+        # легаси-хранилища Draft больше нет (S5).
         await _answer(update)
         _clear_ui(context)
-        from handlers.drafts import view_drafts
-
-        await view_drafts(update, context)
-        return ConversationHandler.END
+        return await open_my_announcements(update, context)
     if data == "places":
         _clear_ui(context)
         from handlers.places import open_places
@@ -4822,18 +4837,14 @@ async def handle_navigation_callback(
         await render_help(update, context)
         return ConversationHandler.END
     if data == "create_post":
-        await _answer(
-            update,
-            "Новый мастер закрыт. Старый мастер откроется кнопкой "
-            "«✏️ Создать пост» в главном меню.",
-            alert=True,
-        )
+        # Старого мастера больше нет (S5): устаревшая кнопка не запускает
+        # ничего, а ведёт в меню перерисовкой существующего экрана.
+        await _answer(update, "Кнопка устарела: выберите раздел в меню.", alert=True)
         return await _exit_to_main_menu(update, context)
     if data == "restore_wip":
         await _answer(
             update,
-            "Новый мастер закрыт. Продолжение старого поста доступно в "
-            "главном меню.",
+            "Незавершённые анонсы открываются в «📂 Мои анонсы».",
             alert=True,
         )
         return await _exit_to_main_menu(update, context)
@@ -4857,10 +4868,8 @@ async def _command_to_section(
     _clear_ui(context)
     _clear_other_sessions(_user_id(update))
     if target == "drafts":
-        from handlers.drafts import view_drafts
-
-        await view_drafts(update, context)
-        return ConversationHandler.END
+        # Единый список анонсов вместо легаси-черновиков (S5).
+        return await open_my_announcements(update, context)
     if target == "places":
         from handlers.places import open_places
 
@@ -6131,8 +6140,8 @@ async def handle_unknown_command(
     await _render(
         update,
         context,
-        "Новый мастер активен. Используйте кнопки экрана или /cancel, "
-        "чтобы закрыть мастер без удаления черновика.",
+        "Конструктор анонса активен. Используйте кнопки экрана или /cancel, "
+        "чтобы закрыть его без удаления черновика.",
         _main_menu_keyboard(),
     )
 

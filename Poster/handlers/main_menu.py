@@ -16,9 +16,10 @@
   обработчике `/admin`);
 - «❓ Помощь» — справка.
 
-Команды /start, /help, /create_post, /places, /templates, /bricks, /admin,
+Команды /start, /help, /new_wizard, /places, /templates, /bricks, /admin,
 /drafts и /cancel продолжают работать: меню — навигация, а команды остаются
-совместимым входом в те же разделы (легаси-мастер удаляется на S5).
+совместимым входом в те же разделы. `/drafts` ведёт в единый список
+«📂 Мои анонсы»; легаси-мастера и его WIP больше нет (S5).
 """
 
 import logging
@@ -36,7 +37,6 @@ from telegram.ext import (
 from admin_state import clear_admin_session, has_admin_session
 from brick_state import clear_brick_session, has_brick_draft
 from database import SessionLocal
-from handlers.drafts import view_drafts
 from permissions import can_access_admin_panel, is_superadmin
 from place_state import clear_place_session, has_place_session
 from template_state import clear_template_session, has_template_session
@@ -131,9 +131,10 @@ async def render_main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     Рисует главное меню на существующем экране (или создаёт новый экран).
 
     После рестарта процесса ref экрана восстанавливается из БД один раз —
-    /start редактирует старое сообщение, а не плодит дубли. Если в БД остался
-    снимок незавершённого легаси-поста (рестарт прервал диалог), добавляется
-    кнопка «▶️ Продолжить пост»: сам пост не теряется до этапа S5.
+    /start редактирует старое сообщение, а не плодит дубли. Меню всегда
+    состоит из постоянных пяти кнопок: легаси-WIP удалён (S5), поэтому
+    условных кнопок «продолжить» нет — незавершённые анонсы живут в
+    «📂 Мои анонсы».
     """
     # навигация пользовательским сообщением → старый экран удаляется,
     # новый создаётся рядом с вводом (Stage 16, дефект №7); callback —
@@ -151,24 +152,10 @@ async def render_main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     if screen.screen_ref(user_data) is None:
         screen.hydrate_screen_ref(user_data, user_id)
     chat_id = ctx.chat(update).id
-    keyboard = main_menu_keyboard()
-    if screen.load_payload(user_id):
-        # WIP легаси-мастера пережил рестарт — предлагаем продолжение вместо
-        # потери. Кнопка не входит в постоянные пять: она появляется только
-        # при реально незавершённом посте и исчезнет вместе с S5.
-        keyboard = InlineKeyboardMarkup(
-            [
-                *keyboard.inline_keyboard,
-                [
-                    InlineKeyboardButton(
-                        "▶️ Продолжить пост", callback_data="restore_wip"
-                    )
-                ],
-            ]
-        )
-    await screen.render_screen(context, user_data, chat_id, main_menu_text(), keyboard)
-    # ref экрана закрепляется в БД; WIP-payload не трогаем (пост в работе —
-    # он переживёт рестарт и будет предложен к продолжению)
+    await screen.render_screen(
+        context, user_data, chat_id, main_menu_text(), main_menu_keyboard()
+    )
+    # ref экрана закрепляется в БД; payload не трогаем
     screen.save_screen_ref(user_id, user_data, chat_id)
 
 
@@ -195,32 +182,69 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 
 def help_text() -> str:
-    """Справка по кнопкам меню и командам."""
+    """
+    Справка: кнопки, команды и правила ввода Poster 2.0.
+
+    Экран рисуется с parse_mode=HTML (см. utils.screen.render_screen),
+    поэтому разметка ниже — безопасные собственные теги (<b>), без
+    пользовательских значений. Лимиты импортируются локально: справка не
+    должна тянуть сервисы домена при импорте модуля.
+    """
+    from announcement_store import MAX_ANNOUNCEMENT_PHOTOS
+    from delivery import ANNOUNCEMENT_CAPTION_LIMIT, ANNOUNCEMENT_TEXT_LIMIT
+
     return (
-        "Я собираю анонсы по шаблону: вопросы, живой текст, фотографии и "
-        "готовый пост в этот чат.\n\n"
-        "Кнопки меню:\n"
-        "— «📍 Создать для площадки» — выберите зарегистрированную площадку; "
-        "анонс сразу начнётся по её стандартному шаблону. Новую площадку "
-        "можно добавить там же — анонс откроется сразу после создания;\n"
-        "— «📝 Создать по личному шаблону» — ваши личные шаблоны. Тап по "
-        "названию сразу начинает анонс; создание и правка шаблонов — в том же "
-        "разделе;\n"
-        "— «📂 Мои анонсы» — незавершённые анонсы можно продолжить, "
-        "завершённые остаются в истории и не удаляются при создании новых;\n"
-        "— «⚙️ Управление» — площадки, шаблоны и кирпичики. Пункт "
+        "<b>Помощь</b>\n\n"
+        "Я собираю анонсы по шаблону: вопросы, живой текст сверху экрана, "
+        "фотографии и готовый пост в этот чат.\n\n"
+        "<b>Кнопки меню</b>\n"
+        "— <b>«📍 Создать для площадки»</b> — список зарегистрированных "
+        "площадок; тап по названию сразу начинает анонс по её стандартному "
+        "шаблону. Новую площадку можно добавить там же — анонс откроется "
+        "сразу после создания;\n"
+        "— <b>«📝 Создать по личному шаблону»</b> — ваши личные шаблоны. Тап "
+        "по названию сразу начинает анонс; создание и правка шаблонов — в "
+        "том же разделе;\n"
+        "— <b>«📂 Мои анонсы»</b> — незавершённые анонсы можно продолжить, "
+        "завершённые остаются в истории; новые анонсы их не удаляют;\n"
+        "— <b>«⚙️ Управление»</b> — площадки, шаблоны и кирпичики. Пункт "
         "«🛡 Администрирование» виден только при выданных правах;\n"
-        "— «❓ Помощь» — эта справка.\n\n"
-        "Команды:\n"
+        "— <b>«❓ Помощь»</b> — эта справка.\n\n"
+        "<b>Два входа в конструктор</b>\n"
+        "«Создать для площадки» подставляет площадку и её стандартный "
+        "шаблон, готовый пост приходит с адресом места. «Создать по личному "
+        "шаблону» работает без площадки — адрес и контакты берутся из "
+        "вашего шаблона. Оба входа ведут в один и тот же конструктор.\n\n"
+        "<b>Фотографии</b>\n"
+        "Можно отправить одно фото, несколько сразу или альбомом — бот "
+        "соберёт партию и добавит её к анонсу. Лимит — "
+        f"{MAX_ANNOUNCEMENT_PHOTOS} фото на анонс; 11-е не примется, и "
+        "экран покажет, что сообщение осталось.\n\n"
+        "<b>Текст и лимиты</b>\n"
+        "Без фотографий готовый анонс может занимать до "
+        f"{ANNOUNCEMENT_TEXT_LIMIT} символов, с фотографиями подпись — до "
+        f"{ANNOUNCEMENT_CAPTION_LIMIT}. Слишком длинный анонс не режется "
+        "молча и не отправляется частями: бот покажет, что именно сократить, "
+        "и предложит правку.\n\n"
+        "<b>Ввод и очистка</b>\n"
+        "Ваши сообщения с ответами и фото удаляются после того, как данные "
+        "надёжно сохранены. Ошибочный ввод остаётся на экране, пока вы не "
+        "исправите поле. Навигация по кнопкам не плодит сообщения: экран "
+        "перерисовывается.\n\n"
+        "<b>Готовый анонс</b>\n"
+        "После отправки анонс можно открыть в «📂 Мои анонсы», изменить поля, "
+        "фото или дополнительные кирпичики и применить изменения — придёт "
+        "новая версия. Частичная отправка не дублирует уже доставленные "
+        "сообщения.\n\n"
+        "<b>Команды</b>\n"
         "/start — главное меню\n"
         "/new_wizard — новый анонс\n"
         "/places — площадки\n"
         "/templates — личные шаблоны\n"
         "/bricks — мои кирпичики\n"
         "/admin — кабинет, если у вас есть права администратора\n"
-        "/drafts — старые черновики прошлого мастера\n"
-        "/create_post — прежний девятишаговый мастер (постепенно убирается)\n"
-        "/cancel — отменить текущий диалог\n"
+        "/drafts — мои анонсы (то же, что кнопка «📂 Мои анонсы»)\n"
+        "/cancel — закрыть текущий диалог без удаления черновика\n"
         "/help — эта справка"
     )
 
@@ -256,14 +280,23 @@ async def menu_help(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 
 async def drafts_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Команда /drafts — список черновиков прошлого мастера (до S5)."""
-    await view_drafts(update, context)
+    """
+    Команда /drafts — совместимый вход в единый список «📂 Мои анонсы».
+
+    Отдельного легаси-хранилища Draft больше нет (S5): команда открывает
+    тот же экран, что и кнопка меню, без второго списка.
+    """
+    from handlers.announcement_wizard import open_my_announcements
+
+    await open_my_announcements(update, context)
 
 
 async def menu_drafts(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Совместимость: старая кнопка «📂 Черновики» в открытых экранах."""
     await ctx.query(update).answer()
-    await view_drafts(update, context)
+    from handlers.announcement_wizard import open_my_announcements
+
+    await open_my_announcements(update, context)
 
 
 async def open_manage(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -384,6 +417,21 @@ async def outside_dialog_hint(
     await screen.render_screen(context, user_data, ctx.chat(update).id, text)
 
 
+async def handle_main_menu_selection(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> None:
+    """
+    Callback «main_menu» ВНЕ диалога конструктора: возврат в главное меню.
+
+    Раньше жил в `handlers/callbacks.py`; после удаления легаси (S5) это
+    единственный живой маршрут того модуля, поэтому он переехал сюда.
+    Экран перерисовывается (Stage 11: один живой экран управления), новых
+    сообщений не создаётся.
+    """
+    await ctx.query(update).answer()
+    await render_main_menu(update, context)
+
+
 def main_menu_handlers() -> list[BaseHandler]:
     """
     Обработчики главного меню Poster 2.0.
@@ -400,6 +448,7 @@ def main_menu_handlers() -> list[BaseHandler]:
     handlers = [
         CommandHandler("start", start),
         CommandHandler("help", help_command),
+        CallbackQueryHandler(handle_main_menu_selection, pattern=r"^main_menu$"),
         CommandHandler("drafts", drafts_command),
         CommandHandler("cancel", cancel_without_dialog),
         CallbackQueryHandler(menu_drafts, pattern="^drafts$"),

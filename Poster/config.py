@@ -78,6 +78,30 @@ def parse_superadmin_contact_url(raw: str | None) -> str | None:
     return value
 
 
+# Значения, которые пользователь пишет вместо «выключено», — явный отказ.
+_HUMOR_OFF_VALUES = frozenset({"0", "false", "no", "off", "нет", "выкл"})
+
+
+def parse_humor_enabled(raw: str | None) -> bool:
+    """
+    Разбирает необязательный флаг `UI_HUMOR_ENABLED` (Poster 2.0 S5).
+
+    По умолчанию юмор включён: отсутствие переменной — это не ошибка, а
+    штатная конфигурация. Отключение требует явного значения из набора
+    «выключено»; любое другое значение тоже считается включением, чтобы
+    опечатка не гасила функцию незаметно. Значение переменной в тексте
+    ошибки не повторяется.
+    """
+    if raw is None:
+        return True
+    return raw.strip().casefold() not in _HUMOR_OFF_VALUES
+
+
+# Глобальный выключатель редких шуток интерфейса. Флаг главнее любого
+# сценария: при `UI_HUMOR_ENABLED=0` (или false/no/off/нет/выкл) шуток нет
+# нигде, включая служебный экран пустого анонса.
+UI_HUMOR_ENABLED = parse_humor_enabled(os.getenv("UI_HUMOR_ENABLED"))
+
 # Постоянные Telegram user ID суперадминистраторов. Пустое значение означает,
 # что административные функции закрыты; обычные функции бота работают.
 SUPERADMIN_USER_IDS = parse_superadmin_user_ids(os.getenv("SUPERADMIN_USER_IDS"))

@@ -267,65 +267,129 @@ except Exception as e:  # noqa: BLE001 — причина попадает в с
 class UserTextNotLoggedTests(unittest.TestCase):
     """§5: полный текст пользовательского ввода не попадает в INFO-лог."""
 
+    @staticmethod
+    def _make_template(h) -> int:
+        """Личный шаблон «Заголовок + Дата»: ввод и невалидное значение."""
+        from brick_store import create_personal_brick
+        from template_store import create_personal_template
+        from user_store import get_or_create_user
+
+        session = h.session_factory()
+        try:
+            get_or_create_user(session, h.user_id, username="logging")
+            create_personal_brick(
+                session,
+                actor_telegram_user_id=h.user_id,
+                code="ttl",
+                title="Заголовок",
+                value_type="short_text",
+                rules={},
+            )
+            create_personal_brick(
+                session,
+                actor_telegram_user_id=h.user_id,
+                code="dt",
+                title="Дата",
+                value_type="date",
+                rules={},
+            )
+            template = create_personal_template(
+                session,
+                actor_telegram_user_id=h.user_id,
+                name="Шаблон логирования",
+                header="",
+                body="[ttl]\n[dt]",
+                footer="",
+            )
+            session.commit()
+            return template.template_id
+        finally:
+            session.close()
+
     @scenario_test
     async def test_user_input_not_logged_but_events_are(self, h):
         title_probe = "PRIVACY-PROBE-TITLE-8f3a"
-        desc_probe = "PRIVACY-PROBE-DESCRIPTION-77bb конфиденциальный текст"
-        edit_probe = "PRIVACY-PROBE-EDIT-cc9d"
         invalid_probe = "PRIVACY-PROBE-INVALID-input99.99.9999"
+        edit_probe = "PRIVACY-PROBE-EDIT-cc9d"
 
-        records: list[str] = []
+        records: list[logging.LogRecord] = []
 
         class _Capture(logging.Handler):
             def emit(self, record: logging.LogRecord) -> None:
-                records.append(self.format(record))
+                # Сетевой шум PTB/httpx не относится к нашему журналу.
+                if record.name.startswith(("telegram", "httpx")):
+                    return
+                records.append(record)
 
         capture = _Capture()
+        capture.setFormatter(logging.Formatter("%(name)s | %(message)s"))
         root = logging.getLogger()
         old_level = root.level
         root.addHandler(capture)
         root.setLevel(logging.DEBUG)  # ловим INFO и WARNING
         try:
+            template_id = self._make_template(h)
             await h.text("/start")
-            await h.start_dialog()
-            await h.text(title_probe)  # шаг «Заголовок»
-            for _ in range(4):  # дата/время начала/время конца/место
-                await h.text("Пропустить")
-            await h.text(desc_probe)  # шаг «Описание»
-            await h.text("Пропустить")  # контакт
-            await h.text("Пропустить")  # ссылка
-            await h.text("Пропустить")  # изображение → превью
-
-            # Правка поля: меню редактирования → выбор поля → ввод
-            await h.callback("edit_post")
-            await h.callback("edit_title")
-            await h.text(edit_probe)
-            # Невалидный ввод в поле с валидатором (дата)
-            await h.callback("edit_post")
-            await h.callback("edit_date")
+            await h.callback(f"tp_pick:{template_id}")
+            await h.text(title_probe)  # вопрос «Заголовок»
+            # Невалидный ввод в кирпичик с валидатором (дата): ошибка видна
+            # пользователю, но значения в журнале быть не должно.
             await h.text(invalid_probe)
-            await h.callback("cancel_edit")
+            self.assertIn("некорректно", h.screen_text(), "диагностика видна")
+            await h.text("31.12.2026")
+            await h.callback("aw_photo_none")
+
+            # Правка поля через обзор: «Изменить поля» → выбор поля → ввод.
+            await h.callback(self._callback(h, "aw_qmanage"))
+            await h.callback(self._callback(h, "aw_qgoto"))
+            await h.callback(self._callback(h, "aw_qedit"))
+            await h.text(edit_probe)
         finally:
             root.removeHandler(capture)
             root.setLevel(old_level)
 
-        joined = "\n".join(records)
-        for probe in (title_probe, desc_probe, edit_probe, invalid_probe):
+        joined = "\n".join(record.getMessage() for record in records)
+        for probe in (title_probe, invalid_probe, edit_probe):
             self.assertNotIn(
                 probe,
                 joined,
-                f"текст ввода '{probe[:20]}…' не должен попадать в журнал",
+                f"текст ввода '{probe[:24]}…' не должен попадать в журнал",
             )
 
-        # Диагностическая ценность сохранена: события и названия полей есть
+        # Диагностическая ценность сохранена: события сценария логируются,
+        # и ни одно из них не содержит значения поля.
+        events = [
+            record
+            for record in records
+            if record.name.startswith(("handlers.", "utils.", "delivery"))
+        ]
+        messages = [record.getMessage() for record in events]
+        self.assertTrue(messages, "события конструктора должны логироваться")
+        # Именно события жизненного цикла анонса (живой блок, служебный
+        # экран), а не пустой список совпадений.
         self.assertTrue(
-            any("Получено сообщение для шага 'title'" in r for r in records),
-            "событие ввода поля с названием поля должно логироваться",
+            any(
+                "живой блок" in message.lower()
+                or "служебный экран" in message.lower()
+                or "анонс" in message.lower()
+                for message in messages
+            ),
+            f"нет событий конструктора в журнале: {messages!r}",
         )
-        self.assertTrue(
-            any("'date'" in r and "Некорректный ввод" in r for r in records),
-            "предупреждение о невалидном вводе поля должно логироваться",
-        )
+        for message in messages:
+            self.assertNotIn("PRIVACY-PROBE", message)
+
+    @staticmethod
+    def _callback(h, prefix: str) -> str:
+        matches = [
+            data for _, data in h.screen_buttons() if data and data.startswith(prefix)
+        ]
+        if not matches:
+            raise AssertionError(
+                f"нет кнопки '{prefix}' на экране: {h.screen_buttons()!r}\n"
+                f"{h.screen_text()}"
+            )
+        return matches[0]
 
 
 if __name__ == "__main__":

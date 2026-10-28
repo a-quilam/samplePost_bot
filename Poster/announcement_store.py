@@ -343,6 +343,9 @@ class AnnouncementFieldState:
     status: str
     raw_value: object | None = None
     rules: Mapping[str, object] = field(default_factory=dict)
+    # Poster 2.0 S5: инструкция автора кирпичика для экрана вопроса. Только
+    # подсказка интерфейса — в текст анонса и в шаблон не попадает.
+    description: str | None = None
 
     @property
     def is_filled(self) -> bool:
@@ -2484,6 +2487,7 @@ def build_announcement_fields(
                 rules=dict(
                     question.rules if question is not None else definition.rules
                 ),
+                description=definition.description,
             )
         )
     return tuple(states)

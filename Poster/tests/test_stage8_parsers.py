@@ -11,8 +11,7 @@
 - лото-пасхалка: полный перенос значениями оригинала anounce,
   исправление substring-бага, границы токенов, негативы;
 - ссылки: нормализация, опасные схемы, произвольный текст;
-- конфигурация POST_STEPS: нормализаторы на месте, подсказки обновлены,
-  пасхалка не рекламируется.
+- пасхалка не попадает в пользовательские тексты подсказок конструктора.
 
 Запуск из каталога Poster:
     python -m unittest discover -s tests -v
@@ -22,7 +21,6 @@ import unittest
 from datetime import date, datetime
 
 try:
-    from handlers.post_creation import POST_STEPS
     from utils.lotto import LOTTO_NUMBERS, substitute_lotto
     from utils.parsers import APP_TZ, parse_date_flexible, parse_time_flexible
     from utils.validators import (
@@ -277,6 +275,18 @@ class TimeParserTest(unittest.TestCase):
         self.assert_time("00:00", "00:00")
         self.assert_time("23:59", "23:59")
 
+    def test_comma_separator_follows_same_rule(self):
+        """Запятая — равноправный разделитель (реальный ввод «21,30»)."""
+        self.assert_time("18,30", "18:30")
+        self.assert_time("7,30", "19:30")
+        self.assert_time("9,30", "21:30")
+        self.assert_time("12,30", "12:30")
+        self.assert_time("0,30", "00:30")
+        self.assert_time("23,59", "23:59")
+        # Опасные формы с запятой часами не становятся.
+        for bad in ("1,2", "18,3", "18,300", "18,,30", "в18,30"):
+            self.assert_invalid(bad)
+
     def test_compact_4_digits(self):
         self.assert_time("1840", "18:40")
         self.assert_time("2215", "22:15")
@@ -494,65 +504,6 @@ class UrlNormalizationTest(unittest.TestCase):
         self.assertFalse(validate_date("31.02.2026"))
         self.assertTrue(validate_time("18:30"))
         self.assertFalse(validate_time("25:00"))
-
-
-@unittest.skipIf(IMPORT_ERROR is not None, f"импорт недоступен: {IMPORT_ERROR}")
-class PostStepsConfigTest(unittest.TestCase):
-    """POST_STEPS: нормализаторы подключены, подсказки обновлены."""
-
-    def _step(self, key: str) -> dict:
-        return next(s for s in POST_STEPS if s["key"] == key)
-
-    def test_normalizers_present(self):
-        for key in ("date", "time_start", "time_end", "place_url"):
-            self.assertIsNotNone(
-                self._step(key).get("normalizer"), f"нет normalizer у '{key}'"
-            )
-
-    def test_date_step_normalizes_storage(self):
-        step = self._step("date")
-        year = datetime.now(APP_TZ).year
-        self.assertEqual(step["normalizer"]("17.11"), f"17.11.{year}")
-        self.assertEqual(step["normalizer"]("сегодня"), normalize_date("сегодня"))
-        self.assertIsNone(step["normalizer"]("31.02.2026"))
-
-    def test_time_steps_normalize_storage(self):
-        for key in ("time_start", "time_end"):
-            step = self._step(key)
-            self.assertEqual(step["normalizer"]("1830"), "18:30")
-            self.assertEqual(step["normalizer"]("7"), "19:00")
-            self.assertIsNone(step["normalizer"]("25:00"))
-
-    def test_url_step_normalizes_storage(self):
-        step = self._step("place_url")
-        self.assertEqual(
-            step["normalizer"]("@random_culture"), "https://t.me/random_culture"
-        )
-        self.assertIsNone(step["normalizer"]("javascript:alert(1)"))
-
-    def test_prompts_mention_new_formats(self):
-        """Подсказки отражают новые возможности (и сохраняют старые маркеры)."""
-        self.assertIn("ДД.ММ.ГГГГ", self._step("date")["prompt"])
-        self.assertIn("сегодня", self._step("date")["prompt"])
-        self.assertIn("ЧЧ:ММ", self._step("time_start")["prompt"])
-        self.assertIn("930", self._step("time_start")["prompt"])
-        self.assertIn("t.me", self._step("place_url")["prompt"])
-
-    def test_easter_egg_not_advertised(self):
-        """Пасхалка не упоминается ни в подсказках, ни в /help."""
-        for step in POST_STEPS:
-            for secret in ("гуси", "топор", "лото", "пасхалк", "лебеди"):
-                self.assertNotIn(
-                    secret,
-                    step["prompt"].lower(),
-                    f"пасхалка '{secret}' утекла в подсказку '{step['key']}'",
-                )
-
-    def test_old_draft_values_still_valid(self):
-        """Старые значения черновиков проходят валидацию как прежде."""
-        self.assertTrue(validate_date("25.12.2026"))
-        self.assertTrue(validate_time("10:00"))
-        self.assertTrue(validate_url("https://example.com"))
 
 
 if __name__ == "__main__":

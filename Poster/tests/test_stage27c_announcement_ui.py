@@ -528,7 +528,11 @@ class AnnouncementRedeliveryTests(unittest.TestCase):
 
         # Пересборка доставленной версии — не «возобновление изменившегося
         # поста»: ложного предупреждения о сбросе прогресса быть не должно.
-        with self.assertNoLogs("handlers.post_creation", level="WARNING"):
+        # Легаси-модуля `handlers.post_creation` больше нет (S5): проверяем
+        # живой журнал отправки. Пересборка доставленной версии по явной
+        # кнопке — не «возобновление изменившегося поста», поэтому ложного
+        # предупреждения о сбросе прогресса быть не должно.
+        with self.assertNoLogs("delivery", level="WARNING"):
             await h.callback(_callback(h, "aw_apply"))
         posts = h.posts()
         self.assertEqual(len(posts), 2)

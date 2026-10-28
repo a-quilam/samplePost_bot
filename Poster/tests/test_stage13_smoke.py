@@ -11,8 +11,8 @@ Stage 13, §1 и §4: безопасный smoke-test запуска проек�
 - запуск из каталога Poster, из корня репозитория и из произвольной
   временной директории: посторонних файлов (случайной базы, logs/)
   в рабочей директории не появляется;
-- основной интерфейс через fake-bot (Harness): меню → диалог на
-  временной SQLite.
+- основной интерфейс через fake-bot (Harness): меню → конструктор анонса
+  на временной SQLite.
 """
 
 import json
@@ -77,7 +77,14 @@ class SmokeLaunchTests(unittest.TestCase):
         self.assertTrue(report.get("has_conversation"), "диалог регистрации")
         self.assertGreaterEqual(report.get("error_handlers", 0), 1)
         self.assertGreaterEqual(report.get("callback_handlers", 0), 4)
-        self.assertTrue(report.get("db_has_drafts"), "миграции создали drafts")
+        self.assertTrue(
+            report.get("db_has_announcement_drafts"),
+            "миграции создали announcement_drafts (конструктор анонсов)",
+        )
+        self.assertFalse(
+            report.get("db_has_legacy_drafts_backup"),
+            "на свежей базе архива легаси-черновиков нет",
+        )
         self.assertTrue(
             report.get("db_has_user_states"), "миграции создали user_states"
         )
@@ -124,7 +131,6 @@ class SmokeLaunchTests(unittest.TestCase):
 
 
 try:
-    from handlers.post_creation import POST_CREATION
     from tests.integration_harness import (
         HARNESS_IMPORT_ERROR,
         scenario_test,
@@ -148,11 +154,12 @@ class MainInterfaceSmokeTests(unittest.TestCase):
         await h.text("/start")
         self.assertIn("Выберите действие", h.screen_text())
 
-        # Переход в диалог создания поста
-        await h.callback("create_post")
+        # Переход в конструктор анонса: команда /new_wizard — тот же вход,
+        # что и «📍 Создать для площадки», но без площадки
+        await h.text("/new_wizard")
         self.assertTrue(
-            h.screen_text().startswith("Шаг 1 из 9"),
-            f"ожидался шаг визарда, получен: {h.screen_text()[:80]!r}",
+            h.screen_text().strip(),
+            f"конструктор должен отрисовать экран, получен: {h.screen_text()[:80]!r}",
         )
 
         # Состояние и ref экрана закреплены во временной БД
@@ -161,8 +168,10 @@ class MainInterfaceSmokeTests(unittest.TestCase):
             any(s.screen_message_id is not None for s in states),
             "ref экрана сохранён в user_states",
         )
-        # Прямая сеть не использовалась: все вызовы — FakeBot
-        self.assertEqual(h.dialog_state(), POST_CREATION, "диалог активен")
+        # Прямая сеть не использовалась: все вызовы — FakeBot;
+        # состояние ведёт ЕДИНЫЙ конструктор анонса (легаси-мастера нет)
+        state = h.dialog_state(name="announcement_wizard")
+        self.assertIsNotNone(state, "диалог конструктора активен")
 
 
 if __name__ == "__main__":

@@ -89,7 +89,8 @@ def main() -> int:
         "error_handlers": len(app.error_handlers),
         "database_url": database.SQLALCHEMY_DATABASE_URL,
         "db_tables": tables,
-        "db_has_drafts": "drafts" in tables,
+        "db_has_announcement_drafts": "announcement_drafts" in tables,
+        "db_has_legacy_drafts_backup": "legacy_drafts_backup" in tables,
         "db_has_user_states": "user_states" in tables,
     }
     print("SMOKE_REPORT=" + json.dumps(report, ensure_ascii=False))

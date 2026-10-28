@@ -78,6 +78,7 @@ from brick_types import (
     BRICK_TYPE_URL,
     BRICK_TYPES,
     BrickValidationError,
+    clean_brick_description,
     clean_brick_title,
     ensure_brick_type,
     parse_rules,
@@ -122,6 +123,7 @@ _TEXT_PHASES = frozenset(
     {
         "title_input",
         "code_input",
+        "description_input",
         "number_min_input",
         "number_max_input",
         "number_suffix_input",
@@ -180,7 +182,14 @@ def _page_value(value: object) -> int:
 
 
 def _empty_draft() -> dict:
-    return {"title": "", "code": "", "value_type": "", "rules": {}}
+    return {
+        "title": "",
+        "code": "",
+        # S5: инструкция автору анонса, видимая на экране вопроса.
+        "description": "",
+        "value_type": "",
+        "rules": {},
+    }
 
 
 def _new_create_state(*, page: int = 0, archive_page: int = 0) -> dict:
@@ -202,6 +211,9 @@ def _draft(state: dict) -> dict:
         draft["title"] = ""
     if not isinstance(draft.get("code"), str):
         draft["code"] = ""
+    if not isinstance(draft.get("description"), str):
+        # Старые черновики в `brick_sessions` не знают об описании (S5).
+        draft["description"] = ""
     if draft.get("value_type") not in BRICK_TYPES:
         draft["value_type"] = ""
     if not isinstance(draft.get("rules"), dict):
@@ -218,13 +230,15 @@ def _valid_wizard_state(state: dict) -> bool:
     draft = state.get("draft")
     if not isinstance(draft, dict):
         return False
-    if not isinstance(draft.get("title"), str) or not isinstance(
-        draft.get("code"), str
+    if (
+        not isinstance(draft.get("title"), str)
+        or not isinstance(draft.get("code"), str)
+        or not isinstance(draft.get("description"), str)
     ):
         return False
     value_type = draft.get("value_type")
     if (
-        phase not in {"title_input", "code_input", "type_select"}
+        phase not in {"title_input", "code_input", "description_input", "type_select"}
         and value_type not in BRICK_TYPES
     ):
         return False
@@ -343,6 +357,12 @@ def _button_title(brick) -> str:
 
 def _type_title(value_type: str) -> str:
     return TYPE_UI_TITLES.get(value_type, value_type)
+
+
+def _description_text(value: object) -> str:
+    """Описание для экранов: экранируется и переносится, без «дыр»."""
+    text = " ".join(str(value or "").split())
+    return text or "нет"
 
 
 def _format_number(value: object) -> str:
@@ -537,6 +557,7 @@ def _card_content(brick):
         f"🧱 <b>{_h(brick.title)}</b>\n\n"
         f"Обозначение: <code>[{_h(brick.code)}]</code>\n"
         f"Тип: {_h(_type_title(brick.value_type))}\n"
+        f"Описание: {_h(_description_text(brick.description))}\n"
         "Область: личная (видна только вам)\n"
         f"Статус: {state_label}\n"
         f"Настройки: {_h(_settings_text(brick.value_type, brick.rules))}\n\n"
@@ -1035,9 +1056,16 @@ def _proposal_content(
 def _edit_menu_content(state: dict):
     draft = _draft(state)
     value_type = draft.get("value_type") or ""
+    description = draft.get("description") or ""
     rows = [
         [InlineKeyboardButton("✏️ Название", callback_data="bk_edit_title")],
         [InlineKeyboardButton("🔤 Обозначение", callback_data="bk_edit_code")],
+        [
+            InlineKeyboardButton(
+                "📝 Описание: есть" if description else "📝 Добавить описание",
+                callback_data="bk_edit_description",
+            )
+        ],
     ]
     if value_type in {BRICK_TYPE_NUMBER, BRICK_TYPE_CHOICE}:
         rows.append(
@@ -1050,11 +1078,22 @@ def _edit_menu_content(state: dict):
         f"Название: {_h(draft.get('title') or '—')}\n"
         f"Обозначение: <code>[{_h(draft.get('code') or '—')}]</code>\n"
         f"Тип: {_h(_type_title(value_type))}\n"
+        f"Описание: {_h(_description_text(draft.get('description')))}\n"
         f"Настройки: {_h(_settings_text(value_type, draft.get('rules') or {}))}\n\n"
         "Тип после создания не меняется: для другого типа создайте новый "
         "кирпичик. Идентификатор сохраняется при любых изменениях."
     )
     return text, InlineKeyboardMarkup(rows)
+
+
+THREE_FIELDS_HINT = (
+    "Три поля кирпичика:\n"
+    "• <b>Название</b> — что человек видит в списках и на экране вопроса.\n"
+    "• <b>Обозначение</b> — короткая вставка <code>[код]</code> в шаблон "
+    "анонса.\n"
+    "• <b>Описание</b> — инструкция автору анонса: её видно при заполнении "
+    "поля."
+)
 
 
 def _title_input_content(state: dict):
@@ -1063,18 +1102,21 @@ def _title_input_content(state: dict):
         text = (
             "✏️ <b>Название кирпичика</b>\n\n"
             f"Сейчас: {_h(draft.get('title') or '—')}\n\n"
-            "Введите новое человекочитаемое название. Оно может повторять "
-            "названия других кирпичиков — однозначность обеспечивает "
-            "техническое обозначение."
+            "Введите новое человекочитаемое название — то, что человек видит "
+            "в списках и на экране вопроса. Оно может повторять названия "
+            "других кирпичиков: однозначность обеспечивает техническое "
+            "обозначение."
         )
     else:
         text = (
             "1️⃣ <b>Как назвать кирпичик?</b>\n\n"
             "Например: «Ведущий мероприятия», «Формат участия» или "
             "«Стоимость билета».\n\n"
-            "Название видно в списке и карточке. Техническое обозначение для "
-            "будущих шаблонов зададим отдельно."
+            "Название видно в списках и на экране вопроса — это то, что "
+            "прочитает человек, заполняющий анонс. Техническое обозначение и "
+            "описание зададим следующими шагами."
         )
+    text += "\n\n" + THREE_FIELDS_HINT
     return text, InlineKeyboardMarkup(
         [[InlineKeyboardButton("◀️ Назад", callback_data="bk_back")]]
     )
@@ -1099,9 +1141,9 @@ def _code_input_content(state: dict):
         "2️⃣ <b>Техническое обозначение</b>\n\n"
         f"{intro}\n\n"
         f"{current}"
-        "От 2 до 64 символов: буквы, цифры, «_» и «-». Без пробелов и "
-        "квадратных скобок. В шаблоне оно будет выглядеть как "
-        "<code>[обозначение]</code>.\n\n"
+        "Это короткая вставка <code>[код]</code>, которую автор шаблона "
+        "пишет в тексте анонса вместо самого значения. От 2 до 64 символов: "
+        "буквы, цифры, «_» и «-». Без пробелов и квадратных скобок.\n\n"
         "Если код уже занят, бот объяснит конфликт и попросит другой."
     )
     rows: list[list[InlineKeyboardButton]] = []
@@ -1118,11 +1160,33 @@ def _code_input_content(state: dict):
     return text, InlineKeyboardMarkup(rows)
 
 
+def _description_input_content(state: dict):
+    """Ввод описания: инструкция автору анонса, видимая на вопросе."""
+    draft = _draft(state)
+    current = draft.get("description") or ""
+    shown = f"Сейчас: {_h(_short(current, 200))}\n\n" if current else ""
+    text = (
+        "3️⃣ <b>Описание для автора анонса</b>\n\n"
+        f"{shown}"
+        "Напишите подсказку тому, кто будет заполнять это поле: что именно "
+        "указать и в каком виде. Например: «Имя и фамилия ведущего, без "
+        "должности» или «Цена в рублях, только число».\n\n"
+        "Описание видно на экране вопроса — над полем ввода. В текст "
+        "анонса оно не попадает и на шаблон не влияет.\n\n"
+        "Поле необязательное: без описания кирпичик работает как обычно."
+    )
+    rows: list[list[InlineKeyboardButton]] = [
+        [InlineKeyboardButton("⏭ Без описания", callback_data="bk_skip_description")]
+    ]
+    rows.append([InlineKeyboardButton("◀️ Назад", callback_data="bk_back")])
+    return text, InlineKeyboardMarkup(rows)
+
+
 def _type_select_content(state: dict):
     draft = _draft(state)
     current = draft.get("value_type") or ""
     lines = [
-        "3️⃣ <b>Выберите тип кирпичика</b>",
+        "4️⃣ <b>Выберите тип кирпичика</b>",
         "",
         "Тип определяет, какое значение будет допустимо в будущем. "
         "Уже сохранённый тип изменить нельзя.",
@@ -1255,6 +1319,7 @@ def _preview_content(state: dict):
         f"Название: {_h(title)}\n"
         f"Обозначение: <code>[{_h(code)}]</code>\n"
         f"Тип: {_h(_type_title(value_type))}\n"
+        f"Описание: {_h(_description_text(draft.get('description')))}\n"
         "Область: личная (видна только вам)\n"
         f"Настройки: {_h(_settings_text(value_type, draft.get('rules') or {}))}\n\n"
         "После сохранения кирпичик появится в вашем списке. В посты и "
@@ -1395,6 +1460,8 @@ async def _render_phase(
             text, keyboard = _title_input_content(state)
         elif phase == "code_input":
             text, keyboard = _code_input_content(state)
+        elif phase == "description_input":
+            text, keyboard = _description_input_content(state)
         elif phase == "type_select":
             text, keyboard = _type_select_content(state)
         elif phase == "number_settings":
@@ -2028,8 +2095,10 @@ async def handle_back(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             state.update(_new_hub(page=page, archive_page=archive_page))
     elif phase == "code_input":
         state["phase"] = "edit_menu" if state.get("mode") == "edit" else "title_input"
+    elif phase == "description_input":
+        state["phase"] = "edit_menu" if state.get("mode") == "edit" else "code_input"
     elif phase == "type_select":
-        state["phase"] = "code_input"
+        state["phase"] = "description_input"
     elif phase in {"number_settings", "choice_settings"}:
         state["phase"] = "edit_menu" if state.get("mode") == "edit" else "type_select"
     elif phase in {
@@ -2178,9 +2247,21 @@ async def handle_brick_text(update: Update, context: ContextTypes.DEFAULT_TYPE) 
                 else:
                     draft["code"] = available.code or validated
                     state["phase"] = (
-                        "edit_menu" if state.get("mode") == "edit" else "type_select"
+                        "edit_menu"
+                        if state.get("mode") == "edit"
+                        else "description_input"
                     )
                     cleanup = _failed_take(state)
+        elif phase == "description_input":
+            try:
+                draft["description"] = clean_brick_description(raw) or ""
+            except BrickValidationError as exc:
+                notice = str(exc)
+            else:
+                state["phase"] = (
+                    "edit_menu" if state.get("mode") == "edit" else "type_select"
+                )
+                cleanup = _failed_take(state)
         elif phase in {
             "number_min_input",
             "number_max_input",
@@ -2291,13 +2372,28 @@ async def handle_accept_code(
         )
         return
     draft["code"] = available.code or code
-    state["phase"] = "edit_menu" if state.get("mode") == "edit" else "type_select"
+    state["phase"] = "edit_menu" if state.get("mode") == "edit" else "description_input"
     await _render_phase(
         update,
         context,
         state,
         cleanup_ids=_failed_take(state),
     )
+
+
+async def handle_skip_description(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> None:
+    """«Без описания»: поле остаётся пустым, шаг идёт дальше без записи."""
+    state = load_brick_session(ctx.user(update).id)
+    if state is None or state.get("phase") != "description_input":
+        await _stale(update)
+        return
+    await ctx.query(update).answer()
+    draft = _draft(state)
+    draft["description"] = ""
+    state["phase"] = "edit_menu" if state.get("mode") == "edit" else "type_select"
+    await _render_phase(update, context, state, cleanup_ids=_failed_take(state))
 
 
 async def handle_type(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -2510,6 +2606,7 @@ async def handle_edit(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     state["draft"] = {
         "title": brick.title,
         "code": brick.code,
+        "description": brick.description or "",
         "value_type": brick.value_type,
         "rules": dict(brick.rules),
     }
@@ -2529,6 +2626,8 @@ async def handle_edit_field(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         state["phase"] = "title_input"
     elif data == "bk_edit_code":
         state["phase"] = "code_input"
+    elif data == "bk_edit_description":
+        state["phase"] = "description_input"
     elif data == "bk_edit_settings":
         draft = _draft(state)
         value_type = draft.get("value_type")
@@ -2574,6 +2673,7 @@ async def _handle_create_save(
                 title=draft.get("title") or "",
                 value_type=draft.get("value_type") or "",
                 rules=draft.get("rules") or {},
+                description=draft.get("description") or None,
             )
         except (BrickConflictError, BrickValidationError, BrickActorError) as exc:
             session.rollback()
@@ -2662,6 +2762,7 @@ async def _handle_edit_save(
                 code=draft.get("code") or "",
                 title=draft.get("title") or "",
                 rules=draft.get("rules") or {},
+                description=draft.get("description") or None,
             )
         except BrickValidationError as exc:
             session.rollback()
@@ -2985,8 +3086,9 @@ def bricks_handlers() -> list[BaseHandler]:
         CallbackQueryHandler(handle_edit, pattern=r"^bk_edit$"),
         CallbackQueryHandler(
             handle_edit_field,
-            pattern=r"^bk_edit_(?:title|code|settings)$|^bk_preview$",
+            pattern=(r"^bk_edit_(?:title|code|description|settings)$|^bk_preview$"),
         ),
+        CallbackQueryHandler(handle_skip_description, pattern=r"^bk_skip_description$"),
         CallbackQueryHandler(handle_change, pattern=r"^bk_change$"),
         CallbackQueryHandler(handle_save, pattern=r"^bk_save$"),
         CallbackQueryHandler(handle_archive, pattern=r"^bk_archive$"),

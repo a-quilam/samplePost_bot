@@ -16,16 +16,38 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from sqlalchemy import select
+from sqlalchemy import select, text
 from sqlalchemy.orm import Session, sessionmaker
 
 from base import Base
 from brick_types import rules_from_json
 from migrations import DEFAULT_MIGRATIONS, LATEST_VERSION, run_migrations
-from models import Brick, Draft, Place, PlaceName, UserState, utcnow
+from models import Brick, Place, PlaceName, UserState, utcnow
 from place_store import normalize_place_name
 from tests.stage19a_helpers import connect, make_engine, temp_db_path
 from user_store import get_or_create_user
+
+# Схема легаси-таблицы `drafts` (Stage 21): модели `Draft` больше нет (S5),
+# поэтому создаём и заполняем её сырым SQL, как её оставила бы старая база.
+LEGACY_DRAFTS_DDL = """
+    CREATE TABLE drafts (
+        id INTEGER NOT NULL PRIMARY KEY,
+        user_id INTEGER NOT NULL,
+        title VARCHAR(255),
+        date VARCHAR(50),
+        time_start VARCHAR(50),
+        time_end VARCHAR(50),
+        place_name VARCHAR(255),
+        place_url VARCHAR(255),
+        text TEXT,
+        contact VARCHAR(255),
+        image VARCHAR(255),
+        photos TEXT,
+        formats TEXT,
+        created_at DATETIME NOT NULL,
+        updated_at DATETIME
+    )
+"""
 
 
 def journal(path: str | Path) -> list[tuple[int, str]]:
@@ -79,6 +101,8 @@ class Stage22BCompatibilityTests(unittest.TestCase):
             if name not in {"brick_sessions", "brick_proposals"} | stage23_tables
         ]
         Base.metadata.create_all(bind=self.engine, tables=legacy_tables)
+        with self.engine.begin() as connection:
+            connection.execute(text(LEGACY_DRAFTS_DDL))
         self.Session = sessionmaker(bind=self.engine, expire_on_commit=False)
         self.session: Session = self.Session()
         self.addCleanup(self.session.close)
@@ -103,23 +127,24 @@ class Stage22BCompatibilityTests(unittest.TestCase):
                 created_at=utcnow(),
             )
         )
-        draft = Draft(
-            user_id=user.id,
-            title="Черновик до Stage 22B",
-            text="Описание",
-            image="photo-1",
-            photos='["photo-1"]',
-            formats='["Афиша"]',
-        )
         wip = UserState(
             user_id=user.id,
             chat_id=777,
             payload='{"current_step": 3, "data": {"title": "WIP"}}',
         )
-        self.session.add_all([draft, wip])
+        self.session.add(wip)
         self.session.commit()
-        draft_id = draft.id
         payload = wip.payload
+        with self.engine.begin() as connection:
+            connection.execute(
+                text(
+                    "INSERT INTO drafts (user_id, title, text, image, photos, "
+                    "formats, created_at) VALUES (:user_id, 'Черновик до "
+                    "Stage 22B', 'Описание', 'photo-1', '[\"photo-1\"]', "
+                    "'[\"Афиша\"]', :created_at)"
+                ),
+                {"user_id": user.id, "created_at": utcnow().isoformat(sep=" ")},
+            )
         # revision ещё нет: вставляем напрямую в схему 6.
         with self.engine.begin() as connection:
             connection.exec_driver_sql(
@@ -167,15 +192,21 @@ class Stage22BCompatibilityTests(unittest.TestCase):
         finally:
             backup_connection.close()
 
-        self.assertEqual(journal(self.path)[-1], (16, "announcement_draft_origin"))
+        self.assertEqual(journal(self.path)[-1], (17, "archive_legacy_drafts"))
+        # Миграция 17 переименовала легаси-таблицу: строка прежнего черновика
+        # читается из архива без потерь.
+        archived = scalar(
+            self.path,
+            "SELECT title, image, photos, formats FROM legacy_drafts_backup",
+        )
+        assert archived is not None
+        self.assertEqual(archived[0], "Черновик до Stage 22B")
+        self.assertEqual(archived[1], "photo-1")
+        self.assertEqual(archived[2], '["photo-1"]')
+        self.assertEqual(archived[3], '["Афиша"]')
         with self.Session() as session:
-            stored_draft = session.get(Draft, draft_id)
             stored_state = session.get(UserState, user.id)
-            assert stored_draft is not None and stored_state is not None
-            self.assertEqual(stored_draft.title, "Черновик до Stage 22B")
-            self.assertEqual(stored_draft.image, "photo-1")
-            self.assertEqual(stored_draft.photos, '["photo-1"]')
-            self.assertEqual(stored_draft.formats, '["Афиша"]')
+            assert stored_state is not None
             self.assertEqual(stored_state.payload, payload)
             brick = session.scalar(select(Brick).where(Brick.code == "старый_код"))
             assert brick is not None

@@ -73,8 +73,10 @@ def create_old_schema(path: str, *, ancient: bool = False) -> None:
 
     current: схема ровно как уходящая в прошлое (drafts с photos/formats/
     updated_at; user_states с payload).
-    ancient: совсем старая drafts без photos/formats/updated_at — проверяет
-    легаси-бэкфилл `_migrate`, который идёт после нумерованных миграций.
+    ancient: совсем старая drafts без photos/formats/updated_at. Легаси-
+    бэкфилл удалён вместе с мастером (S5), поэтому ancient проверяет
+    другое: миграция 17 переименовывает таблицу ЛЮБОЙ старой формы, а
+    `RENAME` сохраняет и колонки, и строки.
     """
     connection = sqlite3.connect(path)
     try:

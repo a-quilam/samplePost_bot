@@ -1,19 +1,18 @@
 # tests/test_stage13_migrations.py
 """
-Stage 13, §2: совместимость миграций со схемами прошлых версий.
+Stage 13, §2 (актуализировано в Poster 2.0 S5): совместимость миграций
+со схемой прошлых версий.
 
 Проверяется ТОЛЬКО на временных файловых базах (настоящая
 Poster/post_bot.db не затрагивается):
 
-- init-последовательность (create_all + _migrate) на старой схеме drafts
-  без photos/updated_at/formats и без таблицы user_states;
-- существующие черновики переживают миграцию без изменений;
-- повторное применение миграций идемпотентно, user_states с WIP-снимком
-  сохраняется;
-- Draft.updated_at: у легаси-записей NULL (норма: колонка informational),
-  у новых записей заполняется моделью; форматирование (Draft.formats) пишется
-  и читается после миграции; возраст записей на миграции не влияет
-  (бессрочное хранение, Stage 14).
+- init-последовательность (run_migrations + create_all) на старой схеме
+  `drafts` без photos/updated_at/formats;
+- миграция 17 переименовывает `drafts` в `legacy_drafts_backup` без DROP:
+  строки прежних черновиков остаются читаемыми, колонки сохраняются;
+- `user_states` (живая инфраструктура экрана) создаётся на старой базе и
+  переживает повторные запуски; `create_all` не воскрешает `drafts`;
+- повторное применение миграций идемпотентно.
 """
 
 import unittest
@@ -23,8 +22,8 @@ try:
     from sqlalchemy.orm import sessionmaker
 
     from base import Base
-    from database import _migrate
-    from models import Draft, UserState, get_draft_formats
+    from migrations import run_migrations
+    from models import UserState
 
     INTEGRATION_IMPORT_ERROR = None
 except Exception as e:  # noqa: BLE001 — причина попадает в сообщение пропуска
@@ -61,7 +60,7 @@ LEGACY_INSERT = """
     f"миграционное окружение недоступно: {INTEGRATION_IMPORT_ERROR}",
 )
 class LegacySchemaMigrationsTests(unittest.TestCase):
-    """Старая схема → init (create_all + _migrate): данные сохранены."""
+    """Старая схема → init: данные сохранены в архиве, живые таблицы созданы."""
 
     def setUp(self):
         import tempfile
@@ -78,41 +77,37 @@ class LegacySchemaMigrationsTests(unittest.TestCase):
 
     def _init_like_production(self) -> None:
         """Ровно то, что делает init_db() при старте бота."""
+        run_migrations(self.engine)
         Base.metadata.create_all(bind=self.engine)
-        _migrate(self.engine)
 
-    def test_init_on_legacy_db_preserves_drafts(self):
+    def test_init_on_legacy_db_archives_drafts(self):
         self._init_like_production()
 
         inspector = inspect(self.engine)
         tables = set(inspector.get_table_names())
-        self.assertIn("drafts", tables, "старая таблица сохранена")
+        self.assertNotIn("drafts", tables, "легаси-таблица переименована")
+        self.assertIn("legacy_drafts_backup", tables, "архив на месте")
         self.assertIn("user_states", tables, "user_states создана на старой БД")
 
-        columns = {c["name"] for c in inspector.get_columns("drafts")}
-        for column in ("photos", "updated_at", "formats"):
-            self.assertIn(column, columns, f"колонка {column} добавлена")
-
+        # RENAME сохраняет колонки и строки: данные читаются как есть
+        columns = {c["name"] for c in inspector.get_columns("legacy_drafts_backup")}
+        self.assertTrue(
+            {"title", "text", "image", "created_at"} <= columns,
+            f"колонки прежнего черновика сохранены: {sorted(columns)}",
+        )
         with self.engine.connect() as connection:
             row = connection.execute(
                 text(
-                    "SELECT title, text, image, created_at, photos, "
-                    "formats, updated_at FROM drafts WHERE id = 1"
+                    "SELECT title, text, image, created_at "
+                    "FROM legacy_drafts_backup WHERE id = 1"
                 )
             ).fetchone()
         self.assertEqual(row.title, "Старый пост")
         self.assertEqual(row.text, "Текст старого поста")
         self.assertEqual(row.image, "old_file")
         self.assertTrue(row.created_at, "created_at не тронут")
-        self.assertIsNone(row.photos, "photos — NULL, данные не записываются")
-        self.assertIsNone(row.formats, "formats — NULL, текст не переписан")
-        self.assertIsNone(row.updated_at, "updated_at — NULL у легаси-записи")
 
-        # Легаси-черновик читается общими хелперами без ошибок
-        legacy = Draft(title=row.title, image=row.image, formats=row.formats)
-        self.assertEqual(get_draft_formats(legacy), {})
-
-    def test_repeated_migration_keeps_user_states_and_drafts(self):
+    def test_repeated_migration_keeps_user_states_and_archive(self):
         self._init_like_production()
         session_factory = sessionmaker(bind=self.engine)
 
@@ -123,7 +118,7 @@ class LegacySchemaMigrationsTests(unittest.TestCase):
                     user_id=7,
                     chat_id=777,
                     screen_message_id=42,
-                    payload='{"title": "В работе", "current_step": 3}',
+                    payload='{"screen": "main"}',
                 )
             )
             session.commit()
@@ -139,64 +134,19 @@ class LegacySchemaMigrationsTests(unittest.TestCase):
             state = session.get(UserState, 7)
             self.assertIsNotNone(state, "user_states пережила миграции")
             self.assertEqual(state.screen_message_id, 42)
-            self.assertIn("В работе", state.payload)
-            draft = session.get(Draft, 1)
-            self.assertIsNotNone(draft)
-            self.assertEqual(draft.title, "Старый пост")
-            self.assertEqual(draft.photos, None)
+            self.assertIn("main", state.payload)
         finally:
             session.close()
 
-    def test_new_draft_after_migration_has_updated_at_and_formats(self):
-        self._init_like_production()
-        session_factory = sessionmaker(bind=self.engine)
+        tables = set(inspect(self.engine).get_table_names())
+        self.assertIn("legacy_drafts_backup", tables, "архив не переименован дважды")
+        self.assertNotIn("drafts", tables, "create_all не воскрешает легаси-таблицу")
 
-        session = session_factory()
-        try:
-            session.add(
-                Draft(
-                    user_id=111,
-                    title="Новый пост",
-                    formats='{"title": "<b>Новый</b>"}',
-                )
-            )
-            session.commit()
-            session.expire_all()
-            draft = session.query(Draft).filter(Draft.title == "Новый пост").one()
-            self.assertIsNotNone(
-                draft.updated_at, "модель заполняет updated_at для новых записей"
-            )
-            self.assertIsNotNone(draft.created_at)
-            self.assertEqual(get_draft_formats(draft), {"title": "<b>Новый</b>"})
-        finally:
-            session.close()
-
-    def test_migration_preserves_rows_of_any_age(self):
-        """Stage 14: бессрочное хранение — возраст записи не важен миграциям."""
-        self._init_like_production()
-        with self.engine.begin() as connection:
-            # Возрастной черновик: created_at давно, updated_at NULL
-            connection.execute(
-                text(
-                    "INSERT INTO drafts (id, user_id, title, created_at) "
-                    "VALUES (2, 111, 'Очень старый', '2026-01-01 00:00:00')"
-                )
-            )
-
-        # Повторные старты (рестарты) — ничего не удаляется по возрасту
-        self._init_like_production()
-        self._init_like_production()
-
-        session = sessionmaker(bind=self.engine)()
-        try:
-            titles = {d.title for d in session.query(Draft).all()}
-        finally:
-            session.close()
-        self.assertEqual(
-            titles,
-            {"Старый пост", "Очень старый"},
-            "миграции не удаляют записи по возрасту (TTL отключён)",
-        )
+        with self.engine.connect() as connection:
+            count = connection.execute(
+                text("SELECT COUNT(*) FROM legacy_drafts_backup")
+            ).scalar()
+        self.assertEqual(count, 1, "повторный запуск не дублирует строки архива")
 
 
 if __name__ == "__main__":

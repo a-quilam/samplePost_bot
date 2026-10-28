@@ -15,14 +15,18 @@ from sqlalchemy import func, select
 from telegram.error import BadRequest
 
 try:
-    from models import Draft, Place, PlaceName, Template, User
+    from announcement_store import list_announcement_drafts
+    from brick_store import create_personal_brick
+    from models import AnnouncementDraft, Place, PlaceName, Template, User
     from place_state import load_place_session, save_place_session
     from place_store import normalize_place_name
+    from template_store import create_personal_template
     from tests.integration_harness import (
+        DEFAULT_USER_ID,
         HARNESS_IMPORT_ERROR,
-        goto_preview,
         scenario_test,
     )
+    from user_store import get_or_create_user
 
     INTEGRATION_IMPORT_ERROR = HARNESS_IMPORT_ERROR
 except Exception as e:  # noqa: BLE001 — причина попадает в сообщение пропуска
@@ -357,7 +361,11 @@ class PlaceCreationFlowTests(unittest.TestCase):
         self.assertIn("Новый Театр", h.screen_text())
         session = h.session_factory()
         try:
-            self.assertEqual(session.scalar(select(func.count()).select_from(Draft)), 0)
+            # Поток мест не создаёт анонсов: конструктор живёт отдельно.
+            self.assertEqual(
+                session.scalar(select(func.count()).select_from(AnnouncementDraft)),
+                0,
+            )
         finally:
             session.close()
         state = load_place_session(h.user_id)
@@ -822,72 +830,140 @@ class PlacesReliabilityTests(unittest.TestCase):
     f"интеграционное окружение недоступно: {INTEGRATION_IMPORT_ERROR}",
 )
 class PlacesIsolationTests(unittest.TestCase):
+    """
+    Поток мест изолирован от конструктора анонса (Poster 2.0 S5).
+
+    Легаси-WIP и черновики девятишагового мастера удалены; проверяется
+    сохранность живого анонса: значения, фото и запись `announcement_drafts`
+    не меняются, анонс можно продолжить после ухода в места.
+    """
+
+    @staticmethod
+    def _seed_announcement(h) -> tuple[int, str]:
+        """Личный шаблон и начатый анонс; возвращает (draft_id, title)."""
+        title = "Анонс до мест"
+        with h.session_factory() as session:
+            get_or_create_user(session, DEFAULT_USER_ID, username="places")
+            create_personal_brick(
+                session,
+                actor_telegram_user_id=DEFAULT_USER_ID,
+                code="ttl",
+                title="Заголовок",
+                value_type="short_text",
+                rules={},
+            )
+            template = create_personal_template(
+                session,
+                actor_telegram_user_id=DEFAULT_USER_ID,
+                name="Для мест",
+                header="",
+                body="[ttl]",
+                footer="",
+            )
+            session.commit()
+            template_id = template.template_id
+        return template_id, title
+
+    async def _start_announcement(self, h) -> int:
+        template_id, title = self._seed_announcement(h)
+        await h.text("/start")
+        await h.callback(f"tp_pick:{template_id}")
+        await h.text(title)
+        with h.session_factory() as session:
+            drafts = list_announcement_drafts(
+                session, actor_telegram_user_id=DEFAULT_USER_ID
+            )
+        self.assertEqual(len(drafts), 1, "анонс не создан")
+        return drafts[0].draft_id
+
     @scenario_test
-    async def test_place_flow_does_not_touch_existing_draft_wip_or_photos(self, h):
-        await goto_preview(h, title="Черновик до мест")
-        await h.callback("save_draft")
-        drafts_before = h.drafts()
-        self.assertEqual(len(drafts_before), 1)
+    async def test_place_flow_does_not_touch_existing_announcement(self, h):
+        draft_id = await self._start_announcement(h)
+        with h.session_factory() as session:
+            before = session.get(AnnouncementDraft, draft_id)
+            before_values = before.revision
+            before_stage = before.stage
 
         await open_hub(h)
         await h.callback("pl_all")
         await h.callback("pl_add")
-        await h.text("Место рядом с черновиком")
+        await h.text("Место рядом с анонсом")
         await h.callback("pl_create_confirm")
         await h.callback("main_menu")
 
-        drafts_after = h.drafts()
-        self.assertEqual(len(drafts_after), 1)
-        self.assertEqual(drafts_after[0].title, "Черновик до мест")
-        self.assertEqual(drafts_after[0].photos, drafts_before[0].photos)
+        with h.session_factory() as session:
+            after = session.get(AnnouncementDraft, draft_id)
+            self.assertIsNotNone(after, "анонс не удалён потоком мест")
+            self.assertEqual(after.revision, before_values)
+            self.assertEqual(after.stage, before_stage)
+            self.assertEqual(
+                len(
+                    list_announcement_drafts(
+                        session, actor_telegram_user_id=DEFAULT_USER_ID
+                    )
+                ),
+                1,
+                "дублей анонса не появилось",
+            )
 
     @scenario_test
-    async def test_place_flow_does_not_change_wip_and_continue_still_works(self, h):
-        await h.start_dialog()
-        await h.text("WIP до мест")
-        await h.restart()
-        await h.text("/start")
-        self.assertIn("Продолжить пост", str(h.screen_buttons()))
-
-        await h.callback("places")
+    async def test_place_flow_keeps_announcement_continuable(self, h):
+        draft_id = await self._start_announcement(h)
+        await open_hub(h)
         await h.callback("pl_search")
+        await h.text("Дом")
         await h.callback("main_menu")
 
-        self.assertIn("Продолжить пост", str(h.screen_buttons()))
-        await h.callback("restore_wip")
-        self.assertEqual(h.user_data().get("title"), "WIP до мест")
+        await h.text("/start")
+        await h.callback("my_announcements")
+        await h.callback(f"aw_open:{draft_id}")
+        # Одиночное поле уже заполнено: анонс открывается обзором, а не
+        # вопросом — данные не потеряны.
+        self.assertIn("Обзор анонса", h.screen_text())
+        self.assertIn("Анонс до мест", h.screen_text())
         self.assertEqual(place_count(h), 0)
 
     @scenario_test
     async def test_place_text_does_not_intercept_active_wizard(self, h):
-        await h.start_dialog()
+        await self._start_announcement(h)
+        # Шаг фото: текст не должен уходить в поиск мест.
+        await h.callback(
+            [
+                data
+                for _label, data in h.screen_buttons()
+                if data and data.startswith("aw_photo_none")
+            ][0]
+        )
+        before = place_count(h)
         await h.text("Кофейня «Дом»")
 
-        self.assertEqual(place_count(h), 0)
-        self.assertIn("Шаг 2 из 9", h.screen_text())
+        self.assertEqual(place_count(h), before, "место не создано из текста")
+        self.assertIn("Готовый анонс отправлен", h.screen_text())
 
     @scenario_test
-    async def test_create_post_during_place_flow_clears_place_context(self, h):
+    async def test_create_post_does_not_start_legacy_wizard_or_clear_place(self, h):
+        """S5: `/create_post` не запускает мастер и не сбрасывает контекст мест."""
         await open_hub(h)
         await h.callback("pl_search")
         await h.text("/create_post")
 
-        self.assertIsNone(load_place_session(h.user_id))
-        self.assertIn("Шаг 1 из 9", h.screen_text())
-        await h.text("Заголовок поста")
-        self.assertIn("Шаг 2 из 9", h.screen_text())
+        self.assertIsNotNone(load_place_session(h.user_id), "сессия места сохранена")
+        self.assertIsNone(h.dialog_state(name="announcement_wizard"))
+        self.assertNotIn("Шаг 1 из 9", h.screen_text())
         self.assertEqual(place_count(h), 0)
 
     @scenario_test
-    async def test_places_during_wizard_saves_wip_and_leaves_dialog(self, h):
-        await h.start_dialog()
-        await h.text("Пост перед местами")
+    async def test_places_during_wizard_leaves_dialog_and_keeps_announcement(self, h):
+        draft_id = await self._start_announcement(h)
 
         await h.callback("places")
-        self.assertIsNone(h.dialog_state())
+        self.assertIsNone(h.dialog_state(name="announcement_wizard"))
         self.assertIn("📍 Места", h.screen_text())
-        self.assertEqual(len(h.drafts()), 1)
-        self.assertEqual(h.drafts()[0].title, "Пост перед местами")
+        with h.session_factory() as session:
+            drafts = list_announcement_drafts(
+                session, actor_telegram_user_id=DEFAULT_USER_ID
+            )
+        self.assertEqual([draft.draft_id for draft in drafts], [draft_id])
 
 
 if __name__ == "__main__":  # pragma: no cover

@@ -48,10 +48,8 @@ try:
     import handlers.admin as admin_module
     import handlers.announcement_wizard as announcement_wizard_module
     import handlers.bricks as bricks_module
-    import handlers.drafts as drafts_module
     import handlers.main_menu as main_menu_module
     import handlers.places as places_module
-    import handlers.post_creation as post_creation_module
     import handlers.templates as templates_module
     import handlers.user_tracking as user_tracking_module
     import handlers.wizard_live as wizard_live_module
@@ -60,9 +58,8 @@ try:
     import utils.parsers as parsers_module
     import utils.screen as screen_module
     from base import Base
-    from handlers.post_creation import POST_STEPS
     from migrations import run_migrations
-    from models import Draft, UserState
+    from models import UserState
 
     HARNESS_IMPORT_ERROR = None
 except Exception as e:  # noqa: BLE001 — причина попадает в сообщение пропуска
@@ -488,8 +485,6 @@ class Harness:
 
         # Патчим внешнюю границу «база данных» во всех потребителях
         self._orig_session_local = (
-            post_creation_module.SessionLocal,
-            drafts_module.SessionLocal,
             screen_module.SessionLocal,
             places_module.SessionLocal,
             place_state_module.SessionLocal,
@@ -504,8 +499,6 @@ class Harness:
             announcement_wizard_module.SessionLocal,
             wizard_live_module.SessionLocal,
         )
-        post_creation_module.SessionLocal = self.session_factory
-        drafts_module.SessionLocal = self.session_factory
         screen_module.SessionLocal = self.session_factory
         places_module.SessionLocal = self.session_factory
         place_state_module.SessionLocal = self.session_factory
@@ -567,21 +560,19 @@ class Harness:
     async def close(self) -> None:
         if self.app is not None:
             await self.app.shutdown()
-        post_creation_module.SessionLocal = self._orig_session_local[0]
-        drafts_module.SessionLocal = self._orig_session_local[1]
-        screen_module.SessionLocal = self._orig_session_local[2]
-        places_module.SessionLocal = self._orig_session_local[3]
-        place_state_module.SessionLocal = self._orig_session_local[4]
-        admin_module.SessionLocal = self._orig_session_local[5]
-        admin_state_module.SessionLocal = self._orig_session_local[6]
-        main_menu_module.SessionLocal = self._orig_session_local[7]
-        user_tracking_module.SessionLocal = self._orig_session_local[8]
-        bricks_module.SessionLocal = self._orig_session_local[9]
-        brick_state_module.SessionLocal = self._orig_session_local[10]
-        template_state_module.SessionLocal = self._orig_session_local[11]
-        templates_module.SessionLocal = self._orig_session_local[12]
-        announcement_wizard_module.SessionLocal = self._orig_session_local[13]
-        wizard_live_module.SessionLocal = self._orig_session_local[14]
+        screen_module.SessionLocal = self._orig_session_local[0]
+        places_module.SessionLocal = self._orig_session_local[1]
+        place_state_module.SessionLocal = self._orig_session_local[2]
+        admin_module.SessionLocal = self._orig_session_local[3]
+        admin_state_module.SessionLocal = self._orig_session_local[4]
+        main_menu_module.SessionLocal = self._orig_session_local[5]
+        user_tracking_module.SessionLocal = self._orig_session_local[6]
+        bricks_module.SessionLocal = self._orig_session_local[7]
+        brick_state_module.SessionLocal = self._orig_session_local[8]
+        template_state_module.SessionLocal = self._orig_session_local[9]
+        templates_module.SessionLocal = self._orig_session_local[10]
+        announcement_wizard_module.SessionLocal = self._orig_session_local[11]
+        wizard_live_module.SessionLocal = self._orig_session_local[12]
         errors_module._last_error_notice.clear()
         errors_module._last_error_notice.update(self._orig_error_notice)
         self.engine.dispose()
@@ -826,16 +817,6 @@ class Harness:
 
     # —— БД (временная) ——
 
-    def drafts(self, *, user_id: int | None = None) -> list:
-        session = self.session_factory()
-        try:
-            query = session.query(Draft)
-            if user_id is not None:
-                query = query.filter(Draft.user_id == user_id)
-            return query.order_by(Draft.id).all()
-        finally:
-            session.close()
-
     def user_states(self) -> list:
         """Все строки таблицы user_states (экран + WIP-снимки)."""
         session = self.session_factory()
@@ -847,23 +828,8 @@ class Harness:
     # —— удобные последовательности ——
 
     async def start_dialog(self) -> None:
-        """«✏️ Создать пост» → активный диалог, шаг 1."""
-        await self.text("✏️ Создать пост")
-
-    async def goto_step(self, index: int) -> None:
-        """Начинает диалог и пропускает шаги до index (0-based)."""
-        await self.start_dialog()
-        for _ in range(index):
-            await self.text("Пропустить")
-
-
-async def goto_preview(h: Harness, *, title: str = "Заголовок для превью") -> None:
-    """Доводит диалог до превью: заголовок + пропуски остальных полей."""
-    await h.start_dialog()
-    await h.text(title)
-    for _ in range(len(POST_STEPS) - 2):
-        await h.text("Пропустить")
-    await h.text("Пропустить")  # шаг «Изображение» → сразу превью
+        """Открывает единый конструктор анонса из меню."""
+        await self.callback("pick_place")
 
 
 _T = TypeVar("_T", bound=Callable[..., Coroutine[Any, Any, None]])

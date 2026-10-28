@@ -269,6 +269,26 @@ def clean_brick_title(raw: object) -> str:
     return normalized
 
 
+def clean_brick_description(raw: object | None) -> str | None:
+    """
+    Необязательное пояснение автора кирпичика (Poster 2.0 S5).
+
+    Описание — инструкция автору анонса: она видна на экране вопроса, но не
+    является частью шаблона и никогда не подставляется в текст анонса.
+    Пустая строка/`None` означают «описания нет» (в БД `NULL`). Многострочный
+    текст сохраняется: переносы строк схлопываются только в конце, внутренние
+    пустые строки остаются (это абзацы инструкции).
+    """
+    if raw is None:
+        return None
+    text = _require_text(raw, what="Описание кирпичика")
+    normalized = unicodedata.normalize("NFKC", text).replace("\r\n", "\n")
+    normalized = normalized.replace("\r", "\n").strip()
+    if not normalized:
+        return None
+    return normalized
+
+
 def ensure_brick_type(value_type: object) -> str:
     """Проверяет, что тип входит в закрытый каталог Stage 22A."""
     if value_type not in BRICK_TYPES:

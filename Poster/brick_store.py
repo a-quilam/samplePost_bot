@@ -48,6 +48,7 @@ from brick_types import (
     BrickValueResult,
     BrickValueStatus,
     SystemBrickDefinition,
+    clean_brick_description,
     clean_brick_title,
     ensure_brick_source,
     ensure_brick_type,
@@ -115,6 +116,9 @@ class BrickDefinition:
     created_by_user_id: int | None
     created_at: datetime
     updated_at: datetime | None
+    # Poster 2.0 S5: инструкция автору анонса (`NULL` = описания нет).
+    # Поле не участвует в шаблоне и не попадает в текст анонса.
+    description: str | None = None
 
     @property
     def is_active(self) -> bool:
@@ -184,6 +188,7 @@ def _snapshot(row: Brick) -> BrickDefinition:
         created_by_user_id=row.created_by_user_id,
         created_at=row.created_at,
         updated_at=row.updated_at,
+        description=row.description,
     )
 
 
@@ -783,9 +788,11 @@ def _insert_brick(
     rules: Mapping[str, object] | str | None,
     place_id: int | None,
     owner_user_id: int | None,
+    description: object | None = None,
 ) -> BrickDefinition:
     canonical_code = validate_brick_code(code)
     cleaned_title = clean_brick_title(title)
+    cleaned_description = clean_brick_description(description)
     checked_type = ensure_brick_type(value_type)
     checked_source = ensure_brick_source(source)
     validated_rules = parse_rules(checked_type, rules)
@@ -809,6 +816,7 @@ def _insert_brick(
         place_id=place_id,
         owner_user_id=owner_user_id,
         rules_json=rules_to_json(checked_type, validated_rules),
+        description=cleaned_description,
         status=BRICK_STATUS_ACTIVE,
         created_by_user_id=actor.id,
         created_at=now,
@@ -839,6 +847,7 @@ def create_personal_brick(
     value_type: str,
     source: str = BRICK_SOURCE_ASK,
     rules: Mapping[str, object] | str | None = None,
+    description: object | None = None,
 ) -> BrickDefinition:
     """
     Создаёт личный кирпичик действующего пользователя.
@@ -859,6 +868,7 @@ def create_personal_brick(
         rules=rules,
         place_id=None,
         owner_user_id=actor.id,
+        description=description,
     )
 
 
@@ -872,6 +882,7 @@ def create_place_brick(
     value_type: str,
     source: str = BRICK_SOURCE_ASK,
     rules: Mapping[str, object] | str | None = None,
+    description: object | None = None,
 ) -> BrickDefinition:
     """Создаёт кирпичик места; нужно быть админом этого места или суперадмином."""
     actor = _require_actor_user(session, actor_telegram_user_id)
@@ -892,6 +903,7 @@ def create_place_brick(
         rules=rules,
         place_id=place_id,
         owner_user_id=None,
+        description=description,
     )
 
 
@@ -904,6 +916,7 @@ def create_system_brick(
     value_type: str,
     source: str = BRICK_SOURCE_ASK,
     rules: Mapping[str, object] | str | None = None,
+    description: object | None = None,
 ) -> BrickDefinition:
     """
     Минимальный контракт контролируемого создания системного кирпичика.
@@ -927,6 +940,7 @@ def create_system_brick(
         rules=rules,
         place_id=None,
         owner_user_id=None,
+        description=description,
     )
 
 
@@ -1016,13 +1030,15 @@ def update_personal_brick(
     code: object,
     title: object,
     rules: Mapping[str, object] | str | None,
+    description: object | None = None,
 ) -> BrickMutationResult:
     """
-    Меняет название, код и допустимые настройки личного кирпичика.
+    Меняет название, код, описание и допустимые настройки личного кирпичика.
 
     Тип не является параметром и не может измениться. `brick_id` сохраняется.
     При несовпадении ревизии возвращается `stale`, при занятом коде —
-    `conflict`; обе операции не пишут частичных данных.
+    `conflict`; обе операции не пишут частичных данных. `description=None`
+    означает «описания нет»: пустая строка сохраняется как `NULL`.
     """
     actor = _require_actor_user(session, actor_telegram_user_id)
     row = _owned_personal_brick(session, actor, brick_id)
@@ -1052,6 +1068,7 @@ def update_personal_brick(
 
     canonical_code = validate_brick_code(code)
     cleaned_title = clean_brick_title(title)
+    cleaned_description = clean_brick_description(description)
     validated_rules = parse_rules(row.value_type, rules)
     availability = check_code_availability(
         session,
@@ -1070,6 +1087,7 @@ def update_personal_brick(
     values = {
         "code": canonical_code,
         "title": cleaned_title,
+        "description": cleaned_description,
         "rules_json": rules_to_json(row.value_type, validated_rules),
     }
     try:

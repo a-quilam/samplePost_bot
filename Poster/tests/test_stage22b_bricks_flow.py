@@ -23,6 +23,7 @@ from brick_store import (
 )
 from brick_types import BRICK_TYPES
 from models import Brick, User
+from place_store import create_place
 from tests.integration_harness import (
     HARNESS_IMPORT_ERROR,
     scenario_test,
@@ -77,6 +78,7 @@ class BricksUiTests(unittest.TestCase):
         title: str,
         *,
         code: str | None = None,
+        description: str | None = None,
         **kwargs,
     ) -> None:
         await h.callback("bk_create", **kwargs)
@@ -85,6 +87,11 @@ class BricksUiTests(unittest.TestCase):
             await h.callback("bk_accept_code", **kwargs)
         else:
             await h.text(code, **kwargs)
+        # S5: между обозначением и типом спрашивается описание для автора.
+        if description is None:
+            await h.callback("bk_skip_description", **kwargs)
+        else:
+            await h.text(description, **kwargs)
 
     async def create_simple(
         self,
@@ -154,6 +161,8 @@ class BricksUiTests(unittest.TestCase):
         title_message_id = title_update.message.message_id
         self.assertIn("[ведущий_мероприятия]", h.screen_text())
         await h.callback("bk_accept_code")
+        self.assertIn("Описание для автора анонса", h.screen_text())
+        await h.callback("bk_skip_description")
         type_callbacks = [
             data
             for _, data in h.screen_buttons()
@@ -248,6 +257,7 @@ class BricksUiTests(unittest.TestCase):
         await h.text("a")
         self.assertIn("от 2 до 64", h.screen_text())
         await h.text("новая_цена")
+        await h.callback("bk_skip_description")
         await h.callback("bk_type:short_text")
         await h.callback("bk_save")
         rows = self.personal_bricks(h)
@@ -259,6 +269,7 @@ class BricksUiTests(unittest.TestCase):
         await h.text("Цена")
         self.assertIn("[цена_2]", h.screen_text())
         await h.callback("bk_accept_code")
+        await h.callback("bk_skip_description")
         await h.callback("bk_type:short_text")
         await h.callback("bk_save")
         self.assertEqual(len(self.personal_bricks(h)), 3)
@@ -269,6 +280,7 @@ class BricksUiTests(unittest.TestCase):
         await h.callback("bk_create")
         await h.text("Стоимость")
         await h.text("стоимость")
+        await h.callback("bk_skip_description")
         await h.callback("bk_type:number")
         await h.callback("bk_num:integer")
         await h.callback("bk_num:set_min")
@@ -290,6 +302,7 @@ class BricksUiTests(unittest.TestCase):
         await h.text("Стоимость билета")
         self.assertIn("Техническое обозначение", h.screen_text())
         await h.callback("bk_accept_code")
+        await h.callback("bk_skip_description")
         self.assertIn("Выберите тип", h.screen_text())
         self.assertIn("Сейчас выбран: <b>Число</b>", h.screen_text())
         await h.callback("bk_type:number")
@@ -312,6 +325,7 @@ class BricksUiTests(unittest.TestCase):
         await h.callback("bk_create")
         await h.text("Формат")
         await h.text("формат")
+        await h.callback("bk_skip_description")
         await h.callback("bk_type:choice")
         await h.callback("bk_choice_done")
         self.assertIn("Добавьте хотя бы один вариант", h.screen_text())
@@ -479,6 +493,7 @@ class BricksUiTests(unittest.TestCase):
         await h.callback("bk_create")
         title_update = await h.text("Временное название")
         code_update = await h.text("временный_код")
+        description_update = await h.text("Временное описание")
         await h.callback("bk_type:short_text")
         self.assertIn("Проверьте кирпичик", h.screen_text())
         await h.callback("bk_cancel")
@@ -487,6 +502,7 @@ class BricksUiTests(unittest.TestCase):
         self.assertEqual(self.brick_rows(h), [])
         self.assertIn(title_update.message.message_id, h.deleted_ids())
         self.assertIn(code_update.message.message_id, h.deleted_ids())
+        self.assertIn(description_update.message.message_id, h.deleted_ids())
         state = load_brick_session(h.user_id)
         assert state is not None
         self.assertEqual(state["phase"], "hub")
@@ -502,11 +518,58 @@ class BricksUiTests(unittest.TestCase):
         self.assertIn("Техническое обозначение", h.screen_text())
         self.assertIn("[после_рестарта]", h.screen_text())
         await h.callback("bk_accept_code")
+        await h.callback("bk_skip_description")
         await h.callback("bk_type:short_text")
         await h.callback("bk_save")
         rows = self.personal_bricks(h)
         self.assertEqual(len(rows), 1)
         self.assertEqual(rows[0].code, "после_рестарта")
+
+    @scenario_test
+    async def test_description_is_asked_stored_and_editable(self, h) -> None:
+        """S5 п.5: описание — инструкция автору, видимая на вопросе."""
+        await h.text("/bricks")
+        await h.callback("bk_create")
+        self.assertIn("Название видно в списках", h.screen_text())
+        await h.text("Ведущий")
+        self.assertIn("вставка <code>[код]</code>", h.screen_text())
+        await h.text("ведущий")
+        self.assertIn("Описание для автора анонса", h.screen_text())
+        self.assertIn(("⏭ Без описания", "bk_skip_description"), h.screen_buttons())
+        await h.text("Имя ведущего & <без должности>")
+        self.assertIn("Выберите тип", h.screen_text())
+        await h.callback("bk_type:short_text")
+        self.assertIn("Проверьте кирпичик", h.screen_text())
+        self.assertIn("&amp; &lt;без должности&gt;", h.screen_text())
+        await h.callback("bk_save")
+        brick = self.brick_rows(h)[0]
+        # Описание хранится дословно, но экран экранирует его целиком.
+        self.assertEqual(brick.description, "Имя ведущего & <без должности>")
+        self.assertNotIn("& <без должности>", h.screen_text())
+
+        await h.callback(f"bk_open:{brick.id}")
+        self.assertIn(
+            "Описание: Имя ведущего &amp; &lt;без должности&gt;", h.screen_text()
+        )
+        await h.callback("bk_edit")
+        self.assertIn(("📝 Описание: есть", "bk_edit_description"), h.screen_buttons())
+        await h.callback("bk_edit_description")
+        await h.text("Только имя")
+        self.assertIn("Изменить кирпичик", h.screen_text())
+        await h.callback("bk_preview")
+        await h.callback("bk_save")
+        updated = self.brick_rows(h)[0]
+        self.assertEqual(updated.description, "Только имя")
+        self.assertEqual(updated.id, brick.id)
+
+        # «Без описания» очищает поле и не ломает шаг.
+        await h.callback("bk_edit")
+        await h.callback("bk_edit_description")
+        await h.callback("bk_skip_description")
+        await h.callback("bk_preview")
+        self.assertIn("Описание: нет", h.screen_text())
+        await h.callback("bk_save")
+        self.assertIsNone(self.brick_rows(h)[0].description)
 
     @scenario_test
     async def test_navigation_and_cancel_discard_unfinished_draft(self, h) -> None:
@@ -531,7 +594,17 @@ class BricksUiTests(unittest.TestCase):
 
     @scenario_test
     async def test_post_and_brick_flows_do_not_capture_each_other(self, h) -> None:
+        # Конструктор стартует с выбора площадки: без места диалог не
+        # начинается вовсе, поэтому площадка создаётся заранее.
+        with h.session_factory() as session:
+            user = get_or_create_user(session, h.user_id, username="bricks")
+            place = create_place(
+                session, "Театр кирпичиков", created_by_user_id=user.id
+            )
+            session.commit()
+            place_id = place.id
         await h.start_dialog()
+        await h.callback(f"pl_pick:{place_id}")
         self.assertIsNotNone(h.dialog_state())
         await h.text("/bricks")
         self.assertIsNone(h.dialog_state())
@@ -541,20 +614,33 @@ class BricksUiTests(unittest.TestCase):
         await h.callback("bk_create")
         await h.text("Кирпичик перед постом")
         self.assertIn("Техническое обозначение", h.screen_text())
+        # S5: кнопка `create_post` устарела — легаси-мастер удалён. Внутри
+        # сценария кирпичика она не запускает мастер и не сбрасывает
+        # незавершённое создание кирпичика.
         await h.callback("create_post")
-        self.assertIsNotNone(h.dialog_state())
-        self.assertIn("Шаг 1", h.screen_text())
-        self.assertIsNone(load_brick_session(h.user_id))
+        self.assertNotIn("Шаг 1", h.screen_text())
+        self.assertIn("Техническое обозначение", h.screen_text())
+        self.assertIsNone(h.dialog_state())
+        state = load_brick_session(h.user_id)
+        assert state is not None
+        self.assertEqual(state["phase"], "code_input")
+
+        # Из меню устаревшая кнопка просто перерисовывает меню.
+        await h.callback("main_menu")
+        await h.callback("create_post")
+        self.assertIn("Здравствуйте", h.screen_text())
+        self.assertIsNone(h.dialog_state())
 
         await h.text("/bricks")
-        self.assertIsNone(h.dialog_state())
         self.assertIn("Мои кирпичики", h.screen_text())
         await h.callback("bk_create")
         await h.text("Между сценариями")
         await h.callback("main_menu")
+        # Конструктор анонса — единственный вход, он открывается из меню.
         await h.start_dialog()
+        await h.callback(f"pl_pick:{place_id}")
         self.assertIsNotNone(h.dialog_state())
-        self.assertIn("Шаг 1", h.screen_text())
+        self.assertIn("Вопрос 1 из", h.screen_text())
 
     @scenario_test
     async def test_pagination_and_archive_pages(self, h) -> None:
@@ -597,6 +683,7 @@ class BricksUiTests(unittest.TestCase):
         await h.callback("bk_create")
         await h.text("Сбойный")
         await h.text("сбойный")
+        await h.callback("bk_skip_description")
         await h.callback("bk_type:short_text")
         error = OperationalError("INSERT bricks", {}, Exception("disk I/O error"))
         with (

@@ -381,11 +381,6 @@ def take_batch(user_data: dict[str, Any], key: str) -> tuple[str, ...]:
     return tuple(items)
 
 
-def pending_keys(user_data: dict[str, Any]) -> tuple[str, ...]:
-    """Ключи незавершённых партий (для «дослать перед следующим действием»)."""
-    return tuple(_pending(user_data).keys())
-
-
 def cancel_pending_task(user_data: dict[str, Any]) -> None:
     """Отменяет запланированное закрытие партии (диалог ушёл вперёд)."""
     task = user_data.pop(PENDING_TASK_KEY, None)
@@ -400,7 +395,7 @@ def schedule_album_close(application, user_data: dict[str, Any], closer) -> None
     JobQueue у бота отключён (`job_queue(None)`), поэтому используется
     `Application.create_task`: задержка не блокирует обработку следующих
     фото того же альбома, а запасной путь — явное закрытие следующим
-    действием пользователя (см. `flush_pending`).
+    действием пользователя через `cancel_pending_task` в мастере анонса.
     """
     if application is None:
         return
@@ -425,26 +420,6 @@ def schedule_album_close(application, user_data: dict[str, Any], closer) -> None
     user_data[PENDING_TASK_KEY] = task
 
 
-async def flush_pending(context, closer) -> None:
-    """
-    Досылает незавершённую партию перед другим действием пользователя.
-
-    Если пауза ещё не истекла, а пользователь уже нажал кнопку — партия
-    считается завершённой: ждать больше нечего. Ошибка закрытия не мешает
-    основному действию.
-    """
-    from utils import tg_context as ctx
-
-    data = ctx.data(context)
-    cancel_pending_task(data)
-    keys = pending_keys(data)
-    for key in keys:
-        try:
-            await closer(key)
-        except Exception as exc:  # noqa: BLE001 — основное действие важнее
-            logger.info("Незавершённая партия фото не закрыта: %s", exc)
-
-
 def rejected_photo_notice(error: BaseException) -> str:
     """Единый текст отказа по лимиту/домену — без потери принятых фото."""
     return f"Фото не добавлено: {str(error)[:300]}"
@@ -458,10 +433,8 @@ __all__ = [
     "batch_notice",
     "buffer_photo",
     "cancel_pending_task",
-    "flush_pending",
     "h",
     "limit_notice",
-    "pending_keys",
     "photo_limit",
     "photo_step_keyboard",
     "photo_step_text",

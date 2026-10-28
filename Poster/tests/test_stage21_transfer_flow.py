@@ -19,6 +19,7 @@ from unittest.mock import patch
 
 from sqlalchemy import select
 
+from announcement_store import list_announcement_drafts
 from models import (
     AdminSession,
     AdminTransfer,
@@ -29,6 +30,7 @@ from models import (
 )
 from permissions import is_place_admin
 from place_store import normalize_place_name
+from user_store import get_or_create_user
 
 try:
     from tests.integration_harness import (
@@ -161,6 +163,68 @@ def pending_transfer(h, place_id: int) -> AdminTransfer | None:
         return row
     finally:
         session.close()
+
+
+def make_personal_template(h, telegram_user_id: int) -> int:
+    """Личный шаблон с двумя кирпичиками: минимальный конструктор для теста."""
+    from brick_store import create_personal_brick
+    from template_store import create_personal_template
+
+    session = h.session_factory()
+    try:
+        get_or_create_user(session, telegram_user_id, username="wip")
+        create_personal_brick(
+            session,
+            actor_telegram_user_id=telegram_user_id,
+            code="ttl",
+            title="Заголовок",
+            value_type="short_text",
+            rules={},
+        )
+        create_personal_brick(
+            session,
+            actor_telegram_user_id=telegram_user_id,
+            code="dsc",
+            title="Описание",
+            value_type="long_text",
+            rules={},
+        )
+        template = create_personal_template(
+            session,
+            actor_telegram_user_id=telegram_user_id,
+            name="Шаблон передачи",
+            header="",
+            body="[ttl]\n[dsc]",
+            footer="",
+        )
+        session.commit()
+        return template.template_id
+    finally:
+        session.close()
+
+
+def single_draft_id(h, telegram_user_id: int) -> int:
+    from announcement_store import list_announcement_drafts
+
+    with h.session_factory() as session:
+        drafts = list_announcement_drafts(
+            session, actor_telegram_user_id=telegram_user_id
+        )
+    assert len(drafts) == 1, drafts
+    return drafts[0].draft_id
+
+
+def user_state_snapshot(h, telegram_user_id: int) -> list[tuple]:
+    """Экранное состояние пользователя: ID сообщения и payload."""
+    from models import UserState
+
+    with h.session_factory() as session:
+        rows = list(
+            session.scalars(
+                select(UserState).where(UserState.user_id == telegram_user_id)
+            ).all()
+        )
+    return [(row.screen_message_id, row.payload) for row in rows]
 
 
 def screen_callback(h, prefix: str) -> str:
@@ -665,13 +729,37 @@ class SafetyAndAuditFlowTests(unittest.TestCase):
 
     @scenario_test
     async def test_unfinished_post_survives_transfer_and_rights_change(self, h):
+        """Начатый анонс переживает передачу админки и смену прав (S5).
+
+        Мастер поста удалён, поэтому незавершённая работа — это черновик
+        конструктора (`announcement_drafts`) со значениями кирпичиков.
+        После передачи админки бывший админ по-прежнему открывает его в
+        «📂 Мои анонсы» и может продолжить, а `user_states` (экран) цела.
+        """
         place_id = insert_place(h, "Кофейня «Передача»")
         assign_place_admin(h, place_id, INITIATOR_TG)
         ensure_user(h, TARGET_TG, username="newadmin", full_name="Новый Админ")
+        template_id = make_personal_template(h, INITIATOR_TG)
         h.user_id = INITIATOR_TG
 
-        await h.start_dialog()
-        await h.text("Незавершённый пост про передачу")
+        await h.text("/start", user_id=INITIATOR_TG, chat_id=INITIATOR_TG)
+        await h.callback("pick_template", user_id=INITIATOR_TG, chat_id=INITIATOR_TG)
+        await h.callback(
+            f"tp_pick:{template_id}", user_id=INITIATOR_TG, chat_id=INITIATOR_TG
+        )
+        await h.text(
+            "Незавершённый пост про передачу",
+            user_id=INITIATOR_TG,
+            chat_id=INITIATOR_TG,
+        )
+        await h.text(
+            "Описание про передачу", user_id=INITIATOR_TG, chat_id=INITIATOR_TG
+        )
+        draft_id = single_draft_id(h, INITIATOR_TG)
+        before = user_state_snapshot(h, INITIATOR_TG)
+
+        # Передача админки второму пользователю. Команда закрывает
+        # конструктор, черновик при этом остаётся в базе.
         await h.text("/admin", user_id=INITIATOR_TG, chat_id=INITIATOR_TG)
         await h.callback(
             screen_callback(h, "adm_place:"),
@@ -688,23 +776,40 @@ class SafetyAndAuditFlowTests(unittest.TestCase):
         accept = notification_callback(h, TARGET_TG, "adm_transfer_accept:")
         await h.callback(accept, user_id=TARGET_TG, chat_id=TARGET_TG)
 
-        # У бывшего админа WIP не потерян, хотя права уже сменились.
-        await h.text("/start", user_id=INITIATOR_TG, chat_id=INITIATOR_TG)
-        labels = [label for label, _ in h.screen_buttons()]
-        self.assertIn("▶️ Продолжить пост", labels)
+        # Права сменились: бывший админ больше не админ места.
         session = h.session_factory()
         try:
-            from models import UserState
-
-            states = list(session.scalars(select(UserState)).all())
-            self.assertTrue(
-                any(
-                    "Незавершённый пост про передачу" in state.payload
-                    for state in states
-                )
-            )
+            self.assertFalse(is_place_admin(session, INITIATOR_TG, place_id))
         finally:
             session.close()
+
+        # Незавершённый анонс не потерян и открывается в «📂 Мои анонсы».
+        await h.text("/start", user_id=INITIATOR_TG, chat_id=INITIATOR_TG)
+        await h.callback("my_announcements", user_id=INITIATOR_TG, chat_id=INITIATOR_TG)
+        self.assertIn("Мои анонсы", h.screen_text())
+        self.assertIn(
+            f"aw_open:{draft_id}",
+            [data for _, data in h.screen_buttons() if data],
+            "начатый анонс виден в списке",
+        )
+        await h.callback(
+            f"aw_open:{draft_id}", user_id=INITIATOR_TG, chat_id=INITIATOR_TG
+        )
+        self.assertIn("Обзор анонса", h.screen_text())
+        self.assertIn("Незавершённый пост про передачу", h.screen_text())
+
+        # Содержимое черновика и экранное состояние целы.
+        with h.session_factory() as session:
+            drafts = list_announcement_drafts(
+                session, actor_telegram_user_id=INITIATOR_TG
+            )
+            self.assertEqual([draft.draft_id for draft in drafts], [draft_id])
+            payloads = [
+                value.payload for value in drafts[0].values if value.payload is not None
+            ]
+        self.assertIn({"text": "Незавершённый пост про передачу"}, payloads)
+        self.assertIn({"text": "Описание про передачу"}, payloads)
+        self.assertEqual(user_state_snapshot(h, INITIATOR_TG), before)
 
     @scenario_test
     async def test_long_address_saved_and_displayed_as_explicit_preview(self, h):
