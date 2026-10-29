@@ -78,9 +78,9 @@ count_open_conflicts, list_open_conflicts, _description_text в bricks.py),
 дубли description-html-хелперов, устаревшее число тестов в
 docs/migrations.md, pending-уведомления без ретрая (перенос с R3).
 Открытые вопросы: нет блокирующих.
-Коммит: см. git log (этап R4; opencode.jsonc и .opencode/agents/*.md
-владельца — вне коммита).
-Push: выполняется в origin/main.
+Коммит: 0bc09dc (opencode.jsonc и .opencode/agents/*.md владельца — вне
+коммита). CI: completed success (run 40861108666).
+Push: выполнен в origin/main.
 
 ### Контрольная точка для R5 (компактная)
 
