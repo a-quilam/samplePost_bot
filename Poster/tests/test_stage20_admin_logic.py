@@ -103,7 +103,12 @@ class StoreFixtureBase(unittest.TestCase):
     def _place(self, name: str):
         from place_store import create_place
 
-        return create_place(self.session, name, created_by_user_id=self.ordinary.id)
+        return create_place(
+            self.session,
+            name,
+            city="Тестовый город",
+            created_by_user_id=self.ordinary.id,
+        )
 
     def _active_admins(self) -> list[PlaceAdmin]:
         return list(

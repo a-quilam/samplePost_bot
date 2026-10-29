@@ -45,8 +45,9 @@ class BrickServiceTests(BrickDatabaseTestCase):
         return int(self.session.scalar(select(func.count()).select_from(Brick)) or 0)
 
     def test_system_reads_exclude_archived_but_keep_reserved_code(self) -> None:
-        # 9 кирпичиков миграции 6 + `[адрес]` миграции 15.
-        self.assertEqual(len(list_system_bricks(self.session)), 10)
+        # 9 кирпичиков миграции 6 + `[адрес]` миграции 15 + `[город]`
+        # миграции 21 (Poster 2.0 U1a).
+        self.assertEqual(len(list_system_bricks(self.session)), 11)
         title = get_system_brick(self.session, " НАЗВАНИЕ ")
         self.assertIsNotNone(title)
         assert title is not None
@@ -62,7 +63,7 @@ class BrickServiceTests(BrickDatabaseTestCase):
         self.assertIsNotNone(archived)
         assert archived is not None
         self.assertFalse(archived.is_active)
-        self.assertEqual(len(list_system_bricks(self.session)), 9)
+        self.assertEqual(len(list_system_bricks(self.session)), 10)
         self.assertIsNone(resolve_brick_by_code(self.session, "название"))
 
     def test_personal_creation_normalizes_code_and_never_accepts_foreign_owner(
@@ -171,8 +172,8 @@ class BrickServiceTests(BrickDatabaseTestCase):
             rules={"choices": ["да", "нет"]},
         )
         self.assertEqual(created.scope, "system")
-        self.assertGreater(created.id, 10)
-        self.assertEqual(len(list_system_bricks(self.session)), 11)
+        self.assertGreater(created.id, 11)
+        self.assertEqual(len(list_system_bricks(self.session)), 12)
         with self.assertRaises(BrickConflictError):
             create_personal_brick(
                 self.session,

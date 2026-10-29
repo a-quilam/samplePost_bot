@@ -196,7 +196,10 @@ class R4TesterCase(unittest.TestCase):
                     session, admin_tg, username=f"adm{admin_tg}", full_name="Админ"
                 )
             place = create_place(
-                session, name, created_by_user_id=creator.id if creator else None
+                session,
+                name,
+                city="Тестовый город",
+                created_by_user_id=creator.id if creator else None,
             )
             if creator is not None:
                 session.add(

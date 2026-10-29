@@ -154,7 +154,9 @@ def make_place(h: Harness, name: str, *, owner_tg: int) -> int:
         owner = get_or_create_user(
             session, owner_tg, username="creator", full_name="Создатель"
         )
-        place = create_place(session, name, created_by_user_id=owner.id)
+        place = create_place(
+            session, name, city="Тестовый город", created_by_user_id=owner.id
+        )
         session.commit()
         return int(place.id)
 
@@ -455,7 +457,10 @@ class ConflictNotificationFailureTests(unittest.TestCase):
                 session, OWNER_TG, username="owner5", full_name="Автор идеи"
             )
             place = create_place(
-                session, "Зал сбоя доставки", created_by_user_id=author.id
+                session,
+                "Зал сбоя доставки",
+                city="Тестовый город",
+                created_by_user_id=author.id,
             )
             session.add(
                 PlaceAdmin(
@@ -650,7 +655,12 @@ class ConflictLocalHolderArchiveTests(unittest.TestCase):
             get_or_create_user(
                 session, OWNER_TG, username="owner5", full_name="Автор идеи"
             )
-            place = create_place(session, "Зал архивации", created_by_user_id=author.id)
+            place = create_place(
+                session,
+                "Зал архивации",
+                city="Тестовый город",
+                created_by_user_id=author.id,
+            )
             session.add(
                 PlaceAdmin(
                     place_id=place.id,

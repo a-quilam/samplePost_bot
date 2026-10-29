@@ -2909,6 +2909,259 @@ MIGRATION_20_PROPOSAL_DESCRIPTION = Migration(
 )
 
 
+# --- Версия 21: город площадки и системный кирпичик «город» (U1a) -----------
+#
+# Владелец потребовал указывать город зарегистрированной площадки и иметь
+# системный кирпичик `[город]`. Схема расширяется ТОЛЬКО добавочными
+# колонками:
+#
+# - `places.city` — город площадки. Обязателен на уровне сервиса создания
+#   (`place_store.create_place`), но в схеме nullable: старые места не
+#   блокируются и не переписываются (backfill не нужен и запрещён);
+# - `announcement_drafts.place_city` — снимок города на момент подтверждения
+#   места, по той же модели, что `place_address`/`place_url`. NULL означает
+#   «сведений нет», пустая строка запрещена CHECK-ом.
+#
+# Системный кирпичик `город` вставляется по прецеденту миграции 15:
+# `MAX(id)+1`, а не хардкод `11`, потому что в существующей базе
+# пользовательские/местные кирпичики могли занять этот номер. Каталожный
+# `SYSTEM_BRICKS[].id = 11` — логический: чтение сверяет определение по
+# коду, а не по номеру.
+#
+# Триггер `trg_bricks_reserve_codes_insert` временно снимается и
+# восстанавливается ДОСЛОВНО в редакции миграции 19 (R3): вставка системного
+# кода при наличии местного носителя разрешена только через одобренное
+# предложение. Восстанавливать редакцию миграции 11 нельзя — это откатило бы
+# поведение R3.
+#
+# В стандартный шаблон `[город]` НЕ входит и в `BUILTIN_TEMPLATE_BINDINGS`
+# не появляется: автор включает его в свой шаблон осознанно.
+
+_RESERVE_CODES_INSERT_TRIGGER_R3 = """
+        CREATE TRIGGER trg_bricks_reserve_codes_insert
+        BEFORE INSERT ON bricks
+        FOR EACH ROW
+        WHEN EXISTS (
+            SELECT 1 FROM bricks b
+            WHERE b.code = NEW.code
+              AND (
+                  (NEW.scope = 'system' AND b.scope <> 'system')
+                  OR (NEW.scope <> 'system' AND b.scope = 'system')
+              )
+        )
+        AND NOT (
+            NEW.scope = 'system'
+            AND EXISTS (
+                SELECT 1
+                FROM brick_proposals p
+                JOIN bricks src ON src.id = p.source_brick_id
+                WHERE p.scope = 'system'
+                  AND p.status = 'pending'
+                  AND p.code = NEW.code
+                  AND p.title = NEW.title
+                  AND p.type = NEW.type
+                  AND p.source = NEW.source
+                  AND p.rules_json IS NEW.rules_json
+                  AND src.code = NEW.code
+            )
+        )
+        BEGIN
+            SELECT RAISE(ABORT, 'system brick code is reserved');
+        END
+        """
+
+MIGRATION_21_PLACE_CITY = Migration(
+    version=21,
+    name="place_city",
+    statements=(
+        "ALTER TABLE places ADD COLUMN city TEXT",
+        # CHECK добавлен в той же операции: пустая строка не должна стать
+        # «городом». NULL остаётся допустимым для старых записей.
+        """
+        ALTER TABLE announcement_drafts ADD COLUMN place_city TEXT
+            CONSTRAINT ck_announcement_drafts_city
+            CHECK (place_city IS NULL OR length(trim(place_city)) > 0)
+        """,
+        "DROP TRIGGER IF EXISTS trg_bricks_reserve_codes_insert",
+        """
+        INSERT INTO bricks
+            (id, code, title, type, scope, source, rules_json, status,
+             created_by_user_id, created_at, updated_at, description)
+        SELECT
+            COALESCE(MAX(id), 0) + 1, 'город', 'Город', 'short_text',
+            'system', 'place', NULL, 'active', NULL, CURRENT_TIMESTAMP,
+            NULL, NULL
+        FROM bricks
+        """,
+        _RESERVE_CODES_INSERT_TRIGGER_R3,
+    ),
+    requires_tables=(
+        "places",
+        "announcement_drafts",
+        "bricks",
+    ),
+)
+
+
+# --- Версия 22: нетронутые копии встроенного шаблона → версия 4 (U1a) ------
+#
+# Живой анонс показал, что эталон v3 разрывает дату/время и площадку пустой
+# строкой, а тело содержит лишние блоки. Версия 4 (владелец):
+#
+#   шапка: жирный `[название]`, сразу под ним жирное `[дата] // [время_начала]`,
+#          пустая строка, жирная площадка-ссылка, нежирный `[адрес]`;
+#   тело:  только `[описание]`;
+#   подвал: только `[контакт]`.
+#
+# Правило «обновляем только доказуемо нетронутые» повторяет миграцию 18:
+#
+# - кандидат — ТЕКУЩАЯ версия шаблона (`template_versions.version =
+#   templates.revision`), побайтово равная локальному эталону v3, с
+#   маркером `builtin_version IN (1, 2, 3)` (маркер версии, а не догадка по
+#   тексту: правленая копия в кандидаты не попадает уже потому, что её текст
+#   не равен v3);
+# - исключение по маркеру: стартовая личная копия, переименованная миграцией
+#   18 в «Дефолтный шаблон», могла сохранить `builtin_version IS NULL`;
+#   побайтовое совпадение всех трёх секций и это имя доказывают, что копию
+#   не правили. Личная копия с другим именем не обновляется: иначе
+#   переименование молча меняло бы текст;
+# - уже правленные копии и копии v4 не трогаются.
+#
+# Иммутабельность истории не нарушается: v3 остаётся в `template_versions`,
+# миграция ДОБАВЛЯЕТ версию `revision + 1` и поднимает `templates.revision`.
+# Снимки (`template_snapshots`) не трогаются. Привязки резолвятся по коду
+# из `bricks` (а не хардкодом ID): если хотя бы один из восьми системных
+# кодов отсутствует/архивирован, шаблон не обновляется вовсе.
+#
+# Идемпотентность: журнал не даёт применить миграцию повторно, а после
+# применения выборка пуста (текущие версии стали v4). Временная
+# таблица-очередь удаляется последним шагом.
+
+_M22_V3_HEADER = "**[название]**"
+_M22_V3_BODY = (
+    "\n"
+    "**[дата] // [время_начала]**\n"
+    "\n"
+    "**[место]([ссылка_места])**\n"
+    "[адрес]\n"
+    "\n"
+    "[описание]"
+)
+_M22_V3_FOOTER = "\n[контакт]"
+_M22_V4_HEADER = (
+    "**[название]**\n"
+    "\n"
+    "**[дата] // [время_начала]**\n"
+    "**[место]([ссылка_места])**\n"
+    "[адрес]"
+)
+_M22_V4_BODY = "\n[описание]"
+_M22_V4_FOOTER = "\n[контакт]"
+_M22_INITIAL_NAME = "Дефолтный шаблон"
+_M22_CODES = (
+    "название",
+    "дата",
+    "время_начала",
+    "место",
+    "ссылка_места",
+    "адрес",
+    "описание",
+    "контакт",
+)
+
+_M22_CODES_SQL = ", ".join(_migration_18_literal(code) for code in _M22_CODES)
+_M22_CODES_VALUES_SQL = " UNION ALL ".join(
+    f"SELECT {_migration_18_literal(code)} AS code" for code in _M22_CODES
+)
+
+MIGRATION_22_BUILTIN_TEMPLATES_V4 = Migration(
+    version=22,
+    name="builtin_templates_v4",
+    statements=(
+        # Очередь кандидатов: один зафиксированный список на все шаги.
+        """
+        CREATE TABLE migration_22_targets (
+            template_id INTEGER NOT NULL PRIMARY KEY,
+            new_version INTEGER NOT NULL
+        )
+        """,
+        f"""
+        INSERT INTO migration_22_targets (template_id, new_version)
+        SELECT
+            t.id,
+            t.revision + 1
+        FROM templates AS t
+        JOIN template_versions AS v
+          ON v.template_id = t.id AND v.version = t.revision
+        WHERE v.header = {_migration_18_literal(_M22_V3_HEADER)}
+          AND v.body = {_migration_18_literal(_M22_V3_BODY)}
+          AND v.footer = {_migration_18_literal(_M22_V3_FOOTER)}
+          AND (
+              v.builtin_version IN (1, 2, 3)
+              OR (
+                  t.kind = 'personal'
+                  AND t.name = {_migration_18_literal(_M22_INITIAL_NAME)}
+              )
+          )
+          AND (
+              t.kind = 'standard'
+              OR (
+                  t.kind = 'personal'
+                  AND t.name = {_migration_18_literal(_M22_INITIAL_NAME)}
+              )
+          )
+          AND (
+              SELECT count(*) FROM bricks AS b
+              WHERE b.scope = 'system'
+                AND b.status = 'active'
+                AND b.code IN ({_M22_CODES_SQL})
+          ) = {len(_M22_CODES)}
+        """,
+        # Новая версия: только INSERT, v3 остаётся в истории.
+        f"""
+        INSERT INTO template_versions
+            (template_id, version, header, body, footer,
+             created_by_user_id, created_at, builtin_version)
+        SELECT
+            g.template_id, g.new_version,
+            {_migration_18_literal(_M22_V4_HEADER)},
+            {_migration_18_literal(_M22_V4_BODY)},
+            {_migration_18_literal(_M22_V4_FOOTER)},
+            NULL, CURRENT_TIMESTAMP, 4
+        FROM migration_22_targets AS g
+        """,
+        # Те же восемь системных кодов; brick_id — из `bricks` по коду.
+        f"""
+        INSERT INTO template_version_bricks (template_version_id, brick_id, code)
+        SELECT ver.id, b.id, c.code
+        FROM migration_22_targets AS g
+        JOIN template_versions AS ver
+          ON ver.template_id = g.template_id AND ver.version = g.new_version
+        CROSS JOIN ({_M22_CODES_VALUES_SQL}) AS c
+        JOIN bricks AS b
+          ON b.scope = 'system' AND b.status = 'active' AND b.code = c.code
+        """,
+        # Указатель текущей версии — той же транзакцией с созданием версии.
+        """
+        UPDATE templates
+        SET revision = (
+                SELECT g.new_version FROM migration_22_targets AS g
+                WHERE g.template_id = templates.id
+            ),
+            updated_at = CURRENT_TIMESTAMP
+        WHERE id IN (SELECT template_id FROM migration_22_targets)
+        """,
+        "DROP TABLE migration_22_targets",
+    ),
+    requires_tables=(
+        "templates",
+        "template_versions",
+        "template_version_bricks",
+        "bricks",
+    ),
+)
+
+
 DEFAULT_MIGRATIONS: tuple[Migration, ...] = (
     MIGRATION_1_USERS_PLACES,
     MIGRATION_2_PLACE_CONTACTS_UI,
@@ -2930,6 +3183,8 @@ DEFAULT_MIGRATIONS: tuple[Migration, ...] = (
     MIGRATION_18_BUILTIN_TEMPLATES_V3,
     MIGRATION_19_BRICK_CONFLICTS,
     MIGRATION_20_PROPOSAL_DESCRIPTION,
+    MIGRATION_21_PLACE_CITY,
+    MIGRATION_22_BUILTIN_TEMPLATES_V4,
 )
 
 LATEST_VERSION = DEFAULT_MIGRATIONS[-1].version if DEFAULT_MIGRATIONS else 0

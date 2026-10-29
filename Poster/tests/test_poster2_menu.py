@@ -130,6 +130,7 @@ def _seed_place(
         place = create_place(
             session,
             name,
+            city="Тестовый город",
             created_by_user_id=user.id,
             address="ул. Тестовая, 1",
             url="https://example.com/place",
@@ -315,6 +316,8 @@ class PlacePickTests(unittest.TestCase):
         await h.callback("pl_pick_add")
         await h.text("Новая площадка S2")
         await h.callback("pl_create_confirm")
+        # U1a: у новой площадки обязателен город; анонс стартует сразу после.
+        await h.text("Москва")
 
         # Площадка создана и сразу открыт анонс по её стандартному шаблону.
         draft = _latest_draft(h)

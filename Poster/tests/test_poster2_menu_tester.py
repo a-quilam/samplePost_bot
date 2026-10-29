@@ -75,7 +75,11 @@ def _seed_place(h, *, name=DANGEROUS, actor_tg=DEFAULT_USER_ID, admin=False):
     with h.session_factory() as session:
         user = get_or_create_user(session, actor_tg, username=f"u{actor_tg}")
         place = create_place(
-            session, name, created_by_user_id=user.id, address="ул. <b>, 1"
+            session,
+            name,
+            city="Тестовый город",
+            created_by_user_id=user.id,
+            address="ул. <b>, 1",
         )
         if admin:
             session.add(

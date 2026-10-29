@@ -58,7 +58,7 @@ from models import Brick, Place
 from template_store import (
     ensure_initial_personal_template,
     list_personal_templates,
-    update_template_body,
+    update_template_header,
 )
 from template_types import (
     BUILTIN_TEMPLATE,
@@ -174,7 +174,7 @@ class MigrationFifteenAndSixteenTests(_MigrationTestCase):
     """Миграции 15–17 на заполненной временной БД версии 13."""
 
     def test_migration_keeps_rows_links_checks_and_passes_integrity(self) -> None:
-        self.assertEqual(LATEST_VERSION, 20)
+        self.assertEqual(LATEST_VERSION, 22)
         self.assertEqual(run_migrations(self.engine), LATEST_VERSION)
 
         connection = sqlite3.connect(self.path)
@@ -594,9 +594,10 @@ class PersonalOneOffPlaceTests(AnnouncementDatabaseTestCase):
             known_payload.values_by_id[known_ids["адрес"]], "ул. Тестовая, 1"
         )
 
-        # Стандарт без `[адрес]`: кирпичика нет в снимке, и адрес карточки
-        # не появляется в значениях рендера.
-        update_template_body(
+        # Стандарт без `[адрес]`: в v4 адрес живёт в ШАПКЕ, поэтому меняем
+        # именно шапку — тогда кирпичика нет в снимке, и адрес карточки не
+        # появляется в значениях рендера.
+        update_template_header(
             self.session,
             actor_telegram_user_id=OWNER_TG,
             template_id=self.standard.template_id,
@@ -637,7 +638,7 @@ class InitialPersonalTemplateTests(AnnouncementDatabaseTestCase):
         self.assertEqual(version.header, BUILTIN_TEMPLATE.header)
         self.assertEqual(version.body, BUILTIN_TEMPLATE.body)
         self.assertEqual(version.footer, BUILTIN_TEMPLATE.footer)
-        self.assertEqual(BUILTIN_TEMPLATE_VERSION, 3)
+        self.assertEqual(BUILTIN_TEMPLATE_VERSION, 4)
         # Чужой пользователь получает свою копию, а не шаблон владельца.
         other = ensure_initial_personal_template(
             self.session, actor_telegram_user_id=OTHER_TG
@@ -913,8 +914,9 @@ class AddressBrickAndDescriptionTests(AnnouncementDatabaseTestCase):
 
     def test_address_brick_is_system_and_renders_from_place_card(self) -> None:
         codes = [brick.code for brick in list_system_bricks(self.session)]
-        self.assertEqual(len(codes), 10)
+        self.assertEqual(len(codes), 11)
         self.assertIn("адрес", codes)
+        self.assertIn("город", codes)
         # Старый код не переименован: сохранённые снимки продолжают работать.
         self.assertIn("адрес_места", codes)
         address = get_system_brick(self.session, "адрес")

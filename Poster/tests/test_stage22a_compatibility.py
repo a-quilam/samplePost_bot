@@ -15,7 +15,9 @@ import os
 import shutil
 import sqlite3
 import unittest
+from datetime import timedelta
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 from unittest.mock import patch
 
@@ -24,7 +26,6 @@ from sqlalchemy.orm import Session, sessionmaker
 
 from admin_transfer_store import (
     confirm_admin_transfer,
-    create_admin_transfer,
     get_transfer_view,
 )
 from base import Base
@@ -148,19 +149,28 @@ class Stage22ACompatibilityTests(unittest.TestCase):
         )
 
     def make_place(self, name: str, *, created_by_user_id: int | None = None):
-        # Схема Stage 21 ещё не знает шаблонов, поэтому создаём её строки
-        # напрямую, не вызывая сервис Stage 23.
-        place = Place(
-            created_by_user_id=created_by_user_id,
-            address="улица Ленина, 1",
-            url="https://example.com/place",
-            created_at=utcnow(),
-        )
-        self.session.add(place)
-        self.session.flush()
+        # Схема Stage 21 ещё не знает шаблонов и (до миграции 21) города,
+        # поэтому место вставляется сырым SQL по колонкам прежней схемы, а
+        # не через ORM-модель с новыми полями.
+        with self.engine.begin() as connection:
+            connection.execute(
+                text(
+                    "INSERT INTO places (created_by_user_id, address, url, "
+                    "created_at) VALUES (:created_by, :address, :url, :created_at)"
+                ),
+                {
+                    "created_by": created_by_user_id,
+                    "address": "улица Ленина, 1",
+                    "url": "https://example.com/place",
+                    "created_at": utcnow(),
+                },
+            )
+            place_id = int(
+                connection.execute(text("SELECT last_insert_rowid()")).scalar_one()
+            )
         self.session.add(
             PlaceName(
-                place_id=place.id,
+                place_id=place_id,
                 name=name,
                 name_search=normalize_place_name(name),
                 is_canonical=1,
@@ -169,7 +179,9 @@ class Stage22ACompatibilityTests(unittest.TestCase):
             )
         )
         self.session.commit()
-        return place
+        # ORM-модель знает новые колонки, которых в старой схеме ещё нет,
+        # поэтому наружу отдаётся только идентификатор вставленной строки.
+        return SimpleNamespace(id=place_id)
 
     def make_admin(self, place_id: int, user_id: int) -> PlaceAdmin:
         row = PlaceAdmin(
@@ -282,7 +294,7 @@ class Stage22ACompatibilityTests(unittest.TestCase):
         self.assertIn((17, "archive_legacy_drafts"), journal(self.path))
         self.assertIn((18, "builtin_templates_v3"), journal(self.path))
         self.assertEqual(
-            journal(self.path)[-1], (LATEST_VERSION, "brick_proposal_description")
+            journal(self.path)[-1], (LATEST_VERSION, "builtin_templates_v4")
         )
         # Миграция 17 переименовала легаси-таблицу: строки прежнего черновика
         # читаются из архива как есть, `drafts` в рабочей схеме нет.
@@ -323,8 +335,9 @@ class Stage22ACompatibilityTests(unittest.TestCase):
                 self.path,
                 "SELECT count(*) FROM bricks WHERE scope='system'",
             ),
-            # 9 кирпичиков миграции 6 + `[адрес]` миграции 15.
-            (10,),
+            # 9 кирпичиков миграции 6 + `[адрес]` миграции 15
+            # + `[город]` миграции 21.
+            (11,),
         )
         self.assertIsNone(
             scalar(
@@ -379,16 +392,32 @@ class Stage22ACompatibilityTests(unittest.TestCase):
         recipient = self.make_user(9_330_302, "newadmin")
         place = self.make_place("Театр передачи")
         assignment = self.make_admin(place.id, initiator.id)
-        created = create_admin_transfer(
-            self.session,
-            actor_telegram_user_id=initiator.telegram_user_id,
-            place_id=place.id,
-            username="newadmin",
-            recipient_telegram_user_id=recipient.telegram_user_id,
-        )
-        self.assertEqual(created.status, "created_known")
-        assert created.transfer is not None
-        transfer_id = created.transfer.transfer_id
+        # Схема Stage 21 ещё не знает `places.city`, поэтому строка передачи
+        # вставляется так, как её записала бы установка Stage 21: сервисный
+        # слой текущей версии к домаршрутной схеме не применяется.
+        now = utcnow()
+        with self.engine.begin() as connection:
+            connection.execute(
+                text(
+                    "INSERT INTO admin_transfers (place_id, from_user_id, "
+                    "from_assignment_id, to_user_id, opened_by_user_id, "
+                    "to_username, token_hash, status, created_at, expires_at) "
+                    "VALUES (:place_id, :from_user_id, :assignment_id, "
+                    ":to_user_id, NULL, 'newadmin', NULL, 'pending', "
+                    ":created_at, :expires_at)"
+                ),
+                {
+                    "place_id": place.id,
+                    "from_user_id": initiator.id,
+                    "assignment_id": assignment.id,
+                    "to_user_id": recipient.id,
+                    "created_at": now,
+                    "expires_at": now + timedelta(hours=24),
+                },
+            )
+            transfer_id = int(
+                connection.execute(text("SELECT last_insert_rowid()")).scalar_one()
+            )
         self.session.close()
 
         self.assertEqual(run_migrations(self.engine), LATEST_VERSION)

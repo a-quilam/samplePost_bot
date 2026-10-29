@@ -107,7 +107,12 @@ class EditFixtureBase(unittest.TestCase):
     def _place(self, name: str):
         from place_store import create_place
 
-        return create_place(self.session, name, created_by_user_id=self.ordinary.id)
+        return create_place(
+            self.session,
+            name,
+            city="Тестовый город",
+            created_by_user_id=self.ordinary.id,
+        )
 
     def _log_rows(self) -> list[PlaceEditLog]:
         return list(

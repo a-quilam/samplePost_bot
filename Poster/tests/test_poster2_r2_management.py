@@ -95,6 +95,7 @@ def _seed_place(
         place = create_place(
             session,
             name,
+            city="Тестовый город",
             created_by_user_id=user.id,
             address="ул. Тестовая, 1",
             url="https://example.com/place",
@@ -528,6 +529,7 @@ class PlaceManagementTests(unittest.TestCase):
 
         await h.text("Новая площадка R2b")
         await h.callback("pl_create_confirm")
+        await h.text("Москва")
 
         text = h.screen_text()
         self.assertIn("Новая площадка R2b", text)

@@ -103,6 +103,8 @@ class MigrationMechanismTests(unittest.TestCase):
                 (18, "builtin_templates_v3"),
                 (19, "brick_code_conflicts"),
                 (20, "brick_proposal_description"),
+                (21, "place_city"),
+                (22, "builtin_templates_v4"),
             ],
         )
 
@@ -207,6 +209,8 @@ class MigrationMechanismTests(unittest.TestCase):
                 (18, "builtin_templates_v3"),
                 (19, "brick_code_conflicts"),
                 (20, "brick_proposal_description"),
+                (21, "place_city"),
+                (22, "builtin_templates_v4"),
             ],
         )
 

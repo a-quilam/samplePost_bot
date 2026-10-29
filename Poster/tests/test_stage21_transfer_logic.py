@@ -117,7 +117,10 @@ class TransferFixture(unittest.TestCase):
             self.NO_USERNAME_TG, username=None, full_name="Без Username"
         )
         self.place = create_place(
-            self.session, "Кофейня «Передача»", created_by_user_id=self.other.id
+            self.session,
+            "Кофейня «Передача»",
+            city="Тестовый город",
+            created_by_user_id=self.other.id,
         )
         self._assign(self.INITIATOR_TG)
 

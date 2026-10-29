@@ -198,6 +198,17 @@ SYSTEM_BRICKS: tuple[SystemBrickDefinition, ...] = (
         BRICK_SOURCE_PLACE,
         {},
     ),
+    # Poster 2.0 U1a (миграция 21): системный код `[город]`. Значение берётся
+    # из карточки места; в стандартный шаблон и его привязки НЕ входит —
+    # автор включает город в свой шаблон осознанно.
+    SystemBrickDefinition(
+        11,
+        "город",
+        "Город",
+        BRICK_TYPE_SHORT_TEXT,
+        BRICK_SOURCE_PLACE,
+        {},
+    ),
 )
 
 SYSTEM_BRICK_CODES = tuple(item.code for item in SYSTEM_BRICKS)

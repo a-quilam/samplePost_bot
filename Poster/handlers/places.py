@@ -51,12 +51,14 @@ from place_store import (
     list_places,
     normalize_place_name,
     search_places,
+    validate_place_city,
     validate_place_name,
 )
 from template_state import clear_template_session
 from user_store import get_or_create_user
 from utils import screen
 from utils import tg_context as ctx
+from utils.place_labels import place_title
 
 logger = logging.getLogger(__name__)
 
@@ -70,6 +72,7 @@ STALE_TEXT = "Кнопка устарела: откройте раздел «М�
 TEXT_INPUT_PHASES = {
     "search_input",
     "create_input",
+    "create_city_input",
     "alias_input",
     "pick_search_input",
     "manage_search_input",
@@ -82,6 +85,8 @@ PHASES = {
     "all_places",
     "create_input",
     "create_check",
+    # Poster 2.0 U1a: последовательный вопрос о городе при регистрации.
+    "create_city_input",
     "existing_choice",
     "confirm",
     "names",
@@ -118,6 +123,16 @@ def _button_name(prefix: str, name: str) -> str:
     if len(name) <= available:
         return prefix + name
     return prefix + name[: max(available - 1, 1)] + "…"
+
+
+def _place_title(name: str, city: str | None) -> str:
+    """
+    «Название · Город» для списков (Poster 2.0 U1a).
+
+    Общее правило живёт в `utils.place_labels`: им же пользуется визард
+    анонса, поэтому списки не расходятся в формате строки.
+    """
+    return place_title(name, city)
 
 
 def _short(value: object, limit: int = 100) -> str:
@@ -262,6 +277,9 @@ def _card_text(
         text += f"\n\nАдрес: {_h(details.address)}"
     if details.url:
         text += f"\nСсылка: {_safe_link(details.url)}"
+    # Poster 2.0 U1a: город есть у новых площадок; у старых записей его нет,
+    # и пустое значение показывается явным «—», а не пропадает из карточки.
+    text += f"\nГород: {_h(details.city) if details.city else '—'}"
     text += (
         "\n\nНажмите «✅ Подтвердить», чтобы выбрать это место, или "
         "«🔤 Выбрать альтернативное название» для другого написания."
@@ -297,6 +315,9 @@ def _result_label(result: SearchResult, *, check: bool = False) -> str:
             "частичное совпадение (альтернативное название): "
             f"«{_h(_short(result.matched_name))}»"
         )
+    if result.category == "city":
+        city = result.city or ""
+        return f"совпадение по городу: «{_h(_short(city))}»"
     return f"похожее название: «{_h(_short(result.matched_name))}»"
 
 
@@ -337,7 +358,7 @@ def _all_places_content(
 
     text = f"📚 Все места — {total}\n\n"
     for index, item in enumerate(places, start=offset + 1):
-        text += f"{index}. {_h(item.canonical_name)}\n"
+        text += f"{index}. {_h(_place_title(item.canonical_name, item.city))}\n"
     text += "\n" + _page_note(offset, len(places), total, PLACES_PAGE_SIZE)
 
     keyboard: list[list[InlineKeyboardButton]] = []
@@ -345,7 +366,10 @@ def _all_places_content(
         keyboard.append(
             [
                 InlineKeyboardButton(
-                    _button_name(f"{index}. ", item.canonical_name),
+                    _button_name(
+                        f"{index}. ",
+                        _place_title(item.canonical_name, item.city),
+                    ),
                     callback_data=f"pl_open:{item.place_id}",
                 )
             ]
@@ -397,7 +421,10 @@ def _search_results_content(
 
     text = f"🔎 Результаты поиска: «{_h(query)}»\n\n"
     for index, result in enumerate(page_results, start=offset + 1):
-        text += f"{index}. {_h(result.canonical_name)} — " f"{_result_label(result)}\n"
+        text += (
+            f"{index}. {_h(_place_title(result.canonical_name, result.city))} — "
+            f"{_result_label(result)}\n"
+        )
     text += "\n" + _page_note(offset, len(page_results), total)
 
     keyboard: list[list[InlineKeyboardButton]] = []
@@ -405,7 +432,10 @@ def _search_results_content(
         keyboard.append(
             [
                 InlineKeyboardButton(
-                    _button_name(f"{index}. ", result.canonical_name),
+                    _button_name(
+                        f"{index}. ",
+                        _place_title(result.canonical_name, result.city),
+                    ),
                     callback_data=f"pl_open:{result.place_id}",
                 )
             ]
@@ -448,13 +478,16 @@ def _create_check_content(
         text += "Возможные совпадения:\n"
         for index, result in enumerate(results, start=1):
             text += (
-                f"{index}. {_h(result.canonical_name)} — "
+                f"{index}. {_h(_place_title(result.canonical_name, result.city))} — "
                 f"{_result_label(result, check=True)}\n"
             )
             keyboard.append(
                 [
                     InlineKeyboardButton(
-                        _button_name(f"{index}. ", result.canonical_name),
+                        _button_name(
+                            f"{index}. ",
+                            _place_title(result.canonical_name, result.city),
+                        ),
                         callback_data=f"pl_open:{result.place_id}",
                     )
                 ]
@@ -795,6 +828,26 @@ async def _render_phase(
                 text, keyboard = _hub_content()
             else:
                 text, keyboard = _create_check_content(session, state)
+        elif phase == "create_city_input":
+            text = (
+                "🏙 В каком городе площадка?\n\n"
+                f"Название: «{_h(str(state.get('candidate') or ''))}»\n\n"
+                "Введите город обычным текстом (например, Москва или "
+                "Санкт-Петербург). Город виден в списке площадок и помогает "
+                "найти место поиском."
+            )
+            keyboard = InlineKeyboardMarkup(
+                [
+                    [
+                        InlineKeyboardButton(
+                            "◀️ Назад",
+                            callback_data=(
+                                "plm_back" if state.get("manage_mode") else "pl_back"
+                            ),
+                        )
+                    ]
+                ]
+            )
         elif phase == "admin_request":
             place_id = state.get("place_id")
             details = (
@@ -977,7 +1030,7 @@ def _pick_content(session: Session, state: dict) -> tuple[str, InlineKeyboardMar
         "шаблону, без лишних подтверждений.\n\n"
     )
     for number, item in enumerate(places, start=offset + 1):
-        text += f"{number}. {_h(item.canonical_name)}\n"
+        text += f"{number}. {_h(_place_title(item.canonical_name, item.city))}\n"
     text += "\n" + _page_note(offset, len(places), total, PICK_PAGE_SIZE)
 
     rows: list[list[InlineKeyboardButton]] = []
@@ -985,7 +1038,7 @@ def _pick_content(session: Session, state: dict) -> tuple[str, InlineKeyboardMar
         rows.append(
             [
                 InlineKeyboardButton(
-                    _button_name("🚀 ", item.canonical_name),
+                    _button_name("🚀 ", _place_title(item.canonical_name, item.city)),
                     callback_data=f"pl_pick:{item.place_id}",
                 )
             ]
@@ -1052,7 +1105,10 @@ def _pick_search_content(
 
     text = f"🔎 Площадки по запросу: «{_h(query)}»\n\n"
     for number, result in enumerate(page_results, start=offset + 1):
-        text += f"{number}. {_h(result.canonical_name)} — {_result_label(result)}\n"
+        text += (
+            f"{number}. {_h(_place_title(result.canonical_name, result.city))} — "
+            f"{_result_label(result)}\n"
+        )
     text += "\n" + _page_note(offset, len(page_results), total)
 
     rows: list[list[InlineKeyboardButton]] = []
@@ -1060,7 +1116,9 @@ def _pick_search_content(
         rows.append(
             [
                 InlineKeyboardButton(
-                    _button_name("🚀 ", result.canonical_name),
+                    _button_name(
+                        "🚀 ", _place_title(result.canonical_name, result.city)
+                    ),
                     callback_data=f"pl_pick:{result.place_id}",
                 )
             ]
@@ -1150,7 +1208,7 @@ def _manage_list_content(
 
     text = f"📍 Площадки — {total}\n\n"
     for index, item in enumerate(places, start=offset + 1):
-        text += f"{index}. {_h(item.canonical_name)}\n"
+        text += f"{index}. {_h(_place_title(item.canonical_name, item.city))}\n"
     text += "\n" + _page_note(offset, len(places), total, PLACES_PAGE_SIZE)
     text += (
         "\nТап по площадке открывает карточку справочника: название, "
@@ -1162,7 +1220,10 @@ def _manage_list_content(
         rows.append(
             [
                 InlineKeyboardButton(
-                    _button_name(f"{index}. ", item.canonical_name),
+                    _button_name(
+                        f"{index}. ",
+                        _place_title(item.canonical_name, item.city),
+                    ),
                     callback_data=f"plm_open:{item.place_id}",
                 )
             ]
@@ -1218,7 +1279,10 @@ def _manage_search_content(
 
     text = f"🔎 Результаты поиска: «{_h(query)}»\n\n"
     for index, result in enumerate(page_results, start=offset + 1):
-        text += f"{index}. {_h(result.canonical_name)} — {_result_label(result)}\n"
+        text += (
+            f"{index}. {_h(_place_title(result.canonical_name, result.city))} — "
+            f"{_result_label(result)}\n"
+        )
     text += "\n" + _page_note(offset, len(page_results), total)
 
     rows: list[list[InlineKeyboardButton]] = []
@@ -1226,7 +1290,10 @@ def _manage_search_content(
         rows.append(
             [
                 InlineKeyboardButton(
-                    _button_name(f"{index}. ", result.canonical_name),
+                    _button_name(
+                        f"{index}. ",
+                        _place_title(result.canonical_name, result.city),
+                    ),
                     callback_data=f"plm_open:{result.place_id}",
                 )
             ]
@@ -1265,6 +1332,8 @@ def _manage_card_content(
     alternatives = [item for item in details.names if not item.is_canonical]
     lines = [f"📍 {_h(details.canonical_name)}", ""]
     lines.append(f"Альтернативные названия: {len(alternatives)}")
+    # Poster 2.0 U1a: город виден в карточке; у старых мест его нет.
+    lines.append(f"Город: {_h(details.city) if details.city else '—'}")
     lines.append(f"Адрес: {_h(details.address) if details.address else 'не указан'}")
     lines.append(f"Ссылка: {_safe_link(details.url) if details.url else 'не указана'}")
     lines.append("")
@@ -1549,11 +1618,14 @@ async def handle_manage_back(
     query = ctx.query(update)
     state = load_place_session(ctx.user(update).id)
     phase = state.get("phase") if state is not None else None
-    allowed = MANAGE_ONLY_PHASES | {"create_input"}
+    allowed = MANAGE_ONLY_PHASES | {"create_input", "create_city_input"}
     if (
         state is None
         or phase not in allowed
-        or (phase == "create_input" and not state.get("manage_mode"))
+        or (
+            phase in {"create_input", "create_city_input"}
+            and not state.get("manage_mode")
+        )
     ):
         await query.answer(MANAGE_STALE_TEXT, show_alert=True)
         return
@@ -2127,26 +2199,37 @@ async def handle_create_edit(
     await _render_phase(update, context, state)
 
 
-async def handle_create_confirm(
-    update: Update, context: ContextTypes.DEFAULT_TYPE
+async def _create_place_from_state(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+    state: dict,
+    *,
+    city: str,
+    cleanup_ids: list[int] | None = None,
 ) -> None:
-    query = ctx.query(update)
-    state = load_place_session(ctx.user(update).id)
-    if state is None or state.get("phase") != "create_check":
-        await _stale(update)
-        return
+    """
+    Создаёт место с городом и продолжает сценарий по режиму входа (U1a).
+
+    Город спрашивается ПОСЛЕ проверки дублей и ДО создания строки: место без
+    города больше не появляется (инвариант владельца). Ошибка валидации
+    оставляет пользователя в фазе ввода города, ошибка БД — тоже, но с
+    отдельным сообщением: экран не должен ломаться.
+    """
     candidate = state.get("candidate")
     if not isinstance(candidate, str) or not candidate:
-        await _stale(update)
+        state.clear()
+        state.update(_new_hub())
+        await _render_phase(
+            update, context, state, notice="Название места потеряно. Начните заново."
+        )
         return
     pick_mode = bool(state.get("pick_mode"))
     manage_mode = bool(state.get("manage_mode"))
-    await query.answer()
 
     session = SessionLocal()
     try:
         user = _ensure_user(session, update)
-        place = create_place(session, candidate, created_by_user_id=user.id)
+        place = create_place(session, candidate, city=city, created_by_user_id=user.id)
         place_id = int(place.id)
         canonical = session.scalar(
             select(PlaceName).where(
@@ -2158,6 +2241,7 @@ async def handle_create_confirm(
             raise RuntimeError("У нового места нет канонического названия")
         canonical_id = int(canonical.id)
     except PlaceNameError as exc:
+        # Город не принят: остаёмся в фазе ввода, данные не теряются.
         await _render_phase(
             update, context, state, notice=f"Не удалось создать место: {exc}"
         )
@@ -2187,7 +2271,8 @@ async def handle_create_confirm(
     )
     if pick_mode:
         # Poster 2.0 S2: создание площадки из «Создать для площадки» сразу
-        # открывает анонс по её стандартному шаблону.
+        # открывает анонс по её стандартному шаблону. Вопрос о городе уже
+        # задан здесь; анонс не спрашивает его повторно.
         await _auto_start_pick_announcement(update, context, place_id)
         return
     if manage_mode:
@@ -2205,6 +2290,7 @@ async def handle_create_confirm(
                 "✅ Место добавлено вместе со стандартным шаблоном. "
                 "Оно сразу доступно всем пользователям."
             ),
+            cleanup_ids=cleanup_ids,
         )
         return
     await _render_phase(
@@ -2212,6 +2298,38 @@ async def handle_create_confirm(
         context,
         state,
         notice="✅ Место добавлено. Оно сразу доступно всем пользователям.",
+        cleanup_ids=cleanup_ids,
+    )
+
+
+async def handle_create_confirm(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> None:
+    """
+    «✅ Это новое место»: переход к вопросу о городе (Poster 2.0 U1a).
+
+    Место создаётся не сразу: сначала пользователь отвечает на простой
+    текстовый вопрос о городе. Дубль-проверка и подтверждение названия при
+    этом уже пройдены — назад в «create_check» кнопка не возвращает.
+    """
+    query = ctx.query(update)
+    state = load_place_session(ctx.user(update).id)
+    if state is None or state.get("phase") != "create_check":
+        await _stale(update)
+        return
+    candidate = state.get("candidate")
+    if not isinstance(candidate, str) or not candidate:
+        await _stale(update)
+        return
+    await query.answer()
+    cleanup = _failed_take(state)
+    state["phase"] = "create_city_input"
+    await _render_phase(
+        update,
+        context,
+        state,
+        cleanup_ids=cleanup,
+        drop_input=True,
     )
 
 
@@ -2389,7 +2507,7 @@ async def handle_back(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     elif phase in {"search_input", "all_places"}:
         state.clear()
         state.update(_new_hub())
-    elif phase in {"create_input", "create_check"}:
+    elif phase in {"create_input", "create_check", "create_city_input"}:
         if state.get("manage_mode"):
             state.clear()
             state.update(_new_manage())
@@ -2570,6 +2688,27 @@ async def handle_place_text(update: Update, context: ContextTypes.DEFAULT_TYPE) 
             cleanup_ids=cleanup,
             drop_input=True,
         )
+        return
+
+    if phase == "create_city_input":
+        try:
+            city = validate_place_city(raw)
+        except PlaceNameError as exc:
+            _failed_add(state, update)
+            await _render_phase(update, context, state, notice=str(exc))
+            return
+        cleanup = _failed_take(state)
+        message = getattr(update, "message", None)
+        if message is not None and message.message_id is not None:
+            cleanup.append(int(message.message_id))
+        await _create_place_from_state(
+            update,
+            context,
+            state,
+            city=city,
+            cleanup_ids=cleanup,
+        )
+        # Город уже сохранён: вопрос и ответ убираются со экрана.
         return
 
     # alias_input

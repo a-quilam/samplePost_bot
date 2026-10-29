@@ -120,12 +120,22 @@ class Stage22BCompatibilityTests(unittest.TestCase):
         user = get_or_create_user(self.session, 9_440_001, username="owner")
         # Stage 22A ещё не знает шаблонов: создаём место напрямую, без
         # сервиса Stage 23, который требует таблиц версии 8.
-        place = Place(created_by_user_id=user.id, created_at=utcnow())
-        self.session.add(place)
-        self.session.flush()
+        # Схема Stage 22A не знает `places.city` (миграция 21), поэтому строка
+        # вставляется сырым SQL по колонкам старой схемы.
+        with self.engine.begin() as connection:
+            connection.execute(
+                text(
+                    "INSERT INTO places (created_by_user_id, created_at) "
+                    "VALUES (:created_by, :created_at)"
+                ),
+                {"created_by": user.id, "created_at": utcnow()},
+            )
+            place_id = int(
+                connection.execute(text("SELECT last_insert_rowid()")).scalar_one()
+            )
         self.session.add(
             PlaceName(
-                place_id=place.id,
+                place_id=place_id,
                 name="Старый клуб",
                 name_search=normalize_place_name("Старый клуб"),
                 is_canonical=1,
@@ -201,7 +211,7 @@ class Stage22BCompatibilityTests(unittest.TestCase):
         self.assertIn((17, "archive_legacy_drafts"), journal(self.path))
         self.assertIn((18, "builtin_templates_v3"), journal(self.path))
         self.assertEqual(
-            journal(self.path)[-1], (LATEST_VERSION, "brick_proposal_description")
+            journal(self.path)[-1], (LATEST_VERSION, "builtin_templates_v4")
         )
         # Миграция 17 переименовала легаси-таблицу: строка прежнего черновика
         # читается из архива без потерь.
@@ -227,7 +237,7 @@ class Stage22BCompatibilityTests(unittest.TestCase):
                 rules_from_json(brick.value_type, brick.rules_json), {"min": 0}
             )
             self.assertEqual(brick.owner_user_id, user.id)
-            self.assertIsNotNone(session.get(Place, place.id))
+            self.assertIsNotNone(session.get(Place, place_id))
 
     def test_migration_seven_is_idempotent_and_sessions_survive_restart(self) -> None:
         self.assertEqual(run_migrations(self.engine), LATEST_VERSION)

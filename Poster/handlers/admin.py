@@ -140,12 +140,14 @@ from place_edit_store import (
     clean_address_text,
     delete_place_address,
     delete_place_alias,
+    delete_place_city,
     delete_place_url,
     list_place_aliases,
     normalize_place_url,
     rename_canonical_place_name,
     rename_place_alias,
     set_place_address,
+    set_place_city,
     set_place_url,
 )
 from place_state import clear_place_session
@@ -155,6 +157,7 @@ from place_store import (
     find_name_conflicts,
     get_place_details,
     normalize_place_name,
+    validate_place_city,
     validate_place_name,
 )
 from template_state import clear_template_session
@@ -189,6 +192,9 @@ PHASES = {
     "edit_address_input",
     "edit_address_confirm",
     "edit_address_delete_confirm",
+    "edit_city_input",
+    "edit_city_confirm",
+    "edit_city_delete_confirm",
     "edit_url_input",
     "edit_url_confirm",
     "edit_url_delete_confirm",
@@ -1013,6 +1019,8 @@ def _place_text(
             text += f"\nЕщё {len(alternatives) - 8}."
     if details.address:
         text += f"\n\nАдрес: {_long_value(details.address)}"
+    # Poster 2.0 U1a: город показывается и у старых мест (NULL → «—»).
+    text += f"\n\nГород: {_h(details.city) if details.city else '—'}"
     if details.url:
         text += f"\n\nСсылка: {_safe_link(details.url)}"
     open_conflicts = count_open_conflicts_for_place(session, details.place_id)
@@ -1039,8 +1047,8 @@ def _place_text(
                 f"{_h(_transfer_expiry_label(pending))}."
             )
     text += (
-        "\n\nРедактирование названия, альтернативных названий, адреса и "
-        "ссылки доступно из этого кабинета."
+        "\n\nРедактирование названия, альтернативных названий, города, адреса "
+        "и ссылки доступно из этого кабинета."
     )
     return text
 
@@ -1732,6 +1740,7 @@ def _edit_menu_content(
         "✏️ Редактирование места\n\n"
         f"📍 Название: {_h(details.canonical_name)}\n"
         f"Альтернативные названия: {len(aliases)}\n"
+        f"Город: {_h(details.city) if details.city else 'Не указан'}\n"
         f"Адрес: {_long_value(details.address) if details.address else 'Не указан'}\n"
         f"Ссылка: {_safe_link(details.url) if details.url else 'Не указана'}\n\n"
         "Выберите, что изменить:"
@@ -1757,11 +1766,26 @@ def _edit_menu_content(
         ],
         [
             InlineKeyboardButton(
+                "🏙 Изменить город",
+                callback_data=f"adm_edit_city:{details.place_id}",
+            )
+        ],
+        [
+            InlineKeyboardButton(
                 "🔗 Изменить ссылку",
                 callback_data=f"adm_edit_url:{details.place_id}",
             )
         ],
     ]
+    if details.city:
+        rows.append(
+            [
+                InlineKeyboardButton(
+                    "🗑 Удалить город",
+                    callback_data=f"adm_edit_city_delete:{details.place_id}",
+                )
+            ]
+        )
     if details.address:
         rows.append(
             [
@@ -1822,6 +1846,16 @@ def _edit_input_content(
             "Введите адрес места обычным текстом. Длина не ограничена "
             "искусственно: адрес сохраняется полностью."
         )
+    elif phase == "edit_city_input":
+        current = _h(details.city) if details.city else "Не указан"
+        text = (
+            "🏙 Изменение города\n\n"
+            f"📍 {_h(details.canonical_name)}\n"
+            f"Текущий город: {current}\n\n"
+            "Введите город площадки обычным текстом (например, Москва). "
+            "Город показывается в списке площадок и помогает найти место "
+            "поиском."
+        )
     elif phase == "edit_url_input":
         current = details.url if details.url else "Не указана"
         text = (
@@ -1853,6 +1887,16 @@ def _edit_confirm_content(
             f"📍 {_h(details.canonical_name)}\n\n"
             f"Текущий адрес: {_long_value(details.address)}\n\n"
             "Адрес будет удалён из карточки места. Само место сохранится."
+        )
+    elif phase == "edit_city_delete_confirm":
+        if not details.city:
+            return None
+        text = (
+            "🗑 Подтвердите удаление города\n\n"
+            f"📍 {_h(details.canonical_name)}\n\n"
+            f"Текущий город: {_h(details.city)}\n\n"
+            "Город будет удалён из карточки места. Само место и его шаблон "
+            "сохранятся; заполнить город заново можно в меню редактирования."
         )
     elif phase == "edit_url_delete_confirm":
         if not details.url:
@@ -1917,6 +1961,17 @@ def _edit_confirm_content(
                 f"Новый адрес: {_long_value(value)}\n\n"
                 "Адрес будет виден в карточке места полностью; длинное "
                 "значение на экране помечается как фрагмент."
+            )
+        elif phase == "edit_city_confirm":
+            current = _h(details.city) if details.city else "Не указан"
+            text = (
+                f"{warning_block}"
+                "🏙 Подтвердите изменение города\n\n"
+                f"📍 {_h(details.canonical_name)}\n\n"
+                f"Текущий город: {current}\n"
+                f"Новый город: {_h(value)}\n\n"
+                "Город показывается в списке площадок и результатах поиска, "
+                "но не в тексте анонса."
             )
         elif phase == "edit_url_confirm":
             current = details.url if details.url else "Не указана"
@@ -2173,6 +2228,7 @@ async def _render_phase(
             "edit_alias_add_input",
             "edit_alias_rename_input",
             "edit_address_input",
+            "edit_city_input",
             "edit_url_input",
         }:
             if details is None:
@@ -2194,6 +2250,8 @@ async def _render_phase(
             "edit_alias_delete_confirm",
             "edit_address_confirm",
             "edit_address_delete_confirm",
+            "edit_city_confirm",
+            "edit_city_delete_confirm",
             "edit_url_confirm",
             "edit_url_delete_confirm",
         }:
@@ -2967,6 +3025,7 @@ EDIT_INPUT_PHASES = frozenset(
         "edit_alias_add_input",
         "edit_alias_rename_input",
         "edit_address_input",
+        "edit_city_input",
         "edit_url_input",
     }
 )
@@ -2978,6 +3037,9 @@ EDIT_CANCEL_TO_MENU_PHASES = frozenset(
         "edit_address_input",
         "edit_address_confirm",
         "edit_address_delete_confirm",
+        "edit_city_input",
+        "edit_city_confirm",
+        "edit_city_delete_confirm",
         "edit_url_input",
         "edit_url_confirm",
         "edit_url_delete_confirm",
@@ -3103,6 +3165,18 @@ async def handle_edit_address(
     await _render_phase(update, context, state)
 
 
+async def handle_edit_city(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """«🏙 Изменить город»: переход к вводу города (Poster 2.0 U1a)."""
+    result = await _edit_transition(update, context, allowed_phase="edit_menu")
+    if result is None:
+        return
+    query, state = result
+    await query.answer()
+    _clear_edit_keys(state)
+    state["phase"] = "edit_city_input"
+    await _render_phase(update, context, state)
+
+
 async def handle_edit_url(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     result = await _edit_transition(update, context, allowed_phase="edit_menu")
     if result is None:
@@ -3143,6 +3217,39 @@ async def handle_edit_address_delete(
     # другой администратор не изменил его в процессе.
     state["edit_expected"] = details.address
     state["phase"] = "edit_address_delete_confirm"
+    await _render_phase(update, context, state)
+
+
+async def handle_edit_city_delete(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> None:
+    """«🗑 Удалить город»: подтверждение сброса города в NULL."""
+    result = await _edit_transition(update, context, allowed_phase="edit_menu")
+    if result is None:
+        return
+    query, state = result
+    await query.answer()
+    place_id = state.get("place_id")
+    session = SessionLocal()
+    try:
+        details = (
+            get_place_details(session, int(place_id))
+            if isinstance(place_id, int)
+            else None
+        )
+    finally:
+        session.close()
+    if details is None or details.city is None:
+        # Город уже удалён или его не было: предлагаем обновить меню.
+        await query.answer(
+            "Город уже отсутствует: обновите меню редактирования.",
+            show_alert=True,
+        )
+        return
+    # Фиксируем текущий город: подтверждение сработает только если
+    # другой администратор не изменил его в процессе.
+    state["edit_expected"] = details.city
+    state["phase"] = "edit_city_delete_confirm"
     await _render_phase(update, context, state)
 
 
@@ -3312,6 +3419,14 @@ def _validate_edit_input(
                 "«Удалить адрес» в меню редактирования."
             )
         return "edit_address_confirm", cleaned, ""
+    if phase == "edit_city_input":
+        cleaned_city = validate_place_city(raw)
+        if cleaned_city == details.city:
+            raise PlaceEditValueError(
+                "Город уже такой. Если город нужно удалить, используйте кнопку "
+                "«Удалить город» в меню редактирования."
+            )
+        return "edit_city_confirm", cleaned_city, ""
     if phase == "edit_url_input":
         normalized = normalize_place_url(raw)
         if normalized == details.url:
@@ -3448,6 +3563,7 @@ async def handle_edit_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     expected_map = {
         "edit_name_confirm": details.canonical_name,
         "edit_address_confirm": details.address,
+        "edit_city_confirm": details.city,
         "edit_url_confirm": details.url,
     }
     if next_phase in expected_map:
@@ -3482,6 +3598,10 @@ def _edit_result_notice(
             return "✅ Адрес места обновлён.", "edit_menu"
         if phase == "edit_address_delete_confirm":
             return "✅ Адрес места удалён.", "edit_menu"
+        if phase == "edit_city_confirm":
+            return "✅ Город места обновлён.", "edit_menu"
+        if phase == "edit_city_delete_confirm":
+            return "✅ Город места удалён.", "edit_menu"
         if phase == "edit_url_confirm":
             return "✅ Ссылка места обновлена.", "edit_menu"
         return "✅ Ссылка места удалена.", "edit_menu"
@@ -3540,6 +3660,8 @@ async def handle_edit_confirm(
         "edit_alias_delete_confirm",
         "edit_address_confirm",
         "edit_address_delete_confirm",
+        "edit_city_confirm",
+        "edit_city_delete_confirm",
         "edit_url_confirm",
         "edit_url_delete_confirm",
     }:
@@ -3625,6 +3747,21 @@ async def handle_edit_confirm(
                     actor_telegram_user_id=actor_telegram_user_id,
                     place_id=place_id,
                     expected_address=_expected_field_from_state(state, details.address),
+                )
+            elif phase == "edit_city_confirm":
+                result = set_place_city(
+                    session,
+                    actor_telegram_user_id=actor_telegram_user_id,
+                    place_id=place_id,
+                    city=str(state.get("edit_value") or ""),
+                    expected_city=_expected_field_from_state(state, details.city),
+                )
+            elif phase == "edit_city_delete_confirm":
+                result = delete_place_city(
+                    session,
+                    actor_telegram_user_id=actor_telegram_user_id,
+                    place_id=place_id,
+                    expected_city=_expected_field_from_state(state, details.city),
                 )
             elif phase == "edit_url_confirm":
                 result = set_place_url(
@@ -5506,6 +5643,11 @@ def admin_handlers() -> list[BaseHandler]:
         CallbackQueryHandler(
             handle_edit_address_delete,
             pattern=r"^adm_edit_address_delete:\d+$",
+        ),
+        CallbackQueryHandler(handle_edit_city, pattern=r"^adm_edit_city:\d+$"),
+        CallbackQueryHandler(
+            handle_edit_city_delete,
+            pattern=r"^adm_edit_city_delete:\d+$",
         ),
         CallbackQueryHandler(handle_edit_url, pattern=r"^adm_edit_url:\d+$"),
         CallbackQueryHandler(

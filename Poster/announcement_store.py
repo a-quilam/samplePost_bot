@@ -167,6 +167,8 @@ class AnnouncementDraftDetails:
     place_display_name: str | None
     place_address: str | None
     place_url: str | None
+    # Poster 2.0 U1a: снимок города площадки; NULL — «сведений нет».
+    place_city: str | None
     template_id: int | None
     template_version: int | None
     template_snapshot: AnnouncementTemplateSnapshot | None
@@ -749,6 +751,7 @@ def _draft_details(
         place_display_name=row.place_display_name,
         place_address=row.place_address,
         place_url=row.place_url,
+        place_city=row.place_city,
         origin=row.origin,
         template_id=row.template_id,
         template_version=row.template_version,
@@ -1003,6 +1006,7 @@ def _start_place_announcement(
         place_display_name=display_name,
         place_address=_optional_text(details.address),
         place_url=_optional_text(details.url),
+        place_city=_optional_text(details.city),
         origin=ORIGIN_PLACE,
         template_id=None,
         template_version=None,
@@ -1067,6 +1071,7 @@ def _start_personal_announcement(
         place_display_name=None,
         place_address=None,
         place_url=None,
+        place_city=None,
         origin=ORIGIN_PERSONAL,
         template_id=None,
         template_version=None,
@@ -1212,6 +1217,7 @@ def confirm_announcement_place(
                 "place_display_name": display_name,
                 "place_address": _optional_text(details.address),
                 "place_url": _optional_text(details.url),
+                "place_city": _optional_text(details.city),
             },
         )
         _commit(session)
@@ -1249,6 +1255,46 @@ def _template_for_selection(
     else:
         raise AnnouncementStageError("Неизвестный вид шаблона.")
     return template
+
+
+def _refresh_place_snapshot(
+    session: Session,
+    row: AnnouncementDraft,
+) -> dict[str, object]:
+    """
+    Перечитывает снимок площадки из справочника перед фиксацией шаблона (U1a).
+
+    Дефект: между подтверждением места и выбором шаблона админ мог исправить
+    название/адрес/ссылку/город площадки, а анонс показывал старый снимок —
+    живой анонс выходил с устаревшими данными. Здесь снимок обновляется
+    ОДИН раз, в момент, когда структура анонса фиксируется.
+
+    Возвращает только изменившиеся поля (пустой словарь — обновлять нечего),
+    чтобы не поднимать ревизию черновика без причины. Данные справочника
+    не меняются: это по-прежнему снимок, а не ссылка.
+    """
+    if row.origin != ORIGIN_PLACE or row.place_id is None:
+        return {}
+    details = get_place_details(session, int(row.place_id))
+    if details is None:
+        raise AnnouncementStageError("Выбранное место больше не доступно.")
+
+    name_id = details.canonical_name_id
+    display_name = details.canonical_name
+    if row.place_name_id is not None:
+        name = get_place_name(session, int(row.place_id), int(row.place_name_id))
+        if name is not None:
+            name_id = name.id
+            display_name = name.name
+
+    fresh = {
+        "place_name_id": name_id,
+        "place_display_name": display_name,
+        "place_address": _optional_text(details.address),
+        "place_url": _optional_text(details.url),
+        "place_city": _optional_text(details.city),
+    }
+    return {key: value for key, value in fresh.items() if getattr(row, key) != value}
 
 
 def choose_announcement_template(
@@ -1318,6 +1364,10 @@ def choose_announcement_template(
                 "template_version": template.current_version.version,
                 "template_snapshot_id": snapshot.snapshot_id,
                 "stage": WizardStage.QUESTIONS.value,
+                # U1a: снимок площадки перечитывается ровно здесь — структура
+                # анонса фиксируется, и старые данные справочника в живой
+                # пост попасть уже не должны.
+                **_refresh_place_snapshot(session, row),
             },
         )
         _commit(session)
@@ -2316,6 +2366,7 @@ def build_announcement_questions(
         display_name=row.place_display_name,
         address=row.place_address,
         url=row.place_url,
+        city=row.place_city,
         brick_ids_by_code=snapshot_brick_ids_by_code(snapshot),
     )
     answers = {
@@ -2396,6 +2447,7 @@ def build_announcement_render_payload(
         display_name=row.place_display_name,
         address=row.place_address,
         url=row.place_url,
+        city=row.place_city,
         brick_ids_by_code=snapshot_brick_ids_by_code(snapshot),
     ).items():
         values_by_id.setdefault(brick_id, raw)
@@ -2442,6 +2494,7 @@ def build_announcement_fields(
         display_name=row.place_display_name,
         address=row.place_address,
         url=row.place_url,
+        city=row.place_city,
         brick_ids_by_code=snapshot_brick_ids_by_code(snapshot),
     )
 

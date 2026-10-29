@@ -34,6 +34,11 @@ from template_store import create_standard_template_for_place
 # остальными полями без молчаливого обрезания. Превышение — явная ошибка.
 MAX_PLACE_NAME_LENGTH = 300
 
+# Максимальная длина города площадки. Город — короткая географическая метка:
+# он попадает в кнопки списков, поэтому искусственно длинное значение
+# отклоняется явной ошибкой, а не обрезается.
+MAX_PLACE_CITY_LENGTH = 120
+
 # Достаточно строгий порог «очень похожего» названия для предупреждения.
 SIMILARITY_THRESHOLD = 0.8
 
@@ -49,6 +54,9 @@ class PlaceListItem:
     place_id: int
     canonical_name_id: int
     canonical_name: str
+    # Poster 2.0 U1a: город показывается рядом с названием, но у старых
+    # записей его нет — интерфейс тогда печатает только название.
+    city: str | None = None
 
 
 @dataclass(frozen=True)
@@ -70,6 +78,8 @@ class PlaceDetails:
     names: tuple[PlaceNameItem, ...]
     address: str | None
     url: str | None
+    # Poster 2.0 U1a: город; NULL у старых записей (не backfill).
+    city: str | None = None
 
 
 @dataclass(frozen=True)
@@ -82,6 +92,9 @@ class SearchResult:
     matched_name: str
     category: str
     score: float
+    # Город найденного места (NULL у старых записей): список печатает
+    # «Название · Город», если город известен.
+    city: str | None = None
 
 
 @dataclass(frozen=True)
@@ -145,14 +158,16 @@ def normalize_place_name(name: str) -> str:
     return normalized
 
 
-def _validated_name(name: str, *, what: str = "Название места") -> str:
+def _validated_name(
+    name: str, *, what: str = "Название места", limit: int = MAX_PLACE_NAME_LENGTH
+) -> str:
     """Отображаемое название с проверкой непустоты, смысла и длины."""
     display = clean_display_name(name)
     if not display:
         raise PlaceNameError(f"{what} не может быть пустым")
-    if len(display) > MAX_PLACE_NAME_LENGTH:
+    if len(display) > limit:
         raise PlaceNameError(
-            f"{what} слишком длинное: максимум {MAX_PLACE_NAME_LENGTH} "
+            f"{what} слишком длинное: максимум {limit} "
             f"символов, получено {len(display)}. Сократите название."
         )
     normalize_place_name(display)  # проверка «хотя бы одна буква/цифра»
@@ -169,6 +184,17 @@ def validate_place_name(name: str, *, what: str = "Название места")
     return _validated_name(name, what=what)
 
 
+def validate_place_city(city: str) -> str:
+    """
+    Проверка города площадки (Poster 2.0 U1a).
+
+    Правила те же, что у названия: NFKC, сжатые пробелы, непустое значение
+    и хотя бы одна буква/цифра. Свой (меньший) предел длины — город
+    помещается в кнопку списка вместе с названием.
+    """
+    return _validated_name(city, what="Город", limit=MAX_PLACE_CITY_LENGTH)
+
+
 def _optional_text(value: str | None) -> str | None:
     """Необязательный контакт: пустое значение хранится как NULL."""
     if value is None:
@@ -181,6 +207,7 @@ def create_place(
     session: Session,
     canonical_name: str,
     *,
+    city: str,
     created_by_user_id: int | None = None,
     address: str | None = None,
     url: str | None = None,
@@ -196,15 +223,21 @@ def create_place(
     `created_by_user_id` — внутренний `users.id`, а не Telegram user ID.
     Создатель не становится администратором места и не получает права
     редактировать стандартный шаблон. Адрес/ссылка необязательны.
+
+    Poster 2.0 U1a: `city` обязателен для НОВОЙ зарегистрированной площадки
+    (инвариант владельца). Ограничение действует на этом входе, а не в схеме:
+    старые записи с `city IS NULL` остаются рабочими и не переписываются.
     """
     display_name = _validated_name(canonical_name)
     name_search = normalize_place_name(display_name)
+    display_city = validate_place_city(city)
 
     now = utcnow()
     place = Place(
         created_by_user_id=created_by_user_id,
         address=_optional_text(address),
         url=_optional_text(url),
+        city=display_city,
         created_at=now,
     )
     session.add(place)
@@ -244,7 +277,7 @@ def list_places(
     названия невозможна по прикладному контракту Stage 19A.
     """
     base = (
-        select(Place.id, PlaceName.id, PlaceName.name)
+        select(Place.id, PlaceName.id, PlaceName.name, Place.city)
         .join(PlaceName, PlaceName.place_id == Place.id)
         .where(PlaceName.is_canonical == 1)
     )
@@ -258,6 +291,7 @@ def list_places(
                 place_id=int(row[0]),
                 canonical_name_id=int(row[1]),
                 canonical_name=str(row[2]),
+                city=(str(row[3]) if row[3] else None),
             )
             for row in rows
         ],
@@ -292,6 +326,7 @@ def get_place_details(session: Session, place_id: int) -> PlaceDetails | None:
         ),
         address=place.address or None,
         url=place.url or None,
+        city=place.city or None,
     )
 
 
@@ -352,8 +387,30 @@ _RANK = {
     "alias_exact": 1,
     "canonical_partial": 2,
     "alias_partial": 3,
-    "similar": 4,
+    "city": 4,
+    "similar": 5,
 }
+
+
+def _city_search_score(needle: str, city: str | None) -> float | None:
+    """
+    Совпадение поискового запроса с городом площадки (Poster 2.0 U1a).
+
+    Город — отдельная категория результата: место находится по городу даже
+    тогда, когда запрос не похож на его название. Пустой/битый город
+    (старые записи) просто не участвует; исключений из поиска не возникает.
+    """
+    if not city or not city.strip():
+        return None
+    try:
+        normalized = normalize_place_name(city)
+    except PlaceNameError:
+        return None
+    if normalized == needle:
+        return 1.0
+    if needle in normalized:
+        return 0.99 if normalized.startswith(needle) else 0.9
+    return None
 
 
 def search_places(session: Session, query: str) -> list[SearchResult]:
@@ -363,6 +420,10 @@ def search_places(session: Session, query: str) -> list[SearchResult]:
     Для каждого места остаётся лучший вариант названия. Точное каноническое
     название важнее точной альтернативы, затем идут частичные совпадения и
     похожие названия. Места с одинаковыми названиями остаются отдельными.
+
+    Poster 2.0 U1a: дополнительно ищется совпадение с городом площадки.
+    Это отдельная категория `city` (ранг после названий, до «похожих»):
+    запрос по городу находит место, даже если название на запрос не похоже.
     """
     needle = _normalized_search_query(query)
     places = list(session.scalars(select(Place).order_by(Place.id)).all())
@@ -404,6 +465,7 @@ def search_places(session: Session, query: str) -> list[SearchResult]:
                 matched_name=name.name,
                 category=category,
                 score=score,
+                city=place.city or None,
             )
             current = best_by_place.get(place.id)
             if current is None or (
@@ -414,6 +476,30 @@ def search_places(session: Session, query: str) -> list[SearchResult]:
                 -current.score,
             ):
                 best_by_place[place.id] = candidate
+
+        # Отдельная категория «совпадение по городу»: место находится, даже
+        # если запрос не похож на название. Совпадение по названию всегда
+        # важнее (ранг ниже), поэтому кандидат по городу не вытесняет его.
+        city_score = _city_search_score(needle, place.city)
+        if city_score is not None:
+            city_candidate = SearchResult(
+                place_id=place.id,
+                canonical_name=canonical.name,
+                matched_name_id=canonical.id,
+                matched_name=canonical.name,
+                category="city",
+                score=city_score,
+                city=place.city or None,
+            )
+            current = best_by_place.get(place.id)
+            if current is None or (
+                _RANK[city_candidate.category],
+                -city_candidate.score,
+            ) < (
+                _RANK[current.category],
+                -current.score,
+            ):
+                best_by_place[place.id] = city_candidate
 
     results = list(best_by_place.values())
     results.sort(

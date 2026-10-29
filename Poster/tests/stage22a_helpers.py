@@ -61,6 +61,7 @@ class BrickDatabaseTestCase(unittest.TestCase):
         return create_place(
             self.session,
             name,
+            city="Тестовый город",
             created_by_user_id=created_by_user_id,
             address=address,
             url=url,

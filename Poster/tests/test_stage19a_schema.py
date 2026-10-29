@@ -90,6 +90,7 @@ class PlaceSchemaTests(unittest.TestCase):
         place = create_place(
             self.session,
             "Ёлка-Кафе «Тёплый Дом»",
+            city="Тестовый город",
             created_by_user_id=user.id,
         )
 
@@ -103,8 +104,8 @@ class PlaceSchemaTests(unittest.TestCase):
         self.assertEqual(name.is_canonical, 1)
 
     def test_similar_but_different_places_stay_independent(self) -> None:
-        create_place(self.session, "Кофейня «Дом»")
-        create_place(self.session, "кофейня дом")
+        create_place(self.session, "Кофейня «Дом»", city="Тестовый город")
+        create_place(self.session, "кофейня дом", city="Тестовый город")
 
         with self.Session() as session:
             self.assertEqual(len(session.scalars(select(Place)).all()), 2)
@@ -116,12 +117,12 @@ class PlaceSchemaTests(unittest.TestCase):
         for value in ("", "   ", "«»---"):
             with self.subTest(value=value):
                 with self.assertRaises(PlaceNameError):
-                    create_place(self.session, value)
+                    create_place(self.session, value, city="Тестовый город")
         with self.Session() as session:
             self.assertEqual(len(session.scalars(select(Place)).all()), 0)
 
     def test_database_check_rejects_empty_name_and_search(self) -> None:
-        place = create_place(self.session, "Нормальное место")
+        place = create_place(self.session, "Нормальное место", city="Тестовый город")
 
         for name, search, canonical in (
             ("", "x", 0),
@@ -150,7 +151,7 @@ class PlaceSchemaTests(unittest.TestCase):
                         )
 
     def test_only_one_canonical_name_per_place(self) -> None:
-        place = create_place(self.session, "Театр")
+        place = create_place(self.session, "Театр", city="Тестовый город")
 
         with self.assertRaises(IntegrityError):
             with self.engine.begin() as connection:
@@ -183,7 +184,7 @@ class PlaceSchemaTests(unittest.TestCase):
         self.assertEqual(sum(name.is_canonical for name in names), 1)
 
     def test_duplicate_normalized_name_inside_place_conflicts(self) -> None:
-        place = create_place(self.session, "Кофейня «Дом»")
+        place = create_place(self.session, "Кофейня «Дом»", city="Тестовый город")
 
         with self.assertRaises(IntegrityError):
             with self.engine.begin() as connection:
@@ -198,8 +199,8 @@ class PlaceSchemaTests(unittest.TestCase):
                 )
 
     def test_same_normalized_name_in_different_places_is_allowed(self) -> None:
-        first = create_place(self.session, "Кофейня «Дом»")
-        second = create_place(self.session, "Кофейня Дом")
+        first = create_place(self.session, "Кофейня «Дом»", city="Тестовый город")
+        second = create_place(self.session, "Кофейня Дом", city="Тестовый город")
 
         with self.Session() as session:
             rows = session.scalars(
@@ -229,6 +230,7 @@ class PlaceSchemaTests(unittest.TestCase):
             create_place(
                 self.session,
                 "Место с несуществующим создателем",
+                city="Тестовый город",
                 created_by_user_id=999999,
             )
         with self.Session() as session:
@@ -238,7 +240,10 @@ class PlaceSchemaTests(unittest.TestCase):
     def test_delete_user_sets_creator_null_and_place_delete_cascades(self) -> None:
         user = self._user()
         place = create_place(
-            self.session, "Место для удаления", created_by_user_id=user.id
+            self.session,
+            "Место для удаления",
+            city="Тестовый город",
+            created_by_user_id=user.id,
         )
         name = self.session.scalars(
             select(PlaceName).where(PlaceName.place_id == place.id)
@@ -301,7 +306,9 @@ class PlaceSchemaTests(unittest.TestCase):
     def test_concurrent_place_creation_keeps_all_rows(self) -> None:
         def create(_: int) -> int:
             with self.Session() as session:
-                place = create_place(session, "Одновременное место")
+                place = create_place(
+                    session, "Одновременное место", city="Тестовый город"
+                )
                 return place.id
 
         with ThreadPoolExecutor(max_workers=6) as pool:

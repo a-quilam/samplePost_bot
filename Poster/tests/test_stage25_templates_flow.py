@@ -29,6 +29,7 @@ from template_store import (
     get_template_version,
     update_template_header,
 )
+from template_types import BUILTIN_TEMPLATE
 from tests.integration_harness import (
     HARNESS_IMPORT_ERROR,
     scenario_test,
@@ -105,6 +106,7 @@ class TemplatesUiTests(unittest.TestCase):
             place = create_place(
                 session,
                 f"Место {admin_tg}",
+                city="Тестовый город",
                 created_by_user_id=admin.id,
             )
             session.add(
@@ -253,7 +255,9 @@ class TemplatesUiTests(unittest.TestCase):
         self.assertEqual(rows[0].revision, 2)
         # Контент сброшен к встроенному.
         v2 = get_template_version_direct(h, rows[0].id, 2)
-        self.assertEqual(v2.header, "**[название]**")
+        self.assertEqual(v2.header, BUILTIN_TEMPLATE.header)
+        self.assertEqual(v2.body, BUILTIN_TEMPLATE.body)
+        self.assertEqual(v2.footer, BUILTIN_TEMPLATE.footer)
 
     @scenario_test
     async def test_other_user_cannot_access_foreign_template(self, h) -> None:

@@ -107,6 +107,7 @@ class BrickProposalFlowTests(unittest.TestCase):
             place = create_place(
                 session,
                 name,
+                city="Тестовый город",
                 created_by_user_id=creator.id if creator is not None else None,
             )
             if creator is not None:

@@ -77,7 +77,6 @@ OWNER_REFERENCE = (
     "<b>Летний концерт</b>\n"
     "\n"
     "<b>12.07.2027 // 19:00</b>\n"
-    "\n"
     '<b><a href="https://example.com/place">Дом культуры</a></b>\n'
     "ул. Ленина, 1\n"
     "\n"
@@ -97,6 +96,15 @@ V3_BODY = (
     "[описание]"
 )
 V3_FOOTER = "\n[контакт]"
+
+# Эталон v4 (Poster 2.0 U1a): после заголовка пустая строка, дата/время и
+# площадка — соседние строки; тело — только описание, подвал — только контакт.
+V4_HEADER = (
+    "**[название]**\n\n**[дата] // [время_начала]**\n"
+    "**[место]([ссылка_места])**\n[адрес]"
+)
+V4_BODY = "\n[описание]"
+V4_FOOTER = "\n[контакт]"
 
 V2_HEADER = "**[название]**"
 V2_BODY = (
@@ -152,6 +160,7 @@ def _seed_place(
         place = create_place(
             session,
             name,
+            city="Тестовый город",
             created_by_user_id=user.id,
             address=address,
             url=url,
@@ -242,8 +251,9 @@ class DeliveredReferenceTests(unittest.TestCase):
         self.assertEqual(delivered, OWNER_REFERENCE)
         # Структура по строкам: жирность и пустые строки на своих местах.
         lines = (delivered or "").split("\n")
-        self.assertEqual(len(lines), 10, f"строки: {lines!r}")
-        for index in (0, 2, 4):
+        # v4: между заголовком и «дата // время» ровно одна пустая строка.
+        self.assertEqual(len(lines), 9, f"строки: {lines!r}")
+        for index in (0, 2, 3):
             self.assertTrue(
                 lines[index].startswith("<b>"), f"строка {index}: {lines[index]!r}"
             )
@@ -251,11 +261,11 @@ class DeliveredReferenceTests(unittest.TestCase):
                 lines[index].endswith("</b>"), f"строка {index}: {lines[index]!r}"
             )
         self.assertEqual(
-            lines[4], '<b><a href="https://example.com/place">Дом культуры</a></b>'
+            lines[3], '<b><a href="https://example.com/place">Дом культуры</a></b>'
         )
-        self.assertEqual(lines[5], "ул. Ленина, 1")
-        self.assertNotIn("<b>", lines[5], "адрес не должен быть жирным")
-        for index in (1, 3, 6, 8):
+        self.assertEqual(lines[4], "ул. Ленина, 1")
+        self.assertNotIn("<b>", lines[4], "адрес не должен быть жирным")
+        for index in (1, 5, 7):
             self.assertEqual(lines[index], "", f"строка {index} должна быть пустой")
         self.assertNotIn("**", delivered)
         self.assertNotIn("[", delivered)
@@ -348,7 +358,7 @@ class MigrationEighteenOwnerTests(unittest.TestCase):
     """Требование 2: обновляются только доказуемо нетронутые копии v2."""
 
     def setUp(self) -> None:
-        self.assertEqual(LATEST_VERSION, 20)
+        self.assertEqual(LATEST_VERSION, 22)
         self.path = temp_db_path("poster-r2-owner-m18-")
         self.addCleanup(shutil.rmtree, os.path.dirname(self.path), True)
         self.engine = make_engine(self.path)
@@ -420,7 +430,7 @@ class MigrationEighteenOwnerTests(unittest.TestCase):
         # 4 — переименованная, но нетронутая по тексту копия (не трогается).
         self._personal(4, name="Копия для концертов")
 
-    def test_only_untouched_copies_get_v3_and_rename_happens_with_it(self) -> None:
+    def test_only_untouched_copies_get_v4_and_rename_happens_with_it(self) -> None:
         # Возвращается LATEST_VERSION: R3 добавил миграцию 19, R4 — миграцию
         # 20 (обе no-op для этого теста), логика миграции 18 не менялась.
         self.assertEqual(run_migrations(self.engine), LATEST_VERSION)
@@ -431,12 +441,13 @@ class MigrationEighteenOwnerTests(unittest.TestCase):
             "SELECT version, header, body, footer, builtin_version "
             "FROM template_versions WHERE template_id = 1 ORDER BY version",
         )
-        self.assertEqual(len(rows), 2, "история: старая версия + новая")
+        self.assertEqual(len(rows), 3, "история: v2, v3 и новая v4")
         self.assertEqual(rows[0], (1, V2_HEADER, V2_BODY, V2_FOOTER, 2))
         self.assertEqual(rows[1], (2, V3_HEADER, V3_BODY, V3_FOOTER, 3))
+        self.assertEqual(rows[2], (3, V4_HEADER, V4_BODY, V4_FOOTER, 4))
         self.assertEqual(
             _sql(self.path, "SELECT name, revision FROM templates WHERE id = 1"),
-            [(NEW_INITIAL_NAME, 2)],
+            [(NEW_INITIAL_NAME, 3)],
             "имя меняется в той же миграции, что и содержимое",
         )
 
@@ -446,11 +457,12 @@ class MigrationEighteenOwnerTests(unittest.TestCase):
             "SELECT version, header, body, footer FROM template_versions "
             "WHERE template_id = 2 ORDER BY version",
         )
-        self.assertEqual(len(standard), 2)
+        self.assertEqual(len(standard), 3)
         self.assertEqual(standard[1], (2, V3_HEADER, V3_BODY, V3_FOOTER))
+        self.assertEqual(standard[2], (3, V4_HEADER, V4_BODY, V4_FOOTER))
         self.assertEqual(
             _sql(self.path, "SELECT name, revision FROM templates WHERE id = 2"),
-            [(None, 2)],
+            [(None, 3)],
         )
 
         # Тронутая и переименованная копии не изменились вообще.
@@ -568,7 +580,7 @@ class MigrationEighteenOwnerTests(unittest.TestCase):
 )
 class NewUserDefaultsTests(unittest.TestCase):
     @scenario_test
-    async def test_start_creates_default_template_with_v3_content(self, h):
+    async def test_start_creates_default_template_with_v4_content(self, h):
         await h.text("/start")
         with h.session_factory() as session:
             rows = list_personal_templates(session, DEFAULT_USER_ID)
@@ -576,9 +588,9 @@ class NewUserDefaultsTests(unittest.TestCase):
             template = rows[0]
             self.assertEqual(template.name, NEW_INITIAL_NAME)
             version = template.current_version
-            self.assertEqual(version.header, V3_HEADER)
-            self.assertEqual(version.body, V3_BODY)
-            self.assertEqual(version.footer, V3_FOOTER)
+            self.assertEqual(version.header, V4_HEADER)
+            self.assertEqual(version.body, V4_BODY)
+            self.assertEqual(version.footer, V4_FOOTER)
             rendered = render_template_version(
                 session,
                 actor_telegram_user_id=DEFAULT_USER_ID,
@@ -905,13 +917,14 @@ class PlaceHandbookOwnerTests(unittest.TestCase):
         self.assertEqual(_drafts(h), 0)
 
     @scenario_test
-    async def test_created_place_gets_v3_standard_without_announcement(self, h):
+    async def test_created_place_gets_v4_standard_without_announcement(self, h):
         await h.text("/start")
         await h.callback("manage_places")
         await h.callback("plm_add")
         self.assertIn("Анонс не запускается", h.screen_text())
         await h.text("Новая площадка R2")
         await h.callback("pl_create_confirm")
+        await h.text("Москва")
 
         self.assertIn("✅ Место добавлено", h.screen_text())
         self.assertIsNone(h.dialog_state(name=CONVERSATION_NAME))
@@ -925,7 +938,7 @@ class PlaceHandbookOwnerTests(unittest.TestCase):
             version = standard.current_version
             self.assertEqual(
                 (version.header, version.body, version.footer),
-                (V3_HEADER, V3_BODY, V3_FOOTER),
+                (V4_HEADER, V4_BODY, V4_FOOTER),
             )
             rendered = render_template_version(
                 session,

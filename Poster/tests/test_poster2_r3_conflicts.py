@@ -1190,9 +1190,10 @@ class ConflictMigrationTests(unittest.TestCase):
         self.addCleanup(self.engine.dispose)
         self.addCleanup(shutil.rmtree, os.path.dirname(self.path), True)
 
-    def test_latest_version_is_twenty(self) -> None:
-        # R4 добавил миграцию 20 поверх R3-овской 19; обе применяются штатно.
-        self.assertEqual(LATEST_VERSION, 20)
+    def test_latest_version_is_twenty_two(self) -> None:
+        # U1a добавил 21 (`place_city`) и 22 (`builtin_templates_v4`)
+        # поверх R4-овской 20; все применяются штатно.
+        self.assertEqual(LATEST_VERSION, 22)
 
     def test_migration_19_on_filled_database_keeps_data(self) -> None:
         from sqlalchemy import text
@@ -1224,7 +1225,7 @@ class ConflictMigrationTests(unittest.TestCase):
                 )
             )
 
-        self.assertEqual(run_migrations(self.engine), 20)
+        self.assertEqual(run_migrations(self.engine), LATEST_VERSION)
         with self.engine.begin() as connection:
             self.assertEqual(
                 connection.exec_driver_sql("PRAGMA foreign_key_check").fetchall(), []
@@ -1252,7 +1253,7 @@ class ConflictMigrationTests(unittest.TestCase):
                 0,
             )
         # Идемпотентность: повторный запуск ничего не меняет.
-        self.assertEqual(run_migrations(self.engine), 20)
+        self.assertEqual(run_migrations(self.engine), LATEST_VERSION)
         with self.engine.begin() as connection:
             self.assertEqual(
                 _first_cell(connection, "SELECT count(*) FROM brick_conflicts"),
@@ -1281,7 +1282,10 @@ class ConflictUiTests(unittest.TestCase):
                 session, SUPERADMIN_TG, username="boss", full_name="Босс"
             )
             place = create_place(
-                session, "Место конфликта", created_by_user_id=author.id
+                session,
+                "Место конфликта",
+                city="Тестовый город",
+                created_by_user_id=author.id,
             )
             session.add(
                 PlaceAdmin(

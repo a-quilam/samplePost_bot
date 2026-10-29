@@ -601,7 +601,10 @@ class BricksUiTests(unittest.TestCase):
         with h.session_factory() as session:
             user = get_or_create_user(session, h.user_id, username="bricks")
             place = create_place(
-                session, "Театр кирпичиков", created_by_user_id=user.id
+                session,
+                "Театр кирпичиков",
+                city="Тестовый город",
+                created_by_user_id=user.id,
             )
             session.commit()
             place_id = place.id

@@ -236,6 +236,7 @@ def place_values_by_code(
     display_name: str | None,
     address: str | None,
     url: str | None,
+    city: str | None = None,
 ) -> dict[str, object]:
     """
     Известные значения места по **кодам** системных кирпичиков.
@@ -246,7 +247,8 @@ def place_values_by_code(
     «код → brick_id» всегда берётся из снимка шаблона, а не из каталога.
 
     Адрес подставляется в оба кода — новый `[адрес]` (Poster 2.0) и старый
-    `[адрес_места]`, чтобы сохранённые снимки продолжали работать.
+    `[адрес_места]`, чтобы сохранённые снимки продолжали работать. Город
+    (U1a) — отдельный код `[город]`, в стандартный шаблон не входит.
     """
     values: dict[str, object] = {}
     if display_name is not None and display_name.strip():
@@ -256,6 +258,8 @@ def place_values_by_code(
         values["адрес_места"] = address
     if url is not None and url.strip():
         values["ссылка_места"] = url
+    if city is not None and city.strip():
+        values["город"] = city
     return values
 
 
@@ -264,20 +268,24 @@ def place_context_values(
     display_name: str | None,
     address: str | None,
     url: str | None,
+    city: str | None = None,
     brick_ids_by_code: Mapping[str, int] | None = None,
 ) -> dict[int, object]:
     """
     Известные значения места по brick_id.
 
-    Отсутствующий адрес/ссылка не превращаются в пустую строку или заглушку:
-    такого ключа просто нет, и мастер задаст вопрос только при необходимости.
+    Отсутствующий адрес/ссылка/город не превращаются в пустую строку или
+    заглушку: такого ключа просто нет, и мастер задаст вопрос только при
+    необходимости.
 
     `brick_ids_by_code` — реальные ID из снимка/определений. Без него берутся
     канонические ID каталога; это годится только для чистой базы, где
     миграции создали кирпичики подряд, поэтому рабочий слой всегда передаёт
     явное сопоставление.
     """
-    known = place_values_by_code(display_name=display_name, address=address, url=url)
+    known = place_values_by_code(
+        display_name=display_name, address=address, url=url, city=city
+    )
     mapping: Mapping[str, int]
     if brick_ids_by_code is None:
         mapping = {

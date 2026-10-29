@@ -158,7 +158,9 @@ def make_place_with_admin(
         admin = get_or_create_user(
             session, admin_tg, username=admin_username, full_name="Админ места"
         )
-        place = create_place(session, name, created_by_user_id=admin.id)
+        place = create_place(
+            session, name, city="Тестовый город", created_by_user_id=admin.id
+        )
         session.add(
             PlaceAdmin(place_id=place.id, user_id=admin.id, assigned_at=utcnow())
         )
@@ -423,7 +425,12 @@ class ConflictPlaqueHonestyTests(unittest.TestCase):
             owner = get_or_create_user(
                 session, OWNER_TG, username="owner_noadmin", full_name="Автор"
             )
-            place = create_place(session, "Зал без админа", created_by_user_id=owner.id)
+            place = create_place(
+                session,
+                "Зал без админа",
+                city="Тестовый город",
+                created_by_user_id=owner.id,
+            )
             session.commit()
             place_id = int(place.id)
         # Кирпичик места создаёт суперадмин: админа у места нет.

@@ -92,6 +92,7 @@ def _seed_place(h) -> int:
         place = create_place(
             session,
             "Дом культуры",
+            city="Тестовый город",
             created_by_user_id=user.id,
             address="ул. Тестовая, 1",
             url="https://example.com/place",

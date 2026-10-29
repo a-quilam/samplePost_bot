@@ -123,6 +123,7 @@ def _seed_place(
         place = create_place(
             session,
             name,
+            city="Тестовый город",
             created_by_user_id=user.id,
             address=address,
             url=url,
@@ -301,6 +302,7 @@ class AnnouncementWizardPlaceTests(unittest.TestCase):
                 create_place(
                     session,
                     f"Тестовое место {number}",
+                    city="Тестовый город",
                     created_by_user_id=user.id,
                 )
             session.commit()

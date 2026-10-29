@@ -765,7 +765,9 @@ class R3UiTests(unittest.TestCase):
             get_or_create_user(
                 session, SUPERADMIN_TG, username="boss", full_name="Босс"
             )
-            place = create_place(session, "Место UI", created_by_user_id=author.id)
+            place = create_place(
+                session, "Место UI", city="Тестовый город", created_by_user_id=author.id
+            )
             session.add(
                 PlaceAdmin(
                     place_id=place.id,
@@ -901,7 +903,10 @@ class R3UiTests(unittest.TestCase):
                 session, OUTSIDER_TG, username="outsider", full_name="Чужой"
             )
             foreign_place = create_place(
-                session, "Чужое место", created_by_user_id=outsider.id
+                session,
+                "Чужое место",
+                city="Тестовый город",
+                created_by_user_id=outsider.id,
             )
             session.add(
                 PlaceAdmin(
@@ -1470,12 +1475,12 @@ class R3MigrationTests(unittest.TestCase):
         return None if row is None else str(row[0])
 
     def test_latest_version_is_19(self) -> None:
-        self.assertEqual(LATEST_VERSION, 20)
+        self.assertEqual(LATEST_VERSION, 22)
 
     def test_fresh_database_has_conflict_tables_and_integrity(self) -> None:
         from migrations import run_migrations
 
-        self.assertEqual(run_migrations(self.engine), 20)
+        self.assertEqual(run_migrations(self.engine), 22)
         with self.engine.connect() as connection:
             names = {
                 str(row[0])
@@ -1560,37 +1565,57 @@ class R3MigrationTests(unittest.TestCase):
                 connection, "SELECT id, created_by_user_id FROM places ORDER BY id"
             )
 
-        self.assertEqual(run_migrations(self.engine), 20)
+        self.assertEqual(run_migrations(self.engine), 22)
 
+        # Таблицы, к которым более поздние миграции добавляют колонки:
+        # `brick_proposals.description` (миграция 20) и `places.city`
+        # (миграция 21). Для них проверяется «прежние колонки дословно плюс
+        # ровно одна новая».
+        extended_tables = {"brick_proposals", "places"}
         with self.engine.connect() as connection:
-            # Существующие таблицы не перестраивались (ни DDL, ни колонки).
-            # Исключение — `brick_proposals`: миграция 20 добавочно приносит
-            # `description`. Формулировка «одна новая колонка, остальное
-            # дословно» сильнее общего сравнения и ловит лишние перестройки.
+            # Остальные существующие таблицы не перестраивались (ни DDL,
+            # ни колонки).
             self.assertEqual(
                 {
                     name: self._schema(connection, name)
                     for name in old_tables
-                    if name != "brick_proposals"
+                    if name not in extended_tables
                 },
                 {
                     name: schema_before[name]
                     for name in old_tables
-                    if name != "brick_proposals"
+                    if name not in extended_tables
                 },
             )
             self.assertEqual(
                 {
                     name: self._rows(connection, f"PRAGMA table_info({name})")
                     for name in old_tables
-                    if name != "brick_proposals"
+                    if name not in extended_tables
                 },
                 {
                     name: columns_before[name]
                     for name in old_tables
-                    if name != "brick_proposals"
+                    if name not in extended_tables
                 },
             )
+            places_columns = self._rows(connection, "PRAGMA table_info(places)")
+            self.assertEqual(
+                [(row[1], row[2], row[3], row[4]) for row in places_columns][
+                    : len(columns_before["places"])
+                ],
+                [(row[1], row[2], row[3], row[4]) for row in columns_before["places"]],
+                "прежние колонки places не переставлены",
+            )
+            self.assertEqual(
+                [row[1] for row in places_columns][len(columns_before["places"]) :],
+                ["city"],
+                "миграция 21 добавляет ровно одну колонку",
+            )
+            city_column = places_columns[-1]
+            self.assertEqual(city_column[2], "TEXT")
+            self.assertEqual(city_column[3], 0, "город необязателен (NULL)")
+            self.assertIsNone(city_column[4], "без DEFAULT: старые строки — NULL")
             proposals_columns = self._rows(
                 connection, "PRAGMA table_info(brick_proposals)"
             )
@@ -1617,14 +1642,26 @@ class R3MigrationTests(unittest.TestCase):
             self.assertIsNone(
                 description_column[4], "без DEFAULT: старые строки — NULL"
             )
+            # Прежние кирпичики не тронуты; миграция 21 добавляет системный
+            # «город» отдельной строкой.
+            brick_columns = (
+                "id, code, title, type, scope, source, status, place_id, "
+                "created_by_user_id, created_at, updated_at, revision"
+            )
             self.assertEqual(
                 self._rows(
                     connection,
-                    "SELECT id, code, title, type, scope, source, status, place_id, "
-                    "created_by_user_id, created_at, updated_at, revision FROM bricks "
-                    "ORDER BY id",
+                    f"SELECT {brick_columns} FROM bricks WHERE id < 501 ORDER BY id",
                 ),
                 bricks_before,
+            )
+            self.assertEqual(
+                self._rows(
+                    connection,
+                    "SELECT id, code, title, type, scope, status FROM bricks "
+                    "WHERE id > 500 ORDER BY id",
+                ),
+                [(501, "город", "Город", "short_text", "system", "active")],
             )
             self.assertEqual(
                 self._rows(
@@ -1646,14 +1683,14 @@ class R3MigrationTests(unittest.TestCase):
                 self._rows(
                     connection, "SELECT version FROM schema_migrations ORDER BY version"
                 )[-1],
-                (20,),
+                (22,),
             )
 
     def test_migration_is_idempotent(self) -> None:
         from migrations import DEFAULT_MIGRATIONS, run_migrations
 
         self.assertEqual(run_migrations(self.engine, DEFAULT_MIGRATIONS[:18]), 18)
-        self.assertEqual(run_migrations(self.engine), 20)
+        self.assertEqual(run_migrations(self.engine), 22)
         with self.engine.connect() as connection:
             names_after_first = sorted(
                 str(row[0])
@@ -1672,7 +1709,7 @@ class R3MigrationTests(unittest.TestCase):
                 "SELECT version, name FROM schema_migrations ORDER BY version",
             )
         # Повторный запуск ничего не меняет и не падает.
-        self.assertEqual(run_migrations(self.engine), 20)
+        self.assertEqual(run_migrations(self.engine), 22)
         with self.engine.connect() as connection:
             self.assertEqual(
                 sorted(

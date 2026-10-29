@@ -94,7 +94,6 @@ OWNER_REFERENCE = (
     "<b>Летний концерт</b>\n"
     "\n"
     "<b>12.07.2027 // 19:00</b>\n"
-    "\n"
     '<b><a href="https://example.com/place">Дом культуры</a></b>\n'
     "ул. Ленина, 1\n"
     "\n"
@@ -125,6 +124,7 @@ def _seed_place(
         place = create_place(
             session,
             name,
+            city="Тестовый город",
             created_by_user_id=user.id,
             address=address,
             url=url,
@@ -711,6 +711,7 @@ class PlaceCreationFromHandbookTests(unittest.TestCase):
         await h.text("Новая площадка R2")
         self.assertIn("Проверьте, нет ли уже этого места", h.screen_text())
         await h.callback("pl_create_confirm")
+        await h.text("Москва")
 
         text = h.screen_text()
         self.assertIn("Новая площадка R2", text)
@@ -733,7 +734,7 @@ class PlaceCreationFromHandbookTests(unittest.TestCase):
                 template_id=standard.template_id,
                 values_by_id=_values_for(session),
             )
-        self.assertEqual(rendered, OWNER_REFERENCE, "стандарт нового места — v3")
+        self.assertEqual(rendered, OWNER_REFERENCE, "стандарт нового места — v4")
 
         state = load_place_session(DEFAULT_USER_ID)
         self.assertIsNotNone(state)

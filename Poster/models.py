@@ -119,6 +119,10 @@ class Place(Base):
     # карточка показывает поля только при наличии данных (без пустых строк).
     address: Mapped[str | None] = mapped_column(Text, nullable=True)
     url: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # Poster 2.0 U1a (миграция 21): город площадки. Обязателен при создании
+    # новой зарегистрированной площадки (`place_store.create_place`), но в
+    # схеме nullable: старые записи не блокируются и не переписываются.
+    city: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime, default=utcnow, nullable=False
     )
@@ -1236,7 +1240,7 @@ class AnnouncementDraft(Base):
     `place_address`/`place_url` — снимок известных данных справочника на
     момент подтверждения места. NULL означает «сведений нет», а не пустую
     строку-заглушку: мастер задаст вопрос только если шаблон использует
-    такой кирпичик.
+    такой кирпичик. `place_city` — такой же снимок города площадки.
     """
 
     __tablename__ = "announcement_drafts"
@@ -1260,6 +1264,8 @@ class AnnouncementDraft(Base):
     place_display_name: Mapped[str | None] = mapped_column(Text, nullable=True)
     place_address: Mapped[str | None] = mapped_column(Text, nullable=True)
     place_url: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # Poster 2.0 U1a: снимок города площадки на момент подтверждения.
+    place_city: Mapped[str | None] = mapped_column(Text, nullable=True)
     # Источник шаблона, а не место: 'place' — стандарт площадки (place_id
     # обязателен), 'personal' — личный шаблон (площадки в черновике нет).
     origin: Mapped[str] = mapped_column(
@@ -1358,6 +1364,10 @@ class AnnouncementDraft(Base):
         CheckConstraint(
             "place_url IS NULL OR length(trim(place_url)) > 0",
             name="ck_announcement_drafts_url",
+        ),
+        CheckConstraint(
+            "place_city IS NULL OR length(trim(place_city)) > 0",
+            name="ck_announcement_drafts_city",
         ),
         CheckConstraint(
             "idempotency_key IS NULL OR length(trim(idempotency_key)) > 0",

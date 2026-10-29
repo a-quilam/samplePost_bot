@@ -66,7 +66,6 @@ EXPECTED_ANNOUNCEMENT = (
     "<b>Летний концерт</b>\n"
     "\n"
     "<b>12.07.2027 // 19:00</b>\n"
-    "\n"
     '<b><a href="https://example.com/place">Дом культуры</a></b>\n'
     "ул. Ленина, 1\n"
     "\n"
@@ -86,6 +85,19 @@ V2_BODY = (
 )
 V2_FOOTER = "[контакт]"
 
+# Эталон v3 внутри миграции 18: он остаётся в истории после миграции 22.
+V3_HEADER = "**[название]**"
+V3_BODY = (
+    "\n"
+    "**[дата] // [время_начала]**\n"
+    "\n"
+    "**[место]([ссылка_места])**\n"
+    "[адрес]\n"
+    "\n"
+    "[описание]"
+)
+V3_FOOTER = "\n[контакт]"
+
 
 def _bind(tokens, definitions_by_code) -> None:
     """Проставляет brick_id по коду — как это делает компилятор версии."""
@@ -101,7 +113,7 @@ def _bind(tokens, definitions_by_code) -> None:
 
 
 class BuiltinTemplateV3RenderTests(unittest.TestCase):
-    """Рендер BUILTIN v3 по эталону владельца — побайтово."""
+    """Рендер BUILTIN v4 по эталону владельца — побайтово."""
 
     def setUp(self) -> None:
         self.path = temp_db_path("poster-2-r2-render-")
@@ -137,9 +149,9 @@ class BuiltinTemplateV3RenderTests(unittest.TestCase):
             self.by_code["контакт"].id: "@contact",
         }
 
-    def test_version_is_three(self) -> None:
-        self.assertEqual(BUILTIN_TEMPLATE.version, 3)
-        self.assertEqual(BUILTIN_TEMPLATE_VERSION, 3)
+    def test_version_is_four(self) -> None:
+        self.assertEqual(BUILTIN_TEMPLATE.version, 4)
+        self.assertEqual(BUILTIN_TEMPLATE_VERSION, 4)
 
     def test_render_matches_owner_reference_exactly(self) -> None:
         rendered = render_template(self.tokens, self._values(), self.definitions)
@@ -260,20 +272,24 @@ class MigrationEighteenTests(_MigrationEighteenTestCase):
     """Миграция 18 обновляет только доказуемо нетронутые копии."""
 
     def test_untouched_personal_copy_is_updated_and_renamed(self) -> None:
-        self.assertEqual(LATEST_VERSION, 20)
+        self.assertEqual(LATEST_VERSION, 22)
         template = self.session.get(Template, 1)
         assert template is not None
         self.assertEqual(template.name, "Дефолтный шаблон")
-        self.assertEqual(template.revision, 2)
+        self.assertEqual(template.revision, 3)
         versions = list_template_versions(self.session, OWNER_TG, 1)
-        self.assertEqual([item.version for item in versions], [1, 2])
-        # Новая версия — ровно BUILTIN v3.
-        self.assertEqual(versions[1].header, BUILTIN_TEMPLATE.header)
-        self.assertEqual(versions[1].body, BUILTIN_TEMPLATE.body)
-        self.assertEqual(versions[1].footer, BUILTIN_TEMPLATE.footer)
+        self.assertEqual([item.version for item in versions], [1, 2, 3])
+        # Миграция 18 записала v3, миграция 22 — текущую v4.
+        self.assertEqual(versions[1].header, V3_HEADER)
+        self.assertEqual(versions[1].body, V3_BODY)
+        self.assertEqual(versions[1].footer, V3_FOOTER)
         self.assertEqual(versions[1].builtin_version, 3)
+        self.assertEqual(versions[2].header, BUILTIN_TEMPLATE.header)
+        self.assertEqual(versions[2].body, BUILTIN_TEMPLATE.body)
+        self.assertEqual(versions[2].footer, BUILTIN_TEMPLATE.footer)
+        self.assertEqual(versions[2].builtin_version, 4)
         self.assertEqual(
-            {binding.code for binding in versions[1].bindings},
+            {binding.code for binding in versions[2].bindings},
             {
                 "название",
                 "дата",
@@ -295,12 +311,12 @@ class MigrationEighteenTests(_MigrationEighteenTestCase):
         template = self.session.get(Template, 4)
         assert template is not None
         self.assertIsNone(template.name)
-        self.assertEqual(template.revision, 2)
+        self.assertEqual(template.revision, 3)
         current = get_standard_template(self.session, OWNER_TG, 1).current_version
-        self.assertEqual(current.version, 2)
+        self.assertEqual(current.version, 3)
         self.assertEqual(current.body, BUILTIN_TEMPLATE.body)
         self.assertEqual(current.footer, BUILTIN_TEMPLATE.footer)
-        self.assertEqual(current.builtin_version, 3)
+        self.assertEqual(current.builtin_version, 4)
 
     def test_edited_copy_is_not_touched(self) -> None:
         template = self.session.get(Template, 3)
@@ -328,12 +344,12 @@ class MigrationEighteenTests(_MigrationEighteenTestCase):
         template = self.session.get(Template, 5)
         assert template is not None
         self.assertEqual(template.name, "Дефолтный шаблон")
-        self.assertEqual(template.revision, 2)
+        self.assertEqual(template.revision, 3)
         versions = list_template_versions(self.session, OWNER_TG, 5)
-        self.assertEqual([item.version for item in versions], [1, 2])
+        self.assertEqual([item.version for item in versions], [1, 2, 3])
         self.assertIsNone(versions[0].builtin_version)
-        self.assertEqual(versions[1].body, BUILTIN_TEMPLATE.body)
-        self.assertEqual(versions[1].builtin_version, 3)
+        self.assertEqual(versions[2].body, BUILTIN_TEMPLATE.body)
+        self.assertEqual(versions[2].builtin_version, 4)
 
     def test_user_copy_already_v3_keeps_old_name(self) -> None:
         """Копия v3 с именем «Мой шаблон» — создана человеком, не трогаем."""
@@ -407,7 +423,7 @@ class MigrationEighteenTests(_MigrationEighteenTestCase):
             self.session,
             actor_telegram_user_id=OWNER_TG,
             template_id=1,
-            expected_revision=2,
+            expected_revision=3,
         )
         row = self.session.get(TemplateSnapshot, snapshot.snapshot_id)
         assert row is not None
@@ -416,14 +432,14 @@ class MigrationEighteenTests(_MigrationEighteenTestCase):
 
 
 class ResetToBuiltinAfterMigrationTests(_MigrationEighteenTestCase):
-    """«Восстановить стандарт» после v3 создаёт версию с `builtin_version=3`."""
+    """«Восстановить стандарт» после v4 создаёт версию с `builtin_version=4`."""
 
-    def test_personal_reset_creates_v3_version(self) -> None:
+    def test_personal_reset_creates_v4_version(self) -> None:
         updated = update_template_header(
             self.session,
             actor_telegram_user_id=OWNER_TG,
             template_id=1,
-            expected_revision=2,
+            expected_revision=3,
             content="Своя шапка",
         )
         self.assertEqual(updated.status, "updated")
@@ -431,31 +447,31 @@ class ResetToBuiltinAfterMigrationTests(_MigrationEighteenTestCase):
             self.session,
             actor_telegram_user_id=OWNER_TG,
             template_id=1,
-            expected_revision=3,
+            expected_revision=4,
             confirm=True,
         )
         self.assertEqual(result.status, "updated")
         assert result.template is not None
         current = result.template.current_version
-        self.assertEqual(current.version, 4)
+        self.assertEqual(current.version, 5)
         self.assertEqual(current.header, BUILTIN_TEMPLATE.header)
         self.assertEqual(current.body, BUILTIN_TEMPLATE.body)
         self.assertEqual(current.footer, BUILTIN_TEMPLATE.footer)
         self.assertEqual(current.builtin_version, BUILTIN_TEMPLATE_VERSION)
 
     def test_untouched_personal_copy_is_unchanged_on_reset(self) -> None:
-        """Копия уже совпадает с v3 — повторный сброс версию не плодит."""
+        """Копия уже совпадает с v4 — повторный сброс версию не плодит."""
         result = reset_personal_template(
             self.session,
             actor_telegram_user_id=OWNER_TG,
             template_id=1,
-            expected_revision=2,
+            expected_revision=3,
             confirm=True,
         )
         self.assertEqual(result.status, "unchanged")
         self.assertEqual(
             self._rows("SELECT count(*) FROM template_versions WHERE template_id=1"),
-            [(2,)],
+            [(3,)],
         )
 
     def test_reset_is_selectable_for_both_kinds(self) -> None:
@@ -468,7 +484,7 @@ class ResetToBuiltinAfterMigrationTests(_MigrationEighteenTestCase):
 
 
 class InitialPersonalTemplateV3Tests(unittest.TestCase):
-    """Новый пользователь сразу получает «Дефолтный шаблон» с текстом v3."""
+    """Новый пользователь сразу получает «Дефолтный шаблон» с текстом v4."""
 
     def test_initial_template_name_and_content(self) -> None:
         path = temp_db_path("poster-2-r2-initial-")
@@ -512,7 +528,7 @@ class InitialPersonalTemplateV3Tests(unittest.TestCase):
 
 
 class BuiltinBindingCatalogTests(unittest.TestCase):
-    """BUILTIN v3 использует те же восемь системных кодов, что и v2."""
+    """BUILTIN v4 использует те же восемь системных кодов, что и v2."""
 
     def test_builtin_header_has_no_trailing_newline(self) -> None:
         self.assertFalse(BUILTIN_TEMPLATE.header.endswith("\n"))

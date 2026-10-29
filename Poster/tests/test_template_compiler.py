@@ -223,9 +223,11 @@ class TemplateRenderTests(unittest.TestCase):
         )
         self.assertEqual(result, '<a href="https://example.com">Место</a>')
 
-    def test_render_missing_url_brick_skips_link(self) -> None:
+    def test_render_missing_url_brick_keeps_label_without_link(self) -> None:
+        # Poster 2.0 U1a: без URL остаётся только подпись — обычным текстом,
+        # без пустых скобок и без битой ссылки.
         result = self._render("[место]([ссылка_места]) и всё", {2: "Место"})
-        self.assertEqual(result, " и всё")
+        self.assertEqual(result, "Место и всё")
 
     def test_render_date_value(self) -> None:
         result = self._render("Когда: [дата]", {4: "10.10.2026"})

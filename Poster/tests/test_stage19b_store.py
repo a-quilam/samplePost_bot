@@ -52,6 +52,7 @@ class PlaceSearchStoreTests(unittest.TestCase):
         return create_place(
             self.session,
             name,
+            city="Тестовый город",
             created_by_user_id=self.user.id,
             address=address,
             url=url,
@@ -227,6 +228,7 @@ class PlaceSearchStoreTests(unittest.TestCase):
             create_place(
                 self.session,
                 "Атомарное место",
+                city="Тестовый город",
                 created_by_user_id=999999,  # нет такого users.id → FK
             )
         self.session.rollback()
@@ -255,7 +257,9 @@ class AlternativeNameStoreTests(unittest.TestCase):
         self.user = get_or_create_user(self.session, 700002, username="aliaser")
 
     def _place(self, name: str) -> Place:
-        return create_place(self.session, name, created_by_user_id=self.user.id)
+        return create_place(
+            self.session, name, city="Тестовый город", created_by_user_id=self.user.id
+        )
 
     def _name_count(self, place_id: int) -> int:
         return len(

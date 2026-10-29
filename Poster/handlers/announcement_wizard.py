@@ -125,6 +125,7 @@ from template_types import (
 from utils import calendar_view, screen, ui_humor
 from utils import tg_context as ctx
 from utils.parsers import app_today
+from utils.place_labels import place_title
 from utils.tg_html import escape_html
 
 # Poster 2.0 S3 п.1: вид вопроса/календаря вынесен в `wizard_questions`,
@@ -744,7 +745,10 @@ async def _render_all_places(
         ),
     ]
     rows = _place_buttons(
-        [(item.place_id, item.canonical_name) for item in places],
+        [
+            (item.place_id, place_title(item.canonical_name, item.city))
+            for item in places
+        ],
         prefix="aw_place_all",
         page=page,
         total=total,
@@ -784,13 +788,11 @@ async def _render_search_results(
         f"Найдено мест: {total}.",
     ]
     for result in shown:
+        title = _h(place_title(result.canonical_name, result.city))
         if result.matched_name != result.canonical_name:
-            lines.append(
-                f"• {_h(result.canonical_name)} — совпадение: "
-                f"{_h(result.matched_name)}"
-            )
+            lines.append(f"• {title} — совпадение: " f"{_h(result.matched_name)}")
         else:
-            lines.append(f"• {_h(result.canonical_name)}")
+            lines.append(f"• {title}")
     if not results:
         lines.extend(
             [
@@ -801,7 +803,7 @@ async def _render_search_results(
     rows = [
         [
             InlineKeyboardButton(
-                _short(f"📍 {result.canonical_name}", 60),
+                _short(f"📍 {place_title(result.canonical_name, result.city)}", 60),
                 callback_data=f"aw_place_open:{result.place_id}",
             )
         ]
@@ -859,6 +861,7 @@ def _place_card_text(details, selected_name_id: int | None) -> str:
         "📍 Проверьте место",
         "",
         f"Название: {_h(details.canonical_name)}",
+        f"Город: {_h(details.city) if details.city else '—'}",
         f"Адрес: {_h(details.address) if details.address else 'не указан'}",
         f"Ссылка: {_h(details.url) if details.url else 'не указана'}",
         "",
@@ -2927,6 +2930,7 @@ def _preview_summary_lines(
         "👁 Обзор анонса",
         "",
         *_place_lines(details),
+        f"Город: {_h(details.place_city) if details.place_city else '—'}",
         f"Адрес: {_h(details.place_address) if details.place_address else 'не указан'}",
         f"Ссылка: {_h(details.place_url) if details.place_url else 'не указана'}",
         f"Шаблон: {_h(_preview_template_name(details))}",

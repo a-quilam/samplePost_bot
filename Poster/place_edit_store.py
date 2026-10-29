@@ -16,6 +16,9 @@
   названиях ДРУГИХ мест). Удалить каноническое название этим слоем нельзя;
 - адрес и ссылка — необязательные поля: отсутствие представлено NULL,
   а не пустой строкой; интерфейс показывает «Не указан»/«Не указана»;
+- город (Poster 2.0 U1a) — необязательное в схеме поле, обязательное при
+  создании новой площадки; редактирование идёт теми же правилами аудита
+  (`city_set`/`city_delete`);
 - ссылка нормализуется в валидный http(s)-URL, пригодный для гиперссылки;
   `javascript:`, `file:`, `data:` и прочие схемы отклоняются;
 - аудит не содержит секретов и сырых сообщений: только разобранные
@@ -42,6 +45,7 @@ from place_store import (
     NameConflict,
     find_name_conflicts,
     normalize_place_name,
+    validate_place_city,
     validate_place_name,
 )
 
@@ -62,6 +66,10 @@ ACTION_ADDRESS_SET = "address_set"
 ACTION_ADDRESS_DELETE = "address_delete"
 ACTION_URL_SET = "url_set"
 ACTION_URL_DELETE = "url_delete"
+# Poster 2.0 U1a: город площадки. У города нет «удаления» в UI по умолчанию
+# (он обязателен для новых мест), но аудит различает установку и сброс.
+ACTION_CITY_SET = "city_set"
+ACTION_CITY_DELETE = "city_delete"
 
 
 class PlaceEditValueError(ValueError):
@@ -548,17 +556,24 @@ def rename_canonical_place_name(
 # --- Адрес и ссылка ------------------------------------------------------------
 
 
+_OPTIONAL_FIELD_ACTIONS = {
+    "address": (ACTION_ADDRESS_SET, ACTION_ADDRESS_DELETE),
+    "url": (ACTION_URL_SET, ACTION_URL_DELETE),
+    "city": (ACTION_CITY_SET, ACTION_CITY_DELETE),
+}
+
+
 def _apply_optional_field(
     session: Session,
     *,
     actor_telegram_user_id: int,
     place_id: int,
-    field: str,  # "address" | "url"
+    field: str,  # "address" | "url" | "city"
     new_value: str | None,
     expected_value: str | None,
 ) -> EditMutationResult:
     """
-    Условное изменение необязательного поля места (адрес или ссылка).
+    Условное изменение необязательного поля места (адрес, ссылка или город).
 
     Защита от потерянных обновлений: поле должно по-прежнему содержать
     `expected_value` — то значение, которое администратор видел на экране.
@@ -567,7 +582,7 @@ def _apply_optional_field(
 
     Установка и удаление значения (NULL) симметричны; отсутствие поля в БД —
     это NULL, никаких пустых строк или фиктивных «Не указано». Аудит:
-    address_set/address_delete или url_set/url_delete.
+    address_set/address_delete, url_set/url_delete или city_set/city_delete.
     """
     actor_id = _actor_id_for_place(session, actor_telegram_user_id, place_id)
     place = session.get(Place, place_id)
@@ -580,12 +595,8 @@ def _apply_optional_field(
         return EditMutationResult(status="unchanged", value=current)
 
     setattr(place, field, new_value)
-    is_address = field == "address"
-    action = (
-        (ACTION_ADDRESS_SET if new_value is not None else ACTION_ADDRESS_DELETE)
-        if is_address
-        else (ACTION_URL_SET if new_value is not None else ACTION_URL_DELETE)
-    )
+    set_action, delete_action = _OPTIONAL_FIELD_ACTIONS[field]
+    action = set_action if new_value is not None else delete_action
     _log_edit(
         session,
         actor_user_id=actor_id,
@@ -671,4 +682,54 @@ def delete_place_url(
         field="url",
         new_value=None,
         expected_value=expected_url,
+    )
+
+
+def set_place_city(
+    session: Session,
+    *,
+    actor_telegram_user_id: int,
+    place_id: int,
+    city: str,
+    expected_city: str | None,
+) -> EditMutationResult:
+    """
+    Устанавливает или меняет город места (Poster 2.0 U1a).
+
+    Город нормализуется по тем же правилам, что и название (NFKC, сжатые
+    пробелы, непустое значение), и ограничен `MAX_PLACE_CITY_LENGTH`.
+    Аудит: `city_set`.
+    """
+    cleaned = validate_place_city(city)
+    return _apply_optional_field(
+        session,
+        actor_telegram_user_id=actor_telegram_user_id,
+        place_id=place_id,
+        field="city",
+        new_value=cleaned,
+        expected_value=expected_city,
+    )
+
+
+def delete_place_city(
+    session: Session,
+    *,
+    actor_telegram_user_id: int,
+    place_id: int,
+    expected_city: str | None,
+) -> EditMutationResult:
+    """
+    Сбрасывает город места в NULL.
+
+    Нужен для старых записей и для исправления ошибочно указанного города:
+    обязательность города проверяется при СОЗДАНИИ места, а не при каждой
+    правке. Аудит: `city_delete`.
+    """
+    return _apply_optional_field(
+        session,
+        actor_telegram_user_id=actor_telegram_user_id,
+        place_id=place_id,
+        field="city",
+        new_value=None,
+        expected_value=expected_city,
     )

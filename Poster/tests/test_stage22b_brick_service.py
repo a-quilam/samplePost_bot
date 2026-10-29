@@ -94,7 +94,7 @@ class BrickManagementServiceTests(BrickDatabaseTestCase):
             self.mutation_brick(result).rules, {"min": 100, "max": 5000, "suffix": "₽"}
         )
         self.assertEqual(self.mutation_brick(result).revision, created.revision + 1)
-        self.assertEqual(self.count_bricks(), 11)
+        self.assertEqual(self.count_bricks(), 12)
 
     def test_update_rejects_foreign_system_place_and_archived_rows(self) -> None:
         owner = self.make_user(2_202)
@@ -319,7 +319,7 @@ class BrickManagementServiceTests(BrickDatabaseTestCase):
         stored = self.session.get(Brick, created.id)
         assert stored is not None
         self.assertEqual(stored.status, "active")
-        self.assertEqual(self.count_bricks(), 11)
+        self.assertEqual(self.count_bricks(), 12)
 
     def test_stale_edit_never_overwrites_newer_revision(self) -> None:
         user = self.make_user(2_209)

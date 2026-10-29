@@ -58,14 +58,15 @@ except Exception as exc:  # noqa: BLE001 — причина попадает в 
     INTEGRATION_IMPORT_ERROR = str(exc)
 
 
-# Эталон владельца (Часть III): ровно этот текст должен оказаться в Telegram.
-# Жирные заголовок, «дата // время» и кликабельная площадка; адрес — обычная
-# строка сразу под площадкой; блоки разделены ровно одной пустой строкой.
+# Эталон владельца для встроенного стандарта v4 (Poster 2.0 U1a): ровно этот
+# текст должен оказаться в Telegram. Жирный заголовок, пустая строка, жирное
+# «дата // время» и сразу под ним жирная кликабельная площадка (без пустой
+# строки), нежирный адрес строкой ниже, пустая строка, описание, пустая
+# строка, контакт.
 OWNER_REFERENCE = (
     "<b>Летний концерт</b>\n"
     "\n"
     "<b>12.07.2027 // 19:00</b>\n"
-    "\n"
     '<b><a href="https://example.com/place">Дом культуры</a></b>\n'
     "ул. Ленина, 1\n"
     "\n"
@@ -80,13 +81,12 @@ OWNER_LINES = (
     (0, "Летний концерт", True),
     (1, "", None),
     (2, "12.07.2027 // 19:00", True),
-    (3, "", None),
-    (4, '<a href="https://example.com/place">Дом культуры</a>', True),
-    (5, "ул. Ленина, 1", False),
-    (6, "", None),
-    (7, "Большой зал, вход свободный.", False),
-    (8, "", None),
-    (9, "@contact", False),
+    (3, '<a href="https://example.com/place">Дом культуры</a>', True),
+    (4, "ул. Ленина, 1", False),
+    (5, "", None),
+    (6, "Большой зал, вход свободный.", False),
+    (7, "", None),
+    (8, "@contact", False),
 )
 
 
@@ -175,7 +175,7 @@ class OwnerReferenceRenderTests(unittest.TestCase):
                     self.assertNotIn("</b>", line)
                     self.assertEqual(line, text)
         # Кликабельность площадки: гиперссылка внутри жирной строки.
-        self.assertIn('<a href="https://example.com/place">Дом культуры</a>', lines[4])
+        self.assertIn('<a href="https://example.com/place">Дом культуры</a>', lines[3])
         # Никакой «сырой» разметки шаблона в готовом тексте.
         self.assertNotIn("**", rendered)
         self.assertNotIn("[", rendered)
@@ -199,6 +199,7 @@ class SkippedBricksTests(unittest.TestCase):
             values.pop(date_id)
             rendered = _render_personal(h, session, template.template_id, values)
             self.assertIn("<b> // 19:00</b>", rendered)
+        # v4: строка «дата // время» идёт через одну после заголовка (индекс 2).
         self.assertIn(" // ", rendered.split("\n")[2])
 
     @scenario_test
@@ -338,6 +339,7 @@ class StandardTemplateEndToEndTests(unittest.TestCase):
             place = create_place(
                 session,
                 "Дом культуры",
+                city="Тестовый город",
                 created_by_user_id=user.id,
                 address="ул. Ленина, 1",
                 url="https://example.com/place",

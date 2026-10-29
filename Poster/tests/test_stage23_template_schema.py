@@ -55,7 +55,7 @@ class TemplateSchemaTests(TemplateDatabaseTestCase):
 
     def test_template_migrations_apply_and_are_idempotent(self) -> None:
         self.assertEqual(self.migrations_applied, LATEST_VERSION)
-        self.assertEqual(LATEST_VERSION, 20)
+        self.assertEqual(LATEST_VERSION, 22)
         self.assertIn((12, "announcement_wizard"), self.journal())
         self.assertIn((13, "announcement_photos_publication"), self.journal())
         self.assertIn((8, "templates_versions_snapshots"), self.journal())
@@ -122,11 +122,13 @@ class TemplateSchemaTests(TemplateDatabaseTestCase):
             ),
             {"tid": template_id},
         ).one()
-        # Poster 2.1 R2: точный эталон Части III — жирная шапка и строка
-        # даты/времени, `//`, жирная гиперссылка и отдельный `[адрес]`.
+        # Poster 2.0 U1a: точный эталон v4 — в шапке жирный заголовок, сразу
+        # под ним жирная строка даты/времени, `//`, жирная гиперссылка и
+        # отдельный `[адрес]`; тело содержит только описание.
         self.assertEqual(row[0], BUILTIN_TEMPLATE.header)
-        self.assertIn("[дата]", str(row[1]))
+        self.assertIn("[дата]", str(row[0]))
         self.assertIn("[описание]", str(row[1]))
+        self.assertEqual(str(row[1]).strip(), "[описание]")
         self.assertEqual(row[3], BUILTIN_TEMPLATE_VERSION)
 
         bricks = self.session.execute(

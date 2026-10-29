@@ -93,6 +93,7 @@ def make_place(h, name: str = "Дом культуры", *, with_address: bool =
         place = create_place(
             session,
             name,
+            city="Тестовый город",
             created_by_user_id=None,
             address="ул. Тестовая, 1" if with_address else None,
         )

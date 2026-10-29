@@ -382,18 +382,20 @@ def _section_html(
                         f"Определение кирпичика #{node.url.brick_id} не найдено."
                     )
                 if node.url.brick_id not in values_by_id:
-                    # Не выводим пустые/битые ссылки; подпись тоже скрываем.
-                    return None
+                    # URL-кирпичик отсутствует: пустых/битых ссылок не
+                    # выводим, но подпись остаётся обычным текстом —
+                    # ровно это обещает контракт стандартного шаблона.
+                    return label
                 url_value = values_by_id[node.url.brick_id]
                 if not url_value or (
                     isinstance(url_value, str) and not url_value.strip()
                 ):
-                    return None
+                    return label
                 url = _safe_url(url_value, code=url_definition.code)
             else:
                 url = _normalize_render_url(node.url)
             if not url:
-                return None
+                return label
             return f'<a href="{_escape_html(url, quote=True)}">{label}</a>'
         if isinstance(node, FormatNode):
             inner = _visit_token_list(node.children)

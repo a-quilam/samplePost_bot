@@ -609,7 +609,12 @@ class GlobalApprovalUiTests(unittest.TestCase):
             get_or_create_user(
                 session, SUPERADMIN_TG, username="boss", full_name="Босс"
             )
-            place = create_place(session, "Место автора", created_by_user_id=author.id)
+            place = create_place(
+                session,
+                "Место автора",
+                city="Тестовый город",
+                created_by_user_id=author.id,
+            )
             session.add(
                 PlaceAdmin(
                     place_id=place.id,

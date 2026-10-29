@@ -19,6 +19,10 @@ from __future__ import annotations
 import unittest
 from unittest.mock import patch
 
+from sqlalchemy import select
+
+from models import Brick
+
 try:
     from announcement_store import (
         get_announcement_draft,
@@ -261,12 +265,21 @@ class HumorQuestionScreenTests(unittest.TestCase):
     @scenario_test
     async def test_joke_changes_text_only_not_keyboard_or_draft(self, h):
         template_id = _seed_template(h)
+        # Ключ шутки содержит brick_id второго вопроса. Он зависит от числа
+        # системных кирпичиков (U1a добавила `[город]`), поэтому берём его из
+        # базы, а не хардкодом.
+        with h.session_factory() as session:
+            second_id = session.scalar(
+                select(Brick.id).where(Brick.code == "dsc", Brick.scope == "personal")
+            )
+        assert second_id is not None, "личный кирпичик второго вопроса не создан"
+
         await h.text("/start")
 
         def fake_pick(key, **kwargs):
             # Шутим только на втором вопросе, чтобы сравнить один и тот же
             # экран в одном и том же состоянии.
-            return JOKE_PROBE if ":12" in key else None
+            return JOKE_PROBE if f":{second_id}" in key else None
 
         with patch("utils.ui_humor.pick_variant", side_effect=fake_pick):
             await h.callback(f"tp_pick:{template_id}")

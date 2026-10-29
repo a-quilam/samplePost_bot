@@ -58,6 +58,13 @@ V3_BODY = (
 )
 V3_FOOTER = "\n[контакт]"
 
+# Эталон v4 (Poster 2.0 U1a): дата/время идут сразу под заголовком, тело —
+# только описание, подвал — только контакт. Именно это получают нетронутые
+# копии после миграции 22.
+V4_HEADER = "**[название]**\n\n**[дата] // [время_начала]**\n**[место]([ссылка_места])**\n[адрес]"
+V4_BODY = "\n[описание]"
+V4_FOOTER = "\n[контакт]"
+
 OLD_INITIAL_NAME = "Мой шаблон"
 NEW_INITIAL_NAME = "Дефолтный шаблон"
 
@@ -263,40 +270,43 @@ class MigrationEighteenContentTests(_Base):
     def test_latest_version_is_twenty(self) -> None:
         # R3 добавил миграцию 19, R4 — миграцию 20; миграция 18 остаётся
         # на своём месте, а последняя в журнале — 20.
-        self.assertEqual(LATEST_VERSION, 20)
+        self.assertEqual(LATEST_VERSION, 22)
         versions = _sql(
             self.path,
             "SELECT version, name FROM schema_migrations ORDER BY version",
         )
         self.assertIn((18, "builtin_templates_v3"), versions)
-        self.assertEqual(versions[-1], (20, "brick_proposal_description"))
+        self.assertEqual(versions[-1], (22, "builtin_templates_v4"))
 
-    def test_untouched_initial_copy_gets_v3_and_new_name(self) -> None:
+    def test_untouched_initial_copy_gets_v4_and_new_name(self) -> None:
         rows = self.versions(1)
-        self.assertEqual(len(rows), 2, "старая версия остаётся в истории")
+        self.assertEqual(len(rows), 3, "обе прежние версии остаются в истории")
         self.assertEqual(rows[0], (1, V2_HEADER, V2_BODY, V2_FOOTER, 2))
         self.assertEqual(rows[1], (2, V3_HEADER, V3_BODY, V3_FOOTER, 3))
+        self.assertEqual(rows[2], (3, V4_HEADER, V4_BODY, V4_FOOTER, 4))
         self.assertEqual(
             _sql(self.path, "SELECT name, revision FROM templates WHERE id = 1"),
-            [(NEW_INITIAL_NAME, 2)],
+            [(NEW_INITIAL_NAME, 3)],
         )
 
     def test_untouched_initial_copy_without_marker_is_updated(self) -> None:
         rows = self.versions(2)
-        self.assertEqual([row[0] for row in rows], [1, 2])
+        self.assertEqual([row[0] for row in rows], [1, 2, 3])
         self.assertEqual(rows[1][1:], (V3_HEADER, V3_BODY, V3_FOOTER, 3))
+        self.assertEqual(rows[2][1:], (V4_HEADER, V4_BODY, V4_FOOTER, 4))
         self.assertEqual(
             _sql(self.path, "SELECT name, revision FROM templates WHERE id = 2"),
-            [(NEW_INITIAL_NAME, 2)],
+            [(NEW_INITIAL_NAME, 3)],
         )
 
     def test_untouched_standard_is_updated_and_keeps_null_name(self) -> None:
         rows = self.versions(7)
-        self.assertEqual(len(rows), 2)
+        self.assertEqual(len(rows), 3)
         self.assertEqual(rows[1][1:], (V3_HEADER, V3_BODY, V3_FOOTER, 3))
+        self.assertEqual(rows[2][1:], (V4_HEADER, V4_BODY, V4_FOOTER, 4))
         self.assertEqual(
             _sql(self.path, "SELECT name, revision FROM templates WHERE id = 7"),
-            [(None, 2)],
+            [(None, 3)],
         )
 
     def test_edited_copies_are_not_touched(self) -> None:
@@ -355,7 +365,14 @@ class MigrationEighteenContentTests(_Base):
         )
 
     def test_new_version_bindings_are_complete_and_resolved_by_code(self) -> None:
-        for template_id, new_version in ((1, 2), (2, 2), (7, 2)):
+        for template_id, new_version in (
+            (1, 2),
+            (1, 3),
+            (2, 2),
+            (2, 3),
+            (7, 2),
+            (7, 3),
+        ):
             with self.subTest(template_id=template_id):
                 bindings = _sql(
                     self.path,
@@ -505,7 +522,7 @@ class MigrationEighteenRollbackTests(_Base):
         self.assertEqual(self.migrate(), LATEST_VERSION)
         self.assertEqual(
             _sql(self.path, "SELECT name, revision FROM templates WHERE id = 1"),
-            [(NEW_INITIAL_NAME, 2)],
+            [(NEW_INITIAL_NAME, 3)],
         )
 
 
@@ -541,7 +558,6 @@ class MigrationEighteenRenderTests(_Base):
             "<b>Летний концерт</b>\n"
             "\n"
             "<b>12.07.2027 // 19:00</b>\n"
-            "\n"
             '<b><a href="https://example.com/place">Дом культуры</a></b>\n'
             "ул. Ленина, 1\n"
             "\n"

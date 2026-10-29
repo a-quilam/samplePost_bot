@@ -61,10 +61,11 @@ class BrickTypeCatalogTests(unittest.TestCase):
             with self.assertRaises(BrickValidationError):
                 ensure_brick_type(forbidden)
 
-    def test_system_registry_has_ten_stable_ids_and_codes(self) -> None:
-        # 9 кирпичиков миграции 6 + `[адрес]` миграции 15 (Poster 2.0 S1).
-        self.assertEqual(len(SYSTEM_BRICKS), 10)
-        self.assertEqual([item.id for item in SYSTEM_BRICKS], list(range(1, 11)))
+    def test_system_registry_has_eleven_stable_ids_and_codes(self) -> None:
+        # 9 кирпичиков миграции 6 + `[адрес]` миграции 15 (Poster 2.0 S1)
+        # + `[город]` миграции 21 (Poster 2.0 U1a).
+        self.assertEqual(len(SYSTEM_BRICKS), 11)
+        self.assertEqual([item.id for item in SYSTEM_BRICKS], list(range(1, 12)))
         self.assertEqual(
             [item.code for item in SYSTEM_BRICKS],
             [
@@ -78,6 +79,7 @@ class BrickTypeCatalogTests(unittest.TestCase):
                 "описание",
                 "контакт",
                 "адрес",
+                "город",
             ],
         )
         by_code = {item.code: item for item in SYSTEM_BRICKS}
