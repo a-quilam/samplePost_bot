@@ -1470,12 +1470,12 @@ class R3MigrationTests(unittest.TestCase):
         return None if row is None else str(row[0])
 
     def test_latest_version_is_19(self) -> None:
-        self.assertEqual(LATEST_VERSION, 19)
+        self.assertEqual(LATEST_VERSION, 20)
 
     def test_fresh_database_has_conflict_tables_and_integrity(self) -> None:
         from migrations import run_migrations
 
-        self.assertEqual(run_migrations(self.engine), 19)
+        self.assertEqual(run_migrations(self.engine), 20)
         with self.engine.connect() as connection:
             names = {
                 str(row[0])
@@ -1560,20 +1560,62 @@ class R3MigrationTests(unittest.TestCase):
                 connection, "SELECT id, created_by_user_id FROM places ORDER BY id"
             )
 
-        self.assertEqual(run_migrations(self.engine), 19)
+        self.assertEqual(run_migrations(self.engine), 20)
 
         with self.engine.connect() as connection:
             # Существующие таблицы не перестраивались (ни DDL, ни колонки).
+            # Исключение — `brick_proposals`: миграция 20 добавочно приносит
+            # `description`. Формулировка «одна новая колонка, остальное
+            # дословно» сильнее общего сравнения и ловит лишние перестройки.
             self.assertEqual(
-                {name: self._schema(connection, name) for name in old_tables},
-                schema_before,
+                {
+                    name: self._schema(connection, name)
+                    for name in old_tables
+                    if name != "brick_proposals"
+                },
+                {
+                    name: schema_before[name]
+                    for name in old_tables
+                    if name != "brick_proposals"
+                },
             )
             self.assertEqual(
                 {
                     name: self._rows(connection, f"PRAGMA table_info({name})")
                     for name in old_tables
+                    if name != "brick_proposals"
                 },
-                columns_before,
+                {
+                    name: columns_before[name]
+                    for name in old_tables
+                    if name != "brick_proposals"
+                },
+            )
+            proposals_columns = self._rows(
+                connection, "PRAGMA table_info(brick_proposals)"
+            )
+            self.assertEqual(
+                [(row[1], row[2], row[3], row[4]) for row in proposals_columns][
+                    : len(columns_before["brick_proposals"])
+                ],
+                [
+                    (row[1], row[2], row[3], row[4])
+                    for row in columns_before["brick_proposals"]
+                ],
+                "прежние колонки brick_proposals не переставлены",
+            )
+            self.assertEqual(
+                [row[1] for row in proposals_columns][
+                    len(columns_before["brick_proposals"]) :
+                ],
+                ["description"],
+                "миграция 20 добавляет ровно одну колонку",
+            )
+            description_column = proposals_columns[-1]
+            self.assertEqual(description_column[2], "TEXT")
+            self.assertEqual(description_column[3], 0, "описание необязательно (NULL)")
+            self.assertIsNone(
+                description_column[4], "без DEFAULT: старые строки — NULL"
             )
             self.assertEqual(
                 self._rows(
@@ -1604,14 +1646,14 @@ class R3MigrationTests(unittest.TestCase):
                 self._rows(
                     connection, "SELECT version FROM schema_migrations ORDER BY version"
                 )[-1],
-                (19,),
+                (20,),
             )
 
     def test_migration_is_idempotent(self) -> None:
         from migrations import DEFAULT_MIGRATIONS, run_migrations
 
         self.assertEqual(run_migrations(self.engine, DEFAULT_MIGRATIONS[:18]), 18)
-        self.assertEqual(run_migrations(self.engine), 19)
+        self.assertEqual(run_migrations(self.engine), 20)
         with self.engine.connect() as connection:
             names_after_first = sorted(
                 str(row[0])
@@ -1630,7 +1672,7 @@ class R3MigrationTests(unittest.TestCase):
                 "SELECT version, name FROM schema_migrations ORDER BY version",
             )
         # Повторный запуск ничего не меняет и не падает.
-        self.assertEqual(run_migrations(self.engine), 19)
+        self.assertEqual(run_migrations(self.engine), 20)
         with self.engine.connect() as connection:
             self.assertEqual(
                 sorted(

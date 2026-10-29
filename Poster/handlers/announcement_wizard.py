@@ -2678,9 +2678,10 @@ def _extra_value_text(extra, field: AnnouncementFieldState) -> str:
         f"Секция: {SECTION_LABELS.get(extra.section, extra.section)}; "
         f"положение: {POSITION_LABELS.get(extra.position, extra.position)}.",
     ]
-    description = " ".join(str(field.description or "").split())
+    description = wizard_questions.description_html(field.description)
     if description:
-        lines.append(f"📝 {_h(description)}")
+        # №27: описание — моноширинно и уже экранировано внутри `<code>`.
+        lines.append(f"📝 {description}")
     lines.append(_type_hint(field))
     if field.status == FIELD_STATUS_VALID:
         lines.append(f"Текущее значение: {_h(_field_value_text(field))}")

@@ -260,15 +260,16 @@ class MigrationEighteenContentTests(_Base):
         super().setUp()
         self.assertEqual(self.migrate(), LATEST_VERSION)
 
-    def test_latest_version_is_nineteen(self) -> None:
-        # R3 добавил миграцию 19; миграция 18 остаётся на своём месте.
-        self.assertEqual(LATEST_VERSION, 19)
+    def test_latest_version_is_twenty(self) -> None:
+        # R3 добавил миграцию 19, R4 — миграцию 20; миграция 18 остаётся
+        # на своём месте, а последняя в журнале — 20.
+        self.assertEqual(LATEST_VERSION, 20)
         versions = _sql(
             self.path,
             "SELECT version, name FROM schema_migrations ORDER BY version",
         )
         self.assertIn((18, "builtin_templates_v3"), versions)
-        self.assertEqual(versions[-1], (19, "brick_code_conflicts"))
+        self.assertEqual(versions[-1], (20, "brick_proposal_description"))
 
     def test_untouched_initial_copy_gets_v3_and_new_name(self) -> None:
         rows = self.versions(1)

@@ -4,8 +4,9 @@
 выполнены и закоммичены. Владелец провёл первый ручной тест — дефекты
 №20–30. Программа исправлений Poster 2.1 по плану `poster2_fix_plan.md`
 (этапы R1–R5): **R1 принят** (578818e), **R2 принят** (2fc237f), **R3
-принят, коммит и push выполняются**. Текущий этап: **R4 — UX-чистка и
-чат как приложение** (следующий по плану, не начат).
+принят** (3df2c3f), **R4 принят** (см. запись ниже; коммит и push —
+в момент приёмки). Текущий этап: **R5 — CI/очистка БД/развёртывание/финальный
+отчёт** (следующий по плану).
 
 Единый документ состояния, который ведёт `poster-manager` после каждого
 завершённого этапа. Владелец читает его, чтобы понять, где остановилась
@@ -31,6 +32,85 @@ Push: <нет | выполнено по разрешению>
 
 ## Журнал
 
+## Этап R4 — UX-чистка и чат как приложение
+Дата: 2026-10-29
+Статус: done
+Задание: по плану `poster2_fix_plan.md` (раздел R4, дефекты №24, №27, №28,
+№29 + чат-как-приложение): описание кирпичика в карточках предложения с
+миграцией 20, крошки и «шаг N из 4» во флоу предложений, хаб кирпичиков со
+строками-входами, описание в `<code>` с экранированием, свободный текст на
+экранных фазах не затирает экран.
+Изменено:
+- `Poster/migrations.py` — миграция 20 «brick_proposal_description»:
+  ALTER TABLE brick_proposals ADD COLUMN description TEXT + пересоздание
+  trg_brick_proposals_snapshot_immutable (описание тоже иммутабельно);
+  LATEST_VERSION=20.
+- `Poster/models.py` — description у BrickProposal/BrickProposalSnapshot.
+- `Poster/brick_proposal_store.py` — перенос описания в снимок и в кирпичик
+  при одобрении.
+- `Poster/handlers/bricks.py` — карточки предложения с 7 полями (title/code/
+  type/description/author/target/status), legacy NULL → «—»; крошка
+  «🧱 Кирпичики → 📨 Предложения» + «шаг N из 4»; хаб со строками
+  «название + 📨 bp_start:<id>» (вход с пропуском шага 1, назад → хаб через
+  proposal_entry); SCREEN_PHASES + BrickScreenTextHandler (свободный текст/
+  фото на экранных фазах не затирают экран, ввод удаляется best-effort);
+  _description_html.
+- `Poster/handlers/admin.py` — _proposal_description_html (админ-карточка).
+- `Poster/handlers/announcement_wizard.py`, `handlers/wizard_questions.py` —
+  описание в `<code>` в вопросе анонса и предпросмотре.
+- `Poster/docs/migrations.md` — раздел «Версия 20».
+- Тесты: новые test_poster2_r4_ux.py (26, разработчик) и
+  test_poster2_r4_ux_tester.py (27+8 хелперов, независимый); актуализированы
+  ~17 регрессионных модулей (версия 20).
+Проверки:
+- `make check PYTHON=.venv/bin/python` → `Ran 1381 tests ... OK`; ruff/
+  black/mypy чисто (135 файлов).
+- R4-набор: `tests.test_poster2_r4_ux tests.test_poster2_r4_ux_tester` →
+  56 тестов OK.
+- poster-tester (независимо): все 6 пунктов требований + негативы
+  (IDOR, forged bp_start, stale) + юмор-регресс с мутационной проверкой.
+  1 дефект в собственном тесте (фильтр живого блока: send-записи FakeBot не
+  содержат message_id) — исправлен, продуктового дефекта нет.
+Замечания ревизора: approve (6 независимых попыток; каждая доходила до
+лимита шагов на чтении diff, но вердикт дали все, блокирующих нет).
+Неблокирующие (в бэклог R5+): мёртвый код (_conflict_short_label,
+count_open_conflicts, list_open_conflicts, _description_text в bricks.py),
+дубли description-html-хелперов, устаревшее число тестов в
+docs/migrations.md, pending-уведомления без ретрая (перенос с R3).
+Открытые вопросы: нет блокирующих.
+Коммит: см. git log (этап R4; opencode.jsonc и .opencode/agents/*.md
+владельца — вне коммита).
+Push: выполняется в origin/main.
+
+### Контрольная точка для R5 (компактная)
+
+Завершено: S1–S5 (Poster 2.0), R1 (578818e), R2 (2fc237f), R3 (3df2c3f),
+R4 (этап, коммит в момент приёмки). CI зелёный по факту push каждого этапа.
+Схема: LATEST_VERSION=20 (мigrations 18: BUILTIN v3/«Дефолтный шаблон»;
+19: brick_conflicts + brick_conflict_notifications; 20:
+brick_proposals.description). Тесты: 1381 OK, ruff/black/mypy чисто
+(135 файлов).
+
+Осталось R5 (по `poster2_fix_plan.md` §R5):
+1. Автоматизировать оставшиеся части тест-матрицы A–G (п. плана).
+2. Очистка тестовой БД: остановить poster-bot.service (`systemctl --user`);
+   WAL-бэкап с `PRAGMA integrity_check`/`foreign_key_check`; записать
+   путь/размер/SHA-256/версию схемы; собрать чистую БД штатным механизмом
+   (миграции), сохранив: код, миграции, системные кирпичики, стандартный
+   шаблон, конфиг, токен, systemd-юниты, прокси, ID владельца (249601025).
+   Реальную `Poster/post_bot.db` не читать/не выводить.
+3. Развёртывание: `systemctl --user` poster-bot.service +
+   tg-connect-proxy.service; проверить active/enabled, авторизацию в
+   Telegram, polling, логи, отсутствие рестарт-петли; сеть/SSH/проектор
+   не трогать.
+4. Финальный отчёт владельцу (8 разделов) + рекомендации keep/raise/lower
+   по лимитам шагов подагентов.
+
+Ограничения: бот запускается `systemctl --user` (не `make run`); токен/env в
+`/home/mush/.config/opencode/poster-bot.env` (не выводить); тестовая БД
+содержит только тестовые данные — заменить после проверенного бэкапа.
+
+---
 ## Этап R3 — Глобальные кирпичики и конфликты кодов
 Дата: 2026-10-29
 Статус: done

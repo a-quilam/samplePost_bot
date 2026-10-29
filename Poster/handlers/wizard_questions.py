@@ -166,6 +166,19 @@ def _description_text(value: object) -> str:
     return " ".join(str(value or "").split())
 
 
+def description_html(value: object) -> str:
+    """
+    Описание кирпичика моноширинно (Poster 2.1 R4 №27).
+
+    Текст задаёт человек, поэтому он сначала экранируется, а затем
+    оборачивается в `<code>`: символы HTML не должны ни ломать экран, ни
+    исполняться. Пустое описание — пустая строка: вызывающий слой решает,
+    показывать ли блок вовсе.
+    """
+    text = _description_text(value)
+    return f"<code>{h(text)}</code>" if text else ""
+
+
 def question_text(
     field: AnnouncementFieldState,
     index: int,
@@ -185,10 +198,11 @@ def question_text(
     """
     blocks = [f"🧱 Вопрос {index + 1} из {total}: {h(field.title)}"]
     # Poster 2.0 S5: описание кирпичика — инструкция автору анонса. Текст
-    # задаёт человек, поэтому он экранируется как и любое значение экрана.
-    description = _description_text(field.description)
+    # задаёт человек, поэтому он экранируется и оборачивается в `<code>`
+    # (Poster 2.1 R4 №27: описание в предпросмотре — моноширинно).
+    description = description_html(field.description)
     if description:
-        blocks.append(f"📝 {h(description)}")
+        blocks.append(f"📝 {description}")
     blocks.extend(
         [
             type_hint(field),

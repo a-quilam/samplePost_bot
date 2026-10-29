@@ -661,6 +661,10 @@ class BrickProposal(Base):
     value_type: Mapped[str] = mapped_column("type", Text, nullable=False)
     source: Mapped[str] = mapped_column(Text, nullable=False)
     rules_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # Описание — часть неизменяемого снимка (Poster 2.1 R4, миграция 20).
+    # NULL у предложений, отправленных до появления колонки: карточка
+    # показывает «—», данные при этом не переписываются.
+    description: Mapped[str | None] = mapped_column(Text, nullable=True)
     status: Mapped[str] = mapped_column(Text, default="pending", nullable=False)
     created_at: Mapped[datetime] = mapped_column(
         DateTime, default=utcnow, nullable=False

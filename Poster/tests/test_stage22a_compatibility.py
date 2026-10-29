@@ -282,7 +282,7 @@ class Stage22ACompatibilityTests(unittest.TestCase):
         self.assertIn((17, "archive_legacy_drafts"), journal(self.path))
         self.assertIn((18, "builtin_templates_v3"), journal(self.path))
         self.assertEqual(
-            journal(self.path)[-1], (LATEST_VERSION, "brick_code_conflicts")
+            journal(self.path)[-1], (LATEST_VERSION, "brick_proposal_description")
         )
         # Миграция 17 переименовала легаси-таблицу: строки прежнего черновика
         # читаются из архива как есть, `drafts` в рабочей схеме нет.

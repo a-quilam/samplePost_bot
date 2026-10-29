@@ -113,6 +113,9 @@ class BrickProposalSnapshot:
     value_type: str
     source: str
     rules: dict[str, object]
+    # Описание — часть снимка (миграция 20). `None` у предложений, отправленных
+    # до её появления: карточка показывает «—», а не пустоту.
+    description: str | None
     status: str
     created_at: datetime
     decided_at: datetime | None
@@ -238,6 +241,7 @@ def _snapshot(
         value_type=row.value_type,
         source=row.source,
         rules=_safe_rules(row.value_type, row.rules_json),
+        description=row.description,
         status=row.status,
         created_at=row.created_at,
         decided_at=row.decided_at,
@@ -451,6 +455,9 @@ def create_brick_proposal(
         value_type=value_type,
         source=source_kind,
         rules_json=rules_json,
+        # Описание — часть неизменяемого снимка (R4 №29): правки личного
+        # кирпичика после отправки его не меняют.
+        description=source.description,
         status=PROPOSAL_STATUS_PENDING,
         created_at=utcnow(),
     )
@@ -837,6 +844,9 @@ def approve_brick_proposal(
             place_id=target_place_id,
             owner_user_id=None,
             rules_json=rules_json,
+            # Описание из снимка переносится в созданный кирпичик: инструкция
+            # автору анонса не должна теряться при одобрении (R4 №29).
+            description=proposal.description,
             status=BRICK_STATUS_ACTIVE,
             revision=1,
             created_by_user_id=actor.id,

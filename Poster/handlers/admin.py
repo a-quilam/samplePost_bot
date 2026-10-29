@@ -1320,21 +1320,36 @@ def _proposal_admin_list_content(
     return text, InlineKeyboardMarkup(rows)
 
 
+def _proposal_description_html(value: object) -> str:
+    """
+    Описание в карточке предложения (R4 №29): моноширинно, «—» при отсутствии.
+
+    Текст задаёт человек, поэтому он экранируется перед обёрткой в `<code>`.
+    Старые pending-предложения без описания показывают «—».
+    """
+    text = " ".join(str(value or "").split())
+    if not text:
+        return "—"
+    return f"<code>{_h(text)}</code>"
+
+
 def _proposal_admin_card_content(
     proposal: BrickProposalSnapshot,
 ) -> tuple[str, InlineKeyboardMarkup]:
     parts = [
         "🧱 <b>Предложение кирпичика</b>",
         "",
+        # R4 №29: все семь полей карточки — название, код, тип, описание,
+        # автор, цель и статус — в одном месте и в одном порядке.
         f"Название: <b>{_h(proposal.title)}</b>",
         f"Обозначение: <code>[{_h(proposal.code)}]</code>",
         f"Тип: {_h(BRICK_TYPE_TITLES.get(proposal.value_type, proposal.value_type))}",
-        f"Настройки: {_h(_proposal_settings_text(proposal))}",
-        f"Область: {_h(_proposal_target_label(proposal))}",
-        "",
+        f"Описание: {_proposal_description_html(proposal.description)}",
         f"Автор: {_h(proposal.author_label)}",
-        f"Отправлено: {_h(_date_label(proposal.created_at))}",
+        f"Цель: {_h(_proposal_target_label(proposal))}",
         f"Статус: {_h(_proposal_status_label(proposal.status))}",
+        f"Настройки: {_h(_proposal_settings_text(proposal))}",
+        f"Отправлено: {_h(_date_label(proposal.created_at))}",
     ]
     if proposal.decided_at is not None:
         parts.append(f"Решение: {_h(_date_label(proposal.decided_at))}")

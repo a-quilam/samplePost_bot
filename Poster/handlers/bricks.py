@@ -152,6 +152,8 @@ _PROPOSAL_PHASES = frozenset(
         "proposal_withdraw_confirm",
     }
 )
+# Число шагов мастера предложения (R4 №24: человек видит «шаг N из 4»).
+PROPOSAL_STEPS = 4
 PHASES = frozenset(
     {
         "hub",
@@ -159,6 +161,17 @@ PHASES = frozenset(
         "card",
         "archive_confirm",
         *_WIZARD_PHASES,
+        *_PROPOSAL_PHASES,
+    }
+)
+# Экранные фазы: ввод текста не ожидается, экран живёт кнопками. Свободный
+# текст здесь не должен затирать раздел подсказкой главного меню (R4).
+SCREEN_PHASES = frozenset(
+    {
+        "hub",
+        "archive",
+        "card",
+        "archive_confirm",
         *_PROPOSAL_PHASES,
     }
 )
@@ -365,6 +378,20 @@ def _description_text(value: object) -> str:
     return text or "нет"
 
 
+def _description_html(value: object) -> str:
+    """
+    Описание кирпичика моноширинно (Poster 2.1 R4 №27).
+
+    Текст целиком задаёт человек, поэтому он экранируется, а затем
+    оборачивается в `<code>`. Пустое описание остаётся коротким «нет» без
+    тега: это не описание, а отметка об отсутствии.
+    """
+    text = " ".join(str(value or "").split())
+    if not text:
+        return "нет"
+    return f"<code>{_h(text)}</code>"
+
+
 def _format_number(value: object) -> str:
     if isinstance(value, float) and value.is_integer():
         return str(int(value))
@@ -427,15 +454,25 @@ def _page_note(offset: int, count: int, total: int) -> str:
 
 
 def _list_keyboard(bricks, *, offset: int, total: int, archive: bool):
+    """
+    Список кирпичиков: строка = «название» + компактная кнопка действия.
+
+    №28: «предложить» доступно прямо из строки активного кирпичика — не нужно
+    сначала открывать карточку. В архиве кнопка не нужна: архивный кирпичик
+    предложить нельзя, поэтому строка остаётся одной кнопкой.
+    """
     prefix = "bk_apage" if archive else "bk_page"
-    rows = [
-        [
+    rows = []
+    for brick in bricks:
+        row = [
             InlineKeyboardButton(
                 _button_title(brick), callback_data=f"bk_open:{brick.id}"
             )
         ]
-        for brick in bricks
-    ]
+        if not archive and brick.status == BRICK_STATUS_ACTIVE:
+            # Короткая подпись: полный текст съел бы место у названия.
+            row.append(InlineKeyboardButton("📨", callback_data=f"bp_start:{brick.id}"))
+        rows.append(row)
     navigation: list[InlineKeyboardButton] = []
     if offset > 0:
         navigation.append(
@@ -557,7 +594,7 @@ def _card_content(brick):
         f"🧱 <b>{_h(brick.title)}</b>\n\n"
         f"Обозначение: <code>[{_h(brick.code)}]</code>\n"
         f"Тип: {_h(_type_title(brick.value_type))}\n"
-        f"Описание: {_h(_description_text(brick.description))}\n"
+        f"Описание: {_description_html(brick.description)}\n"
         "Область: личная (видна только вам)\n"
         f"Статус: {state_label}\n"
         f"Настройки: {_h(_settings_text(brick.value_type, brick.rules))}\n\n"
@@ -621,6 +658,35 @@ def _proposal_target_text(proposal: BrickProposalSnapshot) -> str:
     return f"место «{proposal.place_name or f'#{proposal.place_id}'}»"
 
 
+# Хлебная крошка раздела предложений (R4 №24): человек всегда видит, где он
+# находится, и не путает предложения со списком кирпичиков.
+PROPOSAL_CRUMB = "🧱 Кирпичики → 📨 Предложения"
+
+
+def _proposal_header(title: str, step: int | None = None) -> str:
+    """
+    Заголовок экрана предложения с крошкой и номером шага.
+
+    Шаг указывается только у мастер-экранов (1–4): у списка и карточки шага
+    нет, и выдумывать его не нужно.
+    """
+    suffix = f" · шаг {step} из {PROPOSAL_STEPS}" if step is not None else ""
+    return f"{PROPOSAL_CRUMB}\n\n📨 <b>{title}</b>{suffix}"
+
+
+def _proposal_back_label(state: dict) -> str:
+    """
+    Подпись «Назад» для экрана области (R4 №24).
+
+    Если человек пришёл из строки хаба (`bp_start:<id>`), шаг выбора
+    кирпичика пропущен — «назад» должно возвращать в хаб, а не на экран
+    «выберите тот же кирпичик ещё раз».
+    """
+    if state.get("proposal_entry") == "row":
+        return "◀️ К кирпичикам"
+    return "◀️ К выбору кирпичика"
+
+
 def _proposal_page_note(offset: int, count: int, total: int) -> str:
     if total <= 0:
         return ""
@@ -676,10 +742,10 @@ def _proposal_select_brick_content(session: Session, user: User, state: dict):
     )
     state["proposal_page"] = offset
     text = (
-        "📨 <b>Предложить кирпичик</b>\n\n"
-        "Шаг 1 из 4. Выберите свой личный кирпичик, который хотите "
-        "предложить для места или всей системы.\n\n"
-        "Будет отправлен снимок текущих названия, кода, типа и настроек. "
+        _proposal_header("Выберите кирпичик", step=1)
+        + "\n\nВыберите свой личный кирпичик, который хотите предложить для "
+        "места или всей системы.\n\n"
+        "Будет отправлен снимок текущих названия, кода, типа и описания. "
         "Исходный личный кирпичик и его владелец не изменятся.\n\n"
         + _proposal_page_note(offset, len(bricks), total)
     )
@@ -708,7 +774,7 @@ def _proposal_select_brick_content(session: Session, user: User, state: dict):
         )
     if navigation:
         rows.append(navigation)
-    rows.append([InlineKeyboardButton("◀️ Назад", callback_data="bp_back")])
+    rows.append([InlineKeyboardButton("◀️ К кирпичикам", callback_data="bp_back")])
     return text, InlineKeyboardMarkup(rows)
 
 
@@ -721,10 +787,10 @@ def _proposal_scope_content(session: Session, user: User, state: dict):
         )
         return None
     text = (
-        "📨 <b>Куда предложить кирпичик?</b>\n\n"
+        _proposal_header("Куда предложить кирпичик?", step=2) + "\n\n"
         f"Кирпичик: <b>{_h(brick.title)}</b>\n"
         f"Обозначение: <code>[{_h(brick.code)}]</code>\n\n"
-        "Шаг 2 из 4. Выберите область:\n"
+        "Выберите область:\n"
         "• конкретное место — рассматривает действующий администратор этого "
         "места или суперадминистратор;\n"
         "• вся система — рассматривает только суперадминистратор.\n\n"
@@ -732,13 +798,14 @@ def _proposal_scope_content(session: Session, user: User, state: dict):
     )
     return text, InlineKeyboardMarkup(
         [
+            [InlineKeyboardButton("📍 Место", callback_data="bp_target:place")],
+            [InlineKeyboardButton("🌍 Вся система", callback_data="bp_target:system")],
             [
                 InlineKeyboardButton(
-                    "📍 Конкретное место", callback_data="bp_target:place"
+                    _proposal_back_label(state),
+                    callback_data="bp_back",
                 )
             ],
-            [InlineKeyboardButton("🌍 Вся система", callback_data="bp_target:system")],
-            [InlineKeyboardButton("◀️ Назад", callback_data="bp_back")],
         ]
     )
 
@@ -758,11 +825,11 @@ def _proposal_select_place_content(session: Session, user: User, state: dict):
         places, total = list_places(session, offset=offset, limit=PROPOSAL_PAGE_SIZE)
     state["proposal_place_page"] = offset
     text = (
-        "📨 <b>Выберите место</b>\n\n"
+        _proposal_header("Выберите место", step=3) + "\n\n"
         f"Кирпичик: <b>{_h(brick.title)}</b> "
         f"<code>[{_h(brick.code)}]</code>\n\n"
-        "Шаг 3 из 4. Выберите место из существующего справочника. "
-        "Новое место здесь не создаётся."
+        "Выберите место из существующего справочника. Новое место здесь "
+        "не создаётся."
     )
     rows = [
         [
@@ -796,7 +863,7 @@ def _proposal_select_place_content(session: Session, user: User, state: dict):
         )
     if navigation:
         rows.append(navigation)
-    rows.append([InlineKeyboardButton("◀️ Назад", callback_data="bp_back")])
+    rows.append([InlineKeyboardButton("◀️ К области", callback_data="bp_back")])
     return text, InlineKeyboardMarkup(rows)
 
 
@@ -850,24 +917,24 @@ def _proposal_preview_content(session: Session, user: User, state: dict):
             "кирпичике или выберите другую область."
         )
     text = (
-        "📨 <b>Проверьте предложение</b>\n\n"
+        _proposal_header("Проверьте предложение", step=4) + "\n\n"
         f"Название: <b>{_h(brick.title)}</b>\n"
         f"Обозначение: <code>[{_h(brick.code)}]</code>\n"
         f"Тип: {_h(_type_title(brick.value_type))}\n"
+        f"Описание: {_description_html(brick.description)}\n"
         f"Настройки: {_h(_settings_text(brick.value_type, brick.rules))}\n"
-        f"Область: {target}\n\n"
+        f"Цель: {target}\n\n"
         f"{availability_text}\n\n"
-        "Шаг 4 из 4. После отправки будет сохранён неизменяемый снимок. "
-        "Последующие правки или архивация личного кирпичика не изменят "
-        "ожидающее предложение. Исходный кирпичик не копируется и не "
-        "перепривязывается."
+        "После отправки будет сохранён неизменяемый снимок. Последующие "
+        "правки или архивация личного кирпичика не изменят ожидающее "
+        "предложение. Исходный кирпичик не копируется и не перепривязывается."
     )
     rows: list[list[InlineKeyboardButton]] = []
     if availability.available:
-        rows.append(
-            [InlineKeyboardButton("📨 Отправить предложение", callback_data="bp_send")]
-        )
-    rows.append([InlineKeyboardButton("◀️ Назад", callback_data="bp_back")])
+        rows.append([InlineKeyboardButton("📨 Отправить", callback_data="bp_send")])
+    scope = state.get("proposal_scope")
+    back_label = "◀️ К местам" if scope == PROPOSAL_SCOPE_PLACE else "◀️ К области"
+    rows.append([InlineKeyboardButton(back_label, callback_data="bp_back")])
     return text, InlineKeyboardMarkup(rows)
 
 
@@ -889,15 +956,15 @@ def _proposal_list_content(session: Session, user: User, state: dict):
         )
     state["proposal_page"] = offset
     text = (
-        "📤 <b>Мои предложения</b>\n\n"
+        _proposal_header("Мои предложения") + "\n\n"
         "Здесь хранится история ваших предложений. Ожидающие предложения "
         "не имеют срока действия: их можно отозвать в любой момент, пока "
         "администратор не принял решение."
     )
     if not total:
         text += (
-            "\n\nВы ещё не отправляли предложений. Откройте «🧱 Мои кирпичики» "
-            "и нажмите «Предложить кирпичик»."
+            "\n\nВы ещё не отправляли предложений. Откройте «🧱 Кирпичики» "
+            "и нажмите «📨 Предложить»."
         )
     else:
         text += "\n\n" + _proposal_page_note(offset, len(proposals), total)
@@ -930,20 +997,36 @@ def _proposal_list_content(session: Session, user: User, state: dict):
         )
     if navigation:
         rows.append(navigation)
-    rows.append([InlineKeyboardButton("◀️ Назад", callback_data="bp_back")])
+    rows.append([InlineKeyboardButton("◀️ К кирпичикам", callback_data="bp_back")])
     return text, InlineKeyboardMarkup(rows)
+
+
+def _proposal_description(value: object) -> str:
+    """
+    Описание в карточке предложения (R4 №29): моноширинно, с «—» при отсутствии.
+
+    У предложений, отправленных до миграции 20, описания в снимке нет —
+    карточка честно показывает «—», а не пустую строку.
+    """
+    text = " ".join(str(value or "").split())
+    if not text:
+        return "—"
+    return f"<code>{_h(text)}</code>"
 
 
 def _proposal_card_content(proposal: BrickProposalSnapshot):
     parts = [
-        f"📨 <b>{_h(proposal.title)}</b>",
+        _proposal_header("Предложение кирпичика"),
         "",
+        f"Название: <b>{_h(proposal.title)}</b>",
         f"Обозначение: <code>[{_h(proposal.code)}]</code>",
         f"Тип: {_h(_type_title(proposal.value_type))}",
-        f"Настройки: {_h(_settings_text(proposal.value_type, proposal.rules))}",
-        f"Область: {_h(_proposal_target_text(proposal))}",
-        f"Отправлено: {_proposal_date(proposal.created_at)}",
+        f"Описание: {_proposal_description(proposal.description)}",
+        f"Автор: {_h(proposal.author_label)}",
+        f"Цель: {_h(_proposal_target_text(proposal))}",
         f"Статус: {_proposal_status_ui(proposal.status)}",
+        f"Настройки: {_h(_settings_text(proposal.value_type, proposal.rules))}",
+        f"Отправлено: {_proposal_date(proposal.created_at)}",
     ]
     if proposal.decided_at is not None:
         parts.append(f"Решение: {_proposal_date(proposal.decided_at)}")
@@ -976,29 +1059,29 @@ def _proposal_card_content(proposal: BrickProposalSnapshot):
         rows.append(
             [
                 InlineKeyboardButton(
-                    "🗑 Отозвать предложение",
+                    "🗑 Отозвать",
                     callback_data="bp_withdraw",
                 )
             ]
         )
-    rows.append([InlineKeyboardButton("◀️ Назад", callback_data="bp_back")])
+    rows.append([InlineKeyboardButton("◀️ К предложениям", callback_data="bp_back")])
     return "\n".join(parts), InlineKeyboardMarkup(rows)
 
 
 def _proposal_withdraw_confirm_content(proposal: BrickProposalSnapshot):
     text = (
-        "🗑 <b>Отозвать предложение?</b>\n\n"
+        _proposal_header("Отозвать предложение?") + "\n\n"
         f"Название: {_h(proposal.title)}\n"
         f"Обозначение: <code>[{_h(proposal.code)}]</code>\n"
-        f"Область: {_h(_proposal_target_text(proposal))}\n\n"
+        f"Цель: {_h(_proposal_target_text(proposal))}\n\n"
         "После отзыва администратор больше не сможет его одобрить. Личный "
         "кирпичик останется у вас без изменений. Новое предложение можно "
         "будет отправить позже."
     )
     return text, InlineKeyboardMarkup(
         [
-            [InlineKeyboardButton("✅ Да, отозвать", callback_data="bp_withdraw_yes")],
-            [InlineKeyboardButton("◀️ Нет, назад", callback_data="bp_back")],
+            [InlineKeyboardButton("✅ Отозвать", callback_data="bp_withdraw_yes")],
+            [InlineKeyboardButton("◀️ К карточке", callback_data="bp_back")],
         ]
     )
 
@@ -1078,7 +1161,7 @@ def _edit_menu_content(state: dict):
         f"Название: {_h(draft.get('title') or '—')}\n"
         f"Обозначение: <code>[{_h(draft.get('code') or '—')}]</code>\n"
         f"Тип: {_h(_type_title(value_type))}\n"
-        f"Описание: {_h(_description_text(draft.get('description')))}\n"
+        f"Описание: {_description_html(draft.get('description'))}\n"
         f"Настройки: {_h(_settings_text(value_type, draft.get('rules') or {}))}\n\n"
         "Тип после создания не меняется: для другого типа создайте новый "
         "кирпичик. Идентификатор сохраняется при любых изменениях."
@@ -1319,7 +1402,7 @@ def _preview_content(state: dict):
         f"Название: {_h(title)}\n"
         f"Обозначение: <code>[{_h(code)}]</code>\n"
         f"Тип: {_h(_type_title(value_type))}\n"
-        f"Описание: {_h(_description_text(draft.get('description')))}\n"
+        f"Описание: {_description_html(draft.get('description'))}\n"
         "Область: личная (видна только вам)\n"
         f"Настройки: {_h(_settings_text(value_type, draft.get('rules') or {}))}\n\n"
         "После сохранения кирпичик появится в вашем списке. В посты и "
@@ -1692,15 +1775,41 @@ def _proposal_new_state(state: dict, phase: str) -> None:
 async def handle_proposal_start(
     update: Update, context: ContextTypes.DEFAULT_TYPE
 ) -> None:
+    """
+    Вход в предложение кирпичика.
+
+    Вызывается общей кнопкой хаба (`bp_start`) и компактной кнопкой строки
+    списка (`bp_start:<id>`, №28). Во втором случае шаг выбора кирпичика
+    пропускается: человек уже выбрал его в хабе, и лишний экран был бы
+    тупиком «выберите то же самое ещё раз».
+    """
     state = load_brick_session(ctx.user(update).id)
     if state is None or state.get("phase") != "hub":
         await _stale(update)
         return
-    await ctx.query(update).answer()
+    query = ctx.query(update)
+    await query.answer()
+    data = query.data or ""
+    source_id: int | None = None
+    if data.startswith("bp_start:"):
+        source_id = _proposal_parse_id(data)
+        if source_id is None:
+            await _stale(update)
+            return
     session = SessionLocal()
     try:
         user = _ensure_user(session, update)
         total = count_personal_bricks(session, user.telegram_user_id)
+        brick = (
+            get_personal_brick(
+                session,
+                user.telegram_user_id,
+                source_id,
+                include_archived=False,
+            )
+            if source_id is not None
+            else None
+        )
     finally:
         session.close()
     if total <= 0:
@@ -1714,7 +1823,25 @@ async def handle_proposal_start(
             ),
         )
         return
+    if source_id is not None and brick is None:
+        await _render_phase(
+            update,
+            context,
+            state,
+            notice=(
+                "Кирпичик не найден или уже в архиве. Выберите другой "
+                "активный кирпичик."
+            ),
+        )
+        return
     _proposal_new_state(state, "proposal_select_brick")
+    # R4 №24: откуда пришёл человек — от этого зависит подпись и цель «назад»
+    # на экране области. Из строки хаба шаг выбора кирпичика пропускается.
+    state["proposal_entry"] = "row" if brick is not None else "hub"
+    if brick is not None:
+        state["proposal_source_brick_id"] = brick.id
+        state["proposal_place_page"] = 0
+        state["phase"] = "proposal_scope"
     await _render_phase(update, context, state, drop_input=True)
 
 
@@ -2028,9 +2155,15 @@ async def handle_proposal_back(
         state.clear()
         state.update(_new_hub(page=page, archive_page=archive_page))
     elif phase == "proposal_scope":
-        state["phase"] = "proposal_select_brick"
-        state.pop("proposal_scope", None)
-        state.pop("proposal_place_id", None)
+        # R4 №24: из строки хаба шаг выбора кирпичика был пропущен — «назад»
+        # возвращает в хаб, а не на экран повторного выбора того же кирпичика.
+        if state.get("proposal_entry") == "row":
+            state.clear()
+            state.update(_new_hub(page=page, archive_page=archive_page))
+        else:
+            state["phase"] = "proposal_select_brick"
+            state.pop("proposal_scope", None)
+            state.pop("proposal_place_id", None)
     elif phase == "proposal_select_place":
         state["phase"] = "proposal_scope"
     elif phase == "proposal_preview":
@@ -3050,6 +3183,60 @@ class BrickTextHandler(MessageHandler):
         return matched
 
 
+class BrickScreenTextHandler(MessageHandler):
+    """
+    Текст на ЭКРАННЫХ фазах раздела (R4, «чат как приложение»).
+
+    Отдельный фильтр-класс, чтобы не смешивать две разные политики ввода:
+    мастера принимают текст и сохраняют его (`BrickTextHandler`), а экраны
+    списка/карточки/предложений ввода не ждут вовсе — их задача не отдать
+    сообщение глобальной подсказке главного меню и не оставить диалог
+    без кнопок.
+    """
+
+    def __init__(self, filters_arg, callback, *, screen_phases: frozenset[str]):
+        super().__init__(filters_arg, callback)
+        self.screen_phases = frozenset(screen_phases)
+
+    def check_update(self, update):
+        matched = super().check_update(update)
+        if not matched:
+            return None
+        user = getattr(update, "effective_user", None)
+        if user is None:
+            return None
+        state = load_brick_session(user.id)
+        if not isinstance(state, dict):
+            return None
+        if state.get("phase") not in self.screen_phases:
+            return None
+        return matched
+
+
+async def handle_brick_stray_text(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> None:
+    """
+    Текст или фото в экранной фазе раздела (R4, «чат как приложение»).
+
+    На экранах списка, карточки и предложений ввод не нужен: без этого
+    обработчика глобальная подсказка главного меню затирала экран раздела,
+    и человек оставался без единой кнопки — настоящий тупик. Экран
+    восстанавливается, а сообщение пользователя удаляется best-effort.
+    """
+    state = load_brick_session(ctx.user(update).id)
+    if not isinstance(state, dict) or state.get("phase") not in SCREEN_PHASES:
+        return
+    await screen.reanchor_screen(update, context)
+    await _render_phase(
+        update,
+        context,
+        state,
+        notice="Этот экран работает кнопками — выберите действие.",
+        drop_input=True,
+    )
+
+
 async def handle_brick_stale(
     update: Update, context: ContextTypes.DEFAULT_TYPE
 ) -> None:
@@ -3094,7 +3281,7 @@ def bricks_handlers() -> list[BaseHandler]:
         CallbackQueryHandler(handle_archive, pattern=r"^bk_archive$"),
         CallbackQueryHandler(handle_archive_confirm, pattern=r"^bk_archive_confirm$"),
         CallbackQueryHandler(handle_restore, pattern=r"^bk_restore$"),
-        CallbackQueryHandler(handle_proposal_start, pattern=r"^bp_start$"),
+        CallbackQueryHandler(handle_proposal_start, pattern=r"^bp_start(?::\d+)?$"),
         CallbackQueryHandler(handle_proposal_mine, pattern=r"^bp_mine$"),
         CallbackQueryHandler(handle_proposal_source, pattern=r"^bp_source:\d+$"),
         CallbackQueryHandler(
@@ -3117,6 +3304,11 @@ def bricks_handlers() -> list[BaseHandler]:
             filters.TEXT & ~filters.COMMAND,
             handle_brick_text,
             allowed_phases=TEXT_PHASES,
+        ),
+        BrickScreenTextHandler(
+            (filters.TEXT | filters.PHOTO) & ~filters.COMMAND,
+            handle_brick_stray_text,
+            screen_phases=SCREEN_PHASES,
         ),
         CallbackQueryHandler(handle_brick_stale, pattern=r"^bk_"),
     ]

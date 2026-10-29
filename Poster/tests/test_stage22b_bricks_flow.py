@@ -548,8 +548,10 @@ class BricksUiTests(unittest.TestCase):
         self.assertNotIn("& <без должности>", h.screen_text())
 
         await h.callback(f"bk_open:{brick.id}")
+        # №27: предпросмотр описания — моноширинный блок `<code>`.
         self.assertIn(
-            "Описание: Имя ведущего &amp; &lt;без должности&gt;", h.screen_text()
+            "Описание: <code>Имя ведущего &amp; &lt;без должности&gt;</code>",
+            h.screen_text(),
         )
         await h.callback("bk_edit")
         self.assertIn(("📝 Описание: есть", "bk_edit_description"), h.screen_buttons())

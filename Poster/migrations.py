@@ -2859,6 +2859,56 @@ MIGRATION_19_BRICK_CONFLICTS = Migration(
 )
 
 
+# --- Версия 20: описание в снимке предложения (Poster 2.1 R4) ---------------
+#
+# Карточка предложения должна показывать описание кирпичика (№29), а
+# снимок — не указатель: описание фиксируется при отправке и не меняется
+# при последующих правках личного кирпичика. Колонка добавляется
+# добавочным `ALTER TABLE ADD COLUMN`; таблица не перестраивается, триггеры
+# и индексы остаются прежними. Существующие pending-предложения получают
+# `NULL` — карточка показывает «—», данные не переписываются.
+#
+# Триггер неизменяемости снимка (`trg_brick_proposals_snapshot_immutable`)
+# пересоздаётся в той же транзакции: он перечисляет колонки снимка явно,
+# и без `description` новое поле можно было бы переписать после отправки.
+# Прежнее поведение для остальных колонок сохранено дословно.
+
+MIGRATION_20_PROPOSAL_DESCRIPTION = Migration(
+    version=20,
+    name="brick_proposal_description",
+    statements=(
+        "ALTER TABLE brick_proposals ADD COLUMN description TEXT",
+        "DROP TRIGGER IF EXISTS trg_brick_proposals_snapshot_immutable",
+        """
+        CREATE TRIGGER trg_brick_proposals_snapshot_immutable
+        BEFORE UPDATE OF
+            author_user_id, scope, place_id, source_brick_id, title, code,
+            type, source, rules_json, description, created_at
+        ON brick_proposals
+        FOR EACH ROW
+        WHEN NEW.author_user_id IS NOT OLD.author_user_id
+            OR NEW.scope IS NOT OLD.scope
+            OR NEW.place_id IS NOT OLD.place_id
+            OR NEW.source_brick_id IS NOT OLD.source_brick_id
+            OR NEW.title IS NOT OLD.title
+            OR NEW.code IS NOT OLD.code
+            OR NEW.type IS NOT OLD.type
+            OR NEW.source IS NOT OLD.source
+            OR NEW.rules_json IS NOT OLD.rules_json
+            OR NEW.description IS NOT OLD.description
+            OR NEW.created_at IS NOT OLD.created_at
+        BEGIN
+            SELECT RAISE(ABORT, 'brick proposal snapshot is immutable');
+        END
+        """,
+    ),
+    requires_tables=(
+        "bricks",
+        "brick_proposals",
+    ),
+)
+
+
 DEFAULT_MIGRATIONS: tuple[Migration, ...] = (
     MIGRATION_1_USERS_PLACES,
     MIGRATION_2_PLACE_CONTACTS_UI,
@@ -2879,6 +2929,7 @@ DEFAULT_MIGRATIONS: tuple[Migration, ...] = (
     MIGRATION_17_ARCHIVE_LEGACY_DRAFTS,
     MIGRATION_18_BUILTIN_TEMPLATES_V3,
     MIGRATION_19_BRICK_CONFLICTS,
+    MIGRATION_20_PROPOSAL_DESCRIPTION,
 )
 
 LATEST_VERSION = DEFAULT_MIGRATIONS[-1].version if DEFAULT_MIGRATIONS else 0
