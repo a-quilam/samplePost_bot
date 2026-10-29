@@ -32,8 +32,10 @@ from sqlalchemy.orm import Session
 
 from brick_store import (
     BrickCodeAvailability,
+    BrickConflictView,
     BrickDefinition,
     check_code_availability,
+    create_code_conflicts,
 )
 from brick_types import (
     BRICK_SCOPE_PERSONAL,
@@ -152,6 +154,9 @@ class ProposalDecisionResult:
     proposal: BrickProposalSnapshot | None = None
     brick: BrickDefinition | None = None
     message: str | None = None
+    # R3: созданные задачи разрешения конфликтов (только для глобального
+    # одобрения при местных носителях того же кода).
+    conflicts: tuple[BrickConflictView, ...] = ()
 
     @property
     def ok(self) -> bool:
@@ -716,12 +721,14 @@ def _result(
     status: str,
     message: str | None = None,
     brick: BrickDefinition | None = None,
+    conflicts: tuple[BrickConflictView, ...] = (),
 ) -> ProposalDecisionResult:
     return ProposalDecisionResult(
         status=status,
         proposal=_load_by_id(session, proposal_id),
         brick=brick,
         message=message,
+        conflicts=conflicts,
     )
 
 
@@ -838,6 +845,16 @@ def approve_brick_proposal(
         )
         session.add(brick)
         session.flush()
+        conflicts = (
+            create_code_conflicts(
+                session,
+                system_brick_id=brick.id,
+                code=code,
+                proposal_id=proposal_id,
+            )
+            if proposal.scope == PROPOSAL_SCOPE_SYSTEM
+            else []
+        )
         changed = session.execute(
             sqlalchemy_update(BrickProposal)
             .where(
@@ -881,12 +898,21 @@ def approve_brick_proposal(
         raise
 
     brick_row = session.get(Brick, brick.id)
+    message = "Предложение одобрено; создан отдельный кирпичик."
+    if conflicts:
+        places = len({view.place_id for view in conflicts})
+        message += (
+            f" Местных носителей кода: {len(conflicts)} (мест: {places}) — "
+            "созданы задачи разрешения конфликта, администраторы мест "
+            "получат уведомление."
+        )
     return _result(
         session,
         proposal_id,
         status=PROPOSAL_STATUS_APPROVED,
-        message="Предложение одобрено; создан отдельный кирпичик.",
+        message=message,
         brick=_brick_definition(brick_row) if brick_row is not None else None,
+        conflicts=tuple(conflicts),
     )
 
 

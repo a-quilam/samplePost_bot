@@ -91,6 +91,19 @@ from brick_proposal_store import (
     reject_brick_proposal,
 )
 from brick_state import clear_brick_session
+from brick_store import (
+    BrickConflictError,
+    BrickConflictView,
+    BrickPermissionError,
+    ConflictResolutionResult,
+    count_open_conflicts_for_place,
+    get_conflict,
+    list_pending_conflict_notifications,
+    list_place_conflicts,
+    mark_conflict_notification,
+    resolve_conflict_by_rename,
+    resolve_conflict_by_switch,
+)
 from brick_types import (
     BRICK_TYPE_CHOICE,
     BRICK_TYPE_NUMBER,
@@ -189,6 +202,10 @@ PHASES = {
     "proposal_card",
     "proposal_approve_confirm",
     "proposal_reject_confirm",
+    "conflicts_list",
+    "conflict_card",
+    "conflict_rename_input",
+    "conflict_switch_confirm",
 }
 
 _SUPER_ONLY_PHASES = {
@@ -998,6 +1015,13 @@ def _place_text(
         text += f"\n\nАдрес: {_long_value(details.address)}"
     if details.url:
         text += f"\n\nСсылка: {_safe_link(details.url)}"
+    open_conflicts = count_open_conflicts_for_place(session, details.place_id)
+    if open_conflicts:
+        text += (
+            "\n\n⚔️ Активные задачи конфликтов кодов: "
+            f"{open_conflicts}. Их нужно разрешить до правки привязок: "
+            "кирпичик места или глобальный кирпичик."
+        )
     if active is None:
         text += "\n\nАдминистратор: не назначен."
     else:
@@ -1057,6 +1081,15 @@ def _place_keyboard(
                 InlineKeyboardButton(
                     f"🧱 Предложения кирпичиков ({pending_proposals})",
                     callback_data=f"adm_bprop_place:{details.place_id}",
+                )
+            ]
+        )
+        open_conflicts = count_open_conflicts_for_place(session, details.place_id)
+        rows.append(
+            [
+                InlineKeyboardButton(
+                    f"⚔️ Конфликты кодов ({open_conflicts})",
+                    callback_data=f"adm_bconflicts:{details.place_id}",
                 )
             ]
         )
@@ -1394,6 +1427,160 @@ def _proposal_reject_confirm_content(
                 )
             ],
             [InlineKeyboardButton("◀️ Нет, назад", callback_data="adm_bprop_back")],
+        ]
+    )
+
+
+# --- Конфликты кодов: задачи разрешения (Poster 2.1 R3) --------------------
+
+
+def _conflict_short_label(view: BrickConflictView) -> str:
+    place = view.place_name or f"место #{view.place_id}"
+    return f"[{view.code}] — {place}"
+
+
+def _conflicts_list_content(
+    session: Session,
+    telegram_user_id: int,
+    view: BrickConflictView | None,
+    place_id: int,
+) -> tuple[str, InlineKeyboardMarkup]:
+    details = get_place_details(session, place_id)
+    place_label = details.canonical_name if details is not None else f"#{place_id}"
+    conflicts = list_place_conflicts(session, telegram_user_id, place_id)
+    text = (
+        "⚔️ Конфликты кодов\n\n"
+        f"📍 {_h(place_label)}\n\n"
+        "Глобальный кирпичик уже действует для новых привязок. Пока задача "
+        "активна, местный кирпичик того же кода остаётся как есть: выберите "
+        "«переименовать местный» или «переключиться на глобальный». "
+        "Существующие снимки анонсов не изменяются."
+    )
+    if not conflicts:
+        text += "\n\n✅ Активных задач нет."
+    else:
+        text += f"\n\nАктивных задач: {len(conflicts)}."
+        for index, item in enumerate(conflicts, start=1):
+            text += (
+                f"\n{index}. <b>{_h(item.local_brick_title)}</b> "
+                f"<code>[{_h(item.code)}]</code>"
+            )
+    rows: list[list[InlineKeyboardButton]] = []
+    for item in conflicts:
+        rows.append(
+            [
+                InlineKeyboardButton(
+                    _button_name(f"⚔️ {item.code}: ", item.local_brick_title),
+                    callback_data=f"adm_bconflict:{item.id}",
+                )
+            ]
+        )
+    rows.append(
+        [InlineKeyboardButton("◀️ К месту", callback_data=f"adm_place:{place_id}")]
+    )
+    rows.append([InlineKeyboardButton("🏠 Главное меню", callback_data="main_menu")])
+    return text, InlineKeyboardMarkup(rows)
+
+
+def _conflict_card_content(
+    view: BrickConflictView,
+) -> tuple[str, InlineKeyboardMarkup]:
+    place = view.place_name or f"место #{view.place_id}"
+    text = (
+        "⚔️ <b>Задача разрешения конфликта</b>\n\n"
+        f"Код: <code>[{_h(view.code)}]</code>\n"
+        f"Место: {_h(place)}\n"
+        f"Местный кирпичик: {_h(view.local_brick_title)} "
+        f"(#{view.local_brick_id})\n"
+        f"Глобальный кирпичик: #{view.system_brick_id}\n\n"
+        "Глобальный кирпичик уже используется для НОВЫХ привязок этого кода. "
+        "Местный кирпичик не удалён и не переименован: данные не потеряны.\n\n"
+        "Выберите исход: переименовать местный кирпичик (привязки и снимки "
+        "сохранятся) или переключить шаблон места на глобальный кирпичик "
+        "(будет создана новая версия шаблона, старые версии и снимки "
+        "останутся неизменными)."
+    )
+    rows: list[list[InlineKeyboardButton]] = []
+    if view.is_open:
+        rows.append(
+            [
+                InlineKeyboardButton(
+                    "✏️ Переименовать местный",
+                    callback_data=f"adm_bconflict_rename:{view.id}",
+                )
+            ]
+        )
+        rows.append(
+            [
+                InlineKeyboardButton(
+                    "🌍 Переключиться на глобальный",
+                    callback_data=f"adm_bconflict_switch:{view.id}",
+                )
+            ]
+        )
+    else:
+        text += "\n\n✅ Задача решена; история сохранена."
+    rows.append(
+        [
+            InlineKeyboardButton(
+                "◀️ К конфликтам",
+                callback_data=f"adm_bconflicts:{view.place_id}",
+            )
+        ]
+    )
+    rows.append([InlineKeyboardButton("🏠 Главное меню", callback_data="main_menu")])
+    return text, InlineKeyboardMarkup(rows)
+
+
+def _conflict_rename_input_content(
+    view: BrickConflictView,
+) -> tuple[str, InlineKeyboardMarkup]:
+    text = (
+        "✏️ <b>Переименование местного кирпичика</b>\n\n"
+        f"Конфликтный код: <code>[{_h(view.code)}]</code>\n"
+        f"Кирпичик: {_h(view.local_brick_title)}\n\n"
+        "Введите новое обозначение для местного кирпичика. Привязки шаблонов "
+        "указывают на кирпичик по ID и продолжат работать; изменится только "
+        "технический код в тексте шаблона."
+    )
+    return text, InlineKeyboardMarkup(
+        [
+            [
+                InlineKeyboardButton(
+                    "◀️ Назад",
+                    callback_data=f"adm_bconflict:{view.id}",
+                )
+            ]
+        ]
+    )
+
+
+def _conflict_switch_confirm_content(
+    view: BrickConflictView,
+) -> tuple[str, InlineKeyboardMarkup]:
+    text = (
+        "🌍 <b>Переключиться на глобальный кирпичик?</b>\n\n"
+        f"Код: <code>[{_h(view.code)}]</code>\n"
+        f"Место: {_h(view.place_name or f'#{view.place_id}')}\n\n"
+        "Стандартный шаблон места получит НОВУЮ версию с привязкой этого кода "
+        "к глобальному кирпичику. Местный кирпичик останется в разделе "
+        "кирпичиков места и не будет удалён. Прежние версии шаблона и "
+        "сохранённые снимки анонсов не изменятся."
+    )
+    return text, InlineKeyboardMarkup(
+        [
+            [
+                InlineKeyboardButton(
+                    "✅ Да, переключить",
+                    callback_data=f"adm_bconflict_switch_yes:{view.id}",
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    "◀️ Нет, назад",
+                    callback_data=f"adm_bconflict:{view.id}",
+                )
+            ],
         ]
     )
 
@@ -2160,6 +2347,52 @@ async def _render_phase(
                     text, keyboard = _places_content(
                         session, state, access_kind, user_id
                     )
+        elif phase in {
+            "conflicts_list",
+            "conflict_card",
+            "conflict_rename_input",
+            "conflict_switch_confirm",
+        }:
+            place_for_conflicts = state.get("place_id")
+            conflict_id = state.get("conflict_id")
+            view = (
+                get_conflict(session, user_id, conflict_id)
+                if isinstance(conflict_id, int) and not isinstance(conflict_id, bool)
+                else None
+            )
+            if not isinstance(place_for_conflicts, int) or not can_manage_place(
+                session, user_id, place_for_conflicts
+            ):
+                state.clear()
+                state.update(_new_state())
+                notice = notice or "Доступ к этому месту не подтверждён."
+                text, keyboard = _places_content(session, state, access_kind, user_id)
+            elif phase == "conflicts_list":
+                text, keyboard = _conflicts_list_content(
+                    session, user_id, view, place_for_conflicts
+                )
+            elif view is None:
+                state["phase"] = "conflicts_list"
+                notice = notice or "Задача конфликта недоступна."
+                text, keyboard = _conflicts_list_content(
+                    session, user_id, None, place_for_conflicts
+                )
+            elif phase == "conflict_card":
+                text, keyboard = _conflict_card_content(view)
+            elif phase == "conflict_rename_input":
+                if not view.is_open:
+                    state["phase"] = "conflict_card"
+                    notice = notice or "Задача уже решена."
+                    text, keyboard = _conflict_card_content(view)
+                else:
+                    text, keyboard = _conflict_rename_input_content(view)
+            else:
+                if not view.is_open:
+                    state["phase"] = "conflict_card"
+                    notice = notice or "Задача уже решена."
+                    text, keyboard = _conflict_card_content(view)
+                else:
+                    text, keyboard = _conflict_switch_confirm_content(view)
         elif phase in {
             "proposal_card",
             "proposal_approve_confirm",
@@ -4779,12 +5012,25 @@ async def _handle_brick_proposal_decision(
             approved=approved,
             brick_id=result.brick.id if result.brick is not None else None,
         )
+    conflict_ids = [view.id for view in result.conflicts]
+    if approved and conflict_ids:
+        notified = await _notify_conflict_admins(context, conflict_ids)
+        if notified:
+            notice_extra = f" Администраторов мест уведомлено: {notified}."
+        else:
+            notice_extra = (
+                " Уведомления администраторам мест поставлены в очередь; "
+                "если администратора нет, задача видна в карточке места."
+            )
+    else:
+        notice_extra = ""
     state["phase"] = "proposal_card"
     if result.proposal is not None:
         state["proposal_id"] = result.proposal.id
     notice = result.message or (
         "Предложение одобрено." if approved else "Предложение отклонено."
     )
+    notice += notice_extra
     if delivered:
         notice += " Автору отправлено уведомление."
     else:
@@ -4848,6 +5094,341 @@ async def handle_brick_proposals_back(
         state.pop("proposal_return_phase", None)
         state["phase"] = return_phase
     await _render_phase(update, context, state)
+
+
+# --- Конфликты кодов: обработчики (Poster 2.1 R3) --------------------------
+
+
+def _conflict_callback_id(data: str) -> int | None:
+    return _proposal_callback_id(data)
+
+
+async def handle_conflicts_open(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> None:
+    """Кнопка «Конфликты кодов» в карточке места."""
+    query = ctx.query(update)
+    state = load_admin_session(ctx.user(update).id)
+    if state is None or state.get("phase") != "place":
+        await _stale(update)
+        return
+    place_id = _conflict_callback_id(str(query.data or ""))
+    state_place_id = state.get("place_id")
+    if (
+        place_id is None
+        or not isinstance(state_place_id, int)
+        or state_place_id != place_id
+    ):
+        await _stale(update)
+        return
+    session = SessionLocal()
+    try:
+        allowed = can_manage_place(session, ctx.user(update).id, place_id)
+    finally:
+        session.close()
+    if not allowed:
+        await query.answer(DENIED_ALERT, show_alert=True)
+        return
+    await query.answer()
+    state["phase"] = "conflicts_list"
+    await _render_phase(update, context, state)
+
+
+async def handle_conflict_open(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> None:
+    query = ctx.query(update)
+    state = load_admin_session(ctx.user(update).id)
+    if state is None or state.get("phase") not in {
+        "conflicts_list",
+        "conflict_card",
+        "conflict_rename_input",
+        "conflict_switch_confirm",
+    }:
+        await _stale(update)
+        return
+    conflict_id = _conflict_callback_id(str(query.data or ""))
+    if conflict_id is None:
+        await _stale(update)
+        return
+    session = SessionLocal()
+    try:
+        view = get_conflict(session, ctx.user(update).id, conflict_id)
+    finally:
+        session.close()
+    if view is None:
+        await query.answer("Задача недоступна.", show_alert=True)
+        await _render_phase(
+            update,
+            context,
+            state,
+            notice="Задача конфликта не найдена или полномочия изменились.",
+        )
+        return
+    await query.answer()
+    state["place_id"] = view.place_id
+    state["conflict_id"] = view.id
+    state["phase"] = "conflict_card"
+    await _render_phase(update, context, state)
+
+
+async def handle_conflict_rename(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> None:
+    query = ctx.query(update)
+    state = load_admin_session(ctx.user(update).id)
+    if state is None or state.get("phase") != "conflict_card":
+        await _stale(update)
+        return
+    conflict_id = _conflict_callback_id(str(query.data or ""))
+    if conflict_id is None or state.get("conflict_id") != conflict_id:
+        await _stale(update)
+        return
+    session = SessionLocal()
+    try:
+        view = get_conflict(session, ctx.user(update).id, conflict_id)
+    finally:
+        session.close()
+    if view is None:
+        await query.answer("Задача недоступна.", show_alert=True)
+        await _render_phase(
+            update,
+            context,
+            state,
+            notice="Задача конфликта не найдена или полномочия изменились.",
+        )
+        return
+    await query.answer()
+    if not view.is_open:
+        await _render_phase(
+            update,
+            context,
+            state,
+            notice="Задача уже решена.",
+        )
+        return
+    state["phase"] = "conflict_rename_input"
+    await _render_phase(update, context, state)
+
+
+async def handle_conflict_switch(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> None:
+    query = ctx.query(update)
+    state = load_admin_session(ctx.user(update).id)
+    if state is None or state.get("phase") != "conflict_card":
+        await _stale(update)
+        return
+    conflict_id = _conflict_callback_id(str(query.data or ""))
+    if conflict_id is None or state.get("conflict_id") != conflict_id:
+        await _stale(update)
+        return
+    session = SessionLocal()
+    try:
+        view = get_conflict(session, ctx.user(update).id, conflict_id)
+    finally:
+        session.close()
+    if view is None:
+        await query.answer("Задача недоступна.", show_alert=True)
+        await _render_phase(
+            update,
+            context,
+            state,
+            notice="Задача конфликта не найдена или полномочия изменились.",
+        )
+        return
+    await query.answer()
+    if not view.is_open:
+        await _render_phase(update, context, state, notice="Задача уже решена.")
+        return
+    state["phase"] = "conflict_switch_confirm"
+    await _render_phase(update, context, state)
+
+
+def _conflict_result_notice(result: ConflictResolutionResult) -> str:
+    if result.ok:
+        return f"✅ {result.message}" if result.message else "✅ Задача решена."
+    if result.status == "already_resolved":
+        return "Задачу уже решили в другом окне; повторное решение не применено."
+    if result.status == "superseded":
+        return "Местный кирпичик уже не держит этот код; задача закрыта."
+    return result.message or "Решение не принято."
+
+
+async def handle_conflict_switch_confirm(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> None:
+    query = ctx.query(update)
+    state = load_admin_session(ctx.user(update).id)
+    if state is None or state.get("phase") != "conflict_switch_confirm":
+        await _stale(update)
+        return
+    conflict_id = _conflict_callback_id(str(query.data or ""))
+    if conflict_id is None or state.get("conflict_id") != conflict_id:
+        await _stale(update)
+        return
+    user_id = ctx.user(update).id
+    session = SessionLocal()
+    try:
+        _ensure_user(session, update)
+        try:
+            result = resolve_conflict_by_switch(
+                session,
+                actor_telegram_user_id=user_id,
+                conflict_id=conflict_id,
+            )
+        except (BrickPermissionError, ValueError) as exc:
+            await query.answer(str(exc), show_alert=True)
+            state["phase"] = "conflicts_list"
+            await _render_phase(
+                update,
+                context,
+                state,
+                notice="Полномочия изменились; решение не принято.",
+            )
+            return
+    finally:
+        session.close()
+    await query.answer()
+    state["phase"] = "conflict_card"
+    await _render_phase(
+        update,
+        context,
+        state,
+        notice=_conflict_result_notice(result),
+    )
+
+
+async def handle_conflict_text(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> None:
+    """Новый код местного кирпичика в фазе переименования."""
+    user = ctx.user(update)
+    state = load_admin_session(user.id)
+    if state is None or state.get("phase") != "conflict_rename_input":
+        return
+    conflict_id = state.get("conflict_id")
+    if not isinstance(conflict_id, int) or isinstance(conflict_id, bool):
+        await _stale(update)
+        return
+    raw = (ctx.message(update).text or "").strip()
+    cleanup: list[int] = []
+    message = getattr(update, "message", None)
+    if message is not None and message.message_id is not None:
+        cleanup.append(int(message.message_id))
+
+    session = SessionLocal()
+    try:
+        _ensure_user(session, update)
+        try:
+            result = resolve_conflict_by_rename(
+                session,
+                actor_telegram_user_id=user.id,
+                conflict_id=conflict_id,
+                new_code=raw,
+            )
+        except (BrickPermissionError, BrickConflictError) as exc:
+            await _render_phase(
+                update,
+                context,
+                state,
+                notice=f"Код не принят: {exc}",
+                cleanup_ids=cleanup,
+                drop_input=True,
+            )
+            return
+        except ValueError as exc:
+            await _render_phase(
+                update,
+                context,
+                state,
+                notice=f"Код не принят: {exc}",
+                cleanup_ids=cleanup,
+                drop_input=True,
+            )
+            return
+    finally:
+        session.close()
+
+    if result.ok:
+        state["phase"] = "conflict_card"
+        await _render_phase(
+            update,
+            context,
+            state,
+            notice=_conflict_result_notice(result),
+            cleanup_ids=cleanup,
+            drop_input=True,
+        )
+        return
+    if result.status in {"conflict", "unchanged"}:
+        await _render_phase(
+            update,
+            context,
+            state,
+            notice=_conflict_result_notice(result) + " Введите другой код.",
+            cleanup_ids=cleanup,
+            drop_input=True,
+        )
+        return
+    state["phase"] = "conflict_card"
+    await _render_phase(
+        update,
+        context,
+        state,
+        notice=_conflict_result_notice(result),
+        cleanup_ids=cleanup,
+        drop_input=True,
+    )
+
+
+def _conflict_notification_text(notification) -> str:
+    place = notification.place_name or f"место #{notification.place_id}"
+    return (
+        "⚔️ <b>Конфликт кодов кирпичиков</b>\n\n"
+        f"📍 {_h(place)}\n"
+        f"Код: <code>[{_h(notification.code)}]</code>\n"
+        f"Местный кирпичик: {_h(notification.local_brick_title)}\n\n"
+        "Глобальный кирпичик с этим кодом одобрен и уже действует для новых "
+        "привязок. Местный кирпичик не изменён: выберите, переименовать его "
+        "или переключить шаблон места на глобальный.\n\n"
+        "Откройте: /admin → «Мои места» → место → «⚔️ Конфликты кодов»."
+    )
+
+
+async def _notify_conflict_admins(
+    context: ContextTypes.DEFAULT_TYPE,
+    conflict_ids: list[int] | None = None,
+) -> int:
+    """
+    Best-effort рассылка уведомлений из очереди `brick_conflict_notifications`.
+
+    Дубли невозможны: `mark_conflict_notification` переводит только `pending`,
+    повторный прогон находит пустую очередь.
+    """
+    session = SessionLocal()
+    delivered = 0
+    try:
+        notifications = list_pending_conflict_notifications(
+            session, conflict_ids=conflict_ids
+        )
+    finally:
+        session.close()
+    for notification in notifications:
+        ok = await _send_user_notification(
+            context,
+            notification.telegram_user_id,
+            _conflict_notification_text(notification),
+        )
+        session = SessionLocal()
+        try:
+            if mark_conflict_notification(
+                session, notification.notification_id, delivered=ok
+            ):
+                delivered += 1
+        finally:
+            session.close()
+    return delivered
 
 
 async def handle_admin_stale(
@@ -4958,6 +5539,24 @@ def admin_handlers() -> list[BaseHandler]:
             pattern=r"^adm_bprop_reject_yes:\d+$",
         ),
         CallbackQueryHandler(handle_brick_proposals_back, pattern=r"^adm_bprop_back$"),
+        # Конфликты кодов (Poster 2.1 R3).
+        CallbackQueryHandler(handle_conflicts_open, pattern=r"^adm_bconflicts:\d+$"),
+        CallbackQueryHandler(handle_conflict_open, pattern=r"^adm_bconflict:\d+$"),
+        CallbackQueryHandler(
+            handle_conflict_rename, pattern=r"^adm_bconflict_rename:\d+$"
+        ),
+        CallbackQueryHandler(
+            handle_conflict_switch, pattern=r"^adm_bconflict_switch:\d+$"
+        ),
+        CallbackQueryHandler(
+            handle_conflict_switch_confirm,
+            pattern=r"^adm_bconflict_switch_yes:\d+$",
+        ),
+        AdminTextHandler(
+            filters.TEXT & ~filters.COMMAND,
+            handle_conflict_text,
+            allowed_phases=frozenset({"conflict_rename_input"}),
+        ),
         AdminTextHandler(
             filters.TEXT & ~filters.COMMAND,
             handle_search_text,

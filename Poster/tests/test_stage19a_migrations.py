@@ -101,6 +101,7 @@ class MigrationMechanismTests(unittest.TestCase):
                 (16, "announcement_draft_origin"),
                 (17, "archive_legacy_drafts"),
                 (18, "builtin_templates_v3"),
+                (19, "brick_code_conflicts"),
             ],
         )
 
@@ -203,6 +204,7 @@ class MigrationMechanismTests(unittest.TestCase):
                 (16, "announcement_draft_origin"),
                 (17, "archive_legacy_drafts"),
                 (18, "builtin_templates_v3"),
+                (19, "brick_code_conflicts"),
             ],
         )
 

@@ -83,11 +83,12 @@ class BrickProposalSchemaTests(BrickDatabaseTestCase):
             )
 
     def test_migration_12_follows_brick_proposals_and_has_constraints(self) -> None:
-        self.assertEqual(LATEST_VERSION, 18)
+        self.assertEqual(LATEST_VERSION, 19)
         # Миграция 11 остаётся на своём месте; 15/16 добавлены Poster 2.0 S1,
-        # 17 — S5, 18 — Poster 2.1 R2; порядок журнала не переставлен.
+        # 17 — S5, 18 — Poster 2.1 R2, 19 — Poster 2.1 R3; порядок журнала
+        # не переставлен.
         self.assertEqual(
-            self.journal()[-8:],
+            self.journal()[-9:],
             [
                 (11, "brick_proposals"),
                 (12, "announcement_wizard"),
@@ -97,6 +98,7 @@ class BrickProposalSchemaTests(BrickDatabaseTestCase):
                 (16, "announcement_draft_origin"),
                 (17, "archive_legacy_drafts"),
                 (18, "builtin_templates_v3"),
+                (19, "brick_code_conflicts"),
             ],
         )
         connection = connect(self.path)

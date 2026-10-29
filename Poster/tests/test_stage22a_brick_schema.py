@@ -97,6 +97,7 @@ class BrickSchemaTests(BrickDatabaseTestCase):
                 (16, "announcement_draft_origin"),
                 (17, "archive_legacy_drafts"),
                 (18, "builtin_templates_v3"),
+                (19, "brick_code_conflicts"),
             ],
         )
         # 9 кирпичиков миграции 6 + системный `[адрес]` миграции 15

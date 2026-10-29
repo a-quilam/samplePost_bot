@@ -2626,6 +2626,239 @@ MIGRATION_18_BUILTIN_TEMPLATES_V3 = Migration(
 )
 
 
+# --- Версия 19: задачи разрешения конфликтов кодов (Poster 2.1 R3) ----------
+#
+# R1 позволил одобрять глобальный кирпичик при локальном носителе того же
+# кода, но INSERT системного кирпичика разрешался триггером ровно при ОДНОМ
+# несистемном носителе. R3 доводит модель до требований владельца:
+#
+# - глобальный кирпичик создаётся при любом числе локальных носителей и
+#   выигрывает для НОВЫХ привязок (разрешение кода system → place → personal
+#   уже отдаёт приоритет системе);
+# - существующие версии/снимки шаблонов и анонсы не переписываются
+#   (`template_version_bricks`/`template_snapshot_bricks` неизменяемы);
+# - по каждому месту с местным носителем создаётся задача разрешения
+#   конфликта (`brick_conflicts`) и идемпотентное уведомление его админу
+#   (`brick_conflict_notifications`);
+# - решение задачи терминально: `open` → `renamed`/`switched`; `superseded`
+#   закрывает задачу, если местный носитель исчез сам (архив/переименование
+#   вне сценария).
+#
+# Схема только добавочная: существующие таблицы `bricks`,
+# `brick_proposals`, `templates`, `template_versions` не перестраиваются.
+# Пересоздаётся единственный триггер `trg_bricks_reserve_codes_insert`:
+# из исключения «одобрение глобального предложения» убрано требование ровно
+# одного несистемного носителя. Общее правило «системный и несистемный код
+# не сосуществуют» для прямого INSERT (сервис `create_system_brick`)
+# сохранено: исключение по-прежнему требует pending-предложение с полностью
+# совпадающим снимком.
+
+
+MIGRATION_19_BRICK_CONFLICTS = Migration(
+    version=19,
+    name="brick_code_conflicts",
+    statements=(
+        # Одна задача = «глобальный кирпичик + местный носитель того же кода».
+        # Обе ссылки на bricks неизменяемы (RESTRICT): история решений не
+        # должна рассыпаться при архивации/удалении кирпичика.
+        """
+        CREATE TABLE brick_conflicts (
+            id INTEGER NOT NULL PRIMARY KEY,
+            code TEXT NOT NULL,
+            place_id INTEGER NOT NULL,
+            system_brick_id INTEGER NOT NULL,
+            local_brick_id INTEGER NOT NULL,
+            proposal_id INTEGER,
+            status TEXT NOT NULL DEFAULT 'open',
+            created_at DATETIME NOT NULL,
+            resolved_at DATETIME,
+            resolved_by_user_id INTEGER,
+            resolution_note TEXT,
+            CONSTRAINT ck_brick_conflicts_status
+                CHECK (status IN ('open', 'renamed', 'switched', 'superseded')),
+            CONSTRAINT ck_brick_conflicts_code_length
+                CHECK (length(code) BETWEEN 2 AND 64),
+            CONSTRAINT ck_brick_conflicts_shape
+                CHECK (
+                    (status = 'open'
+                        AND resolved_at IS NULL
+                        AND resolved_by_user_id IS NULL)
+                    OR (status IN ('renamed', 'switched')
+                        AND resolved_at IS NOT NULL
+                        AND resolved_by_user_id IS NOT NULL)
+                    OR (status = 'superseded'
+                        AND resolved_at IS NOT NULL
+                        AND resolved_by_user_id IS NULL)
+                ),
+            CONSTRAINT fk_brick_conflicts_place
+                FOREIGN KEY (place_id) REFERENCES places (id)
+                ON DELETE CASCADE,
+            CONSTRAINT fk_brick_conflicts_system_brick
+                FOREIGN KEY (system_brick_id) REFERENCES bricks (id)
+                ON DELETE RESTRICT,
+            CONSTRAINT fk_brick_conflicts_local_brick
+                FOREIGN KEY (local_brick_id) REFERENCES bricks (id)
+                ON DELETE RESTRICT,
+            CONSTRAINT fk_brick_conflicts_proposal
+                FOREIGN KEY (proposal_id) REFERENCES brick_proposals (id)
+                ON DELETE RESTRICT,
+            CONSTRAINT fk_brick_conflicts_resolved_by
+                FOREIGN KEY (resolved_by_user_id) REFERENCES users (id)
+                ON DELETE RESTRICT
+        )
+        """,
+        # Идемпотентность: одна пара носителей — одна задача. Повторное
+        # одобрение/повторный прогон упирается в этот индекс.
+        """
+        CREATE UNIQUE INDEX ux_brick_conflicts_system_local
+            ON brick_conflicts (system_brick_id, local_brick_id)
+        """,
+        "CREATE INDEX ix_brick_conflicts_place_status ON brick_conflicts (place_id, status)",
+        "CREATE INDEX ix_brick_conflicts_local_brick ON brick_conflicts (local_brick_id)",
+        # Очередь уведомлений админам мест. Получатель — постоянный Telegram
+        # user ID (в `users` он может отсутствовать: суперадмин из конфига).
+        """
+        CREATE TABLE brick_conflict_notifications (
+            id INTEGER NOT NULL PRIMARY KEY,
+            conflict_id INTEGER NOT NULL,
+            telegram_user_id INTEGER NOT NULL,
+            status TEXT NOT NULL DEFAULT 'pending',
+            attempts INTEGER NOT NULL DEFAULT 0,
+            created_at DATETIME NOT NULL,
+            sent_at DATETIME,
+            CONSTRAINT ck_brick_conflict_notifications_status
+                CHECK (status IN ('pending', 'sent', 'failed')),
+            CONSTRAINT ck_brick_conflict_notifications_attempts
+                CHECK (attempts >= 0),
+            CONSTRAINT ck_brick_conflict_notifications_shape
+                CHECK (
+                    (status = 'pending' AND sent_at IS NULL)
+                    OR (status IN ('sent', 'failed') AND sent_at IS NOT NULL)
+                ),
+            CONSTRAINT fk_brick_conflict_notifications_conflict
+                FOREIGN KEY (conflict_id) REFERENCES brick_conflicts (id)
+                ON DELETE CASCADE
+        )
+        """,
+        """
+        CREATE UNIQUE INDEX ux_brick_conflict_notifications_target
+            ON brick_conflict_notifications (conflict_id, telegram_user_id)
+        """,
+        """
+        CREATE INDEX ix_brick_conflict_notifications_status
+            ON brick_conflict_notifications (status, created_at)
+        """,
+        # Статус задачи терминален: повторный callback не переигрывает решение
+        # и не переписывает аудит.
+        """
+        CREATE TRIGGER trg_brick_conflicts_single_transition
+        BEFORE UPDATE OF status ON brick_conflicts
+        FOR EACH ROW
+        WHEN OLD.status <> 'open'
+            OR NEW.status NOT IN ('renamed', 'switched', 'superseded')
+        BEGIN
+            SELECT RAISE(ABORT, 'brick conflict decision is final');
+        END
+        """,
+        """
+        CREATE TRIGGER trg_brick_conflicts_decision_immutable
+        BEFORE UPDATE ON brick_conflicts
+        FOR EACH ROW
+        WHEN OLD.status <> 'open'
+            AND (
+                NEW.status IS NOT OLD.status
+                OR NEW.resolved_at IS NOT OLD.resolved_at
+                OR NEW.resolved_by_user_id IS NOT OLD.resolved_by_user_id
+                OR NEW.resolution_note IS NOT OLD.resolution_note
+            )
+        BEGIN
+            SELECT RAISE(ABORT, 'brick conflict decision is immutable');
+        END
+        """,
+        # Снимок задачи (код, место, носители) неизменяем: иначе история
+        # решений перестала бы объяснять, что именно разрешали.
+        """
+        CREATE TRIGGER trg_brick_conflicts_snapshot_immutable
+        BEFORE UPDATE OF
+            code, place_id, system_brick_id, local_brick_id, proposal_id,
+            created_at
+        ON brick_conflicts
+        FOR EACH ROW
+        WHEN NEW.code IS NOT OLD.code
+            OR NEW.place_id IS NOT OLD.place_id
+            OR NEW.system_brick_id IS NOT OLD.system_brick_id
+            OR NEW.local_brick_id IS NOT OLD.local_brick_id
+            OR NEW.proposal_id IS NOT OLD.proposal_id
+            OR NEW.created_at IS NOT OLD.created_at
+        BEGIN
+            SELECT RAISE(ABORT, 'brick conflict snapshot is immutable');
+        END
+        """,
+        """
+        CREATE TRIGGER trg_brick_conflicts_no_delete
+        BEFORE DELETE ON brick_conflicts
+        FOR EACH ROW
+        BEGIN
+            SELECT RAISE(ABORT, 'brick conflict history cannot be deleted');
+        END
+        """,
+        # Уведомление отправляется ровно один раз: pending → sent/failed,
+        # обратного перехода нет.
+        """
+        CREATE TRIGGER trg_brick_conflict_notifications_single_transition
+        BEFORE UPDATE OF status ON brick_conflict_notifications
+        FOR EACH ROW
+        WHEN OLD.status <> 'pending' OR NEW.status = 'pending'
+        BEGIN
+            SELECT RAISE(ABORT, 'brick conflict notification is final');
+        END
+        """,
+        # R3: снимаем ограничение «ровно один несистемный носитель» из
+        # исключения для одобрения глобального предложения. Прямой INSERT
+        # системного кирпичика поверх местного по-прежнему запрещён.
+        "DROP TRIGGER trg_bricks_reserve_codes_insert",
+        """
+        CREATE TRIGGER trg_bricks_reserve_codes_insert
+        BEFORE INSERT ON bricks
+        FOR EACH ROW
+        WHEN EXISTS (
+            SELECT 1 FROM bricks b
+            WHERE b.code = NEW.code
+              AND (
+                  (NEW.scope = 'system' AND b.scope <> 'system')
+                  OR (NEW.scope <> 'system' AND b.scope = 'system')
+              )
+        )
+        AND NOT (
+            NEW.scope = 'system'
+            AND EXISTS (
+                SELECT 1
+                FROM brick_proposals p
+                JOIN bricks src ON src.id = p.source_brick_id
+                WHERE p.scope = 'system'
+                  AND p.status = 'pending'
+                  AND p.code = NEW.code
+                  AND p.title = NEW.title
+                  AND p.type = NEW.type
+                  AND p.source = NEW.source
+                  AND p.rules_json IS NEW.rules_json
+                  AND src.code = NEW.code
+            )
+        )
+        BEGIN
+            SELECT RAISE(ABORT, 'system brick code is reserved');
+        END
+        """,
+    ),
+    requires_tables=(
+        "bricks",
+        "places",
+        "users",
+        "brick_proposals",
+    ),
+)
+
+
 DEFAULT_MIGRATIONS: tuple[Migration, ...] = (
     MIGRATION_1_USERS_PLACES,
     MIGRATION_2_PLACE_CONTACTS_UI,
@@ -2645,6 +2878,7 @@ DEFAULT_MIGRATIONS: tuple[Migration, ...] = (
     MIGRATION_16_ANNOUNCEMENT_DRAFT_ORIGIN,
     MIGRATION_17_ARCHIVE_LEGACY_DRAFTS,
     MIGRATION_18_BUILTIN_TEMPLATES_V3,
+    MIGRATION_19_BRICK_CONFLICTS,
 )
 
 LATEST_VERSION = DEFAULT_MIGRATIONS[-1].version if DEFAULT_MIGRATIONS else 0

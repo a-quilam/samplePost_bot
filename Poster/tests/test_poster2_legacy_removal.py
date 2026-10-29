@@ -355,7 +355,7 @@ class LegacyArchiveMigrationTests(unittest.TestCase):
         # Poster 2.1 R2 добавила миграцию 18: архив остаётся на месте,
         # последней в журнале теперь идёт обновление встроенного шаблона.
         self.assertIn((17, "archive_legacy_drafts"), versions)
-        self.assertEqual(versions[-1], (LATEST_VERSION, "builtin_templates_v3"))
+        self.assertEqual(versions[-1], (LATEST_VERSION, "brick_code_conflicts"))
 
         # Повторные запуски (рестарты) архив не переименовывают и не теряют.
         for _ in range(2):
@@ -392,7 +392,7 @@ class LegacyArchiveMigrationTests(unittest.TestCase):
         self.assertNotIn("drafts", tables)
         self.assertNotIn("legacy_drafts_backup", tables)
         self.assertIn((17, "archive_legacy_drafts"), self._journal())
-        self.assertEqual(self._journal()[-1], (LATEST_VERSION, "builtin_templates_v3"))
+        self.assertEqual(self._journal()[-1], (LATEST_VERSION, "brick_code_conflicts"))
 
     def _journal(self) -> list[tuple[int, str]]:
         connection = connect(self.path)

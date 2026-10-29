@@ -55,7 +55,7 @@ class TemplateSchemaTests(TemplateDatabaseTestCase):
 
     def test_template_migrations_apply_and_are_idempotent(self) -> None:
         self.assertEqual(self.migrations_applied, LATEST_VERSION)
-        self.assertEqual(LATEST_VERSION, 18)
+        self.assertEqual(LATEST_VERSION, 19)
         self.assertIn((12, "announcement_wizard"), self.journal())
         self.assertIn((13, "announcement_photos_publication"), self.journal())
         self.assertIn((8, "templates_versions_snapshots"), self.journal())
@@ -66,6 +66,7 @@ class TemplateSchemaTests(TemplateDatabaseTestCase):
         self.assertIn((16, "announcement_draft_origin"), self.journal())
         self.assertIn((17, "archive_legacy_drafts"), self.journal())
         self.assertIn((18, "builtin_templates_v3"), self.journal())
+        self.assertIn((19, "brick_code_conflicts"), self.journal())
 
         tables = set(self.engine.dialect.get_table_names(self.engine.connect()))
         self.assertTrue(

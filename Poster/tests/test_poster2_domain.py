@@ -174,7 +174,7 @@ class MigrationFifteenAndSixteenTests(_MigrationTestCase):
     """Миграции 15–17 на заполненной временной БД версии 13."""
 
     def test_migration_keeps_rows_links_checks_and_passes_integrity(self) -> None:
-        self.assertEqual(LATEST_VERSION, 18)
+        self.assertEqual(LATEST_VERSION, 19)
         self.assertEqual(run_migrations(self.engine), LATEST_VERSION)
 
         connection = sqlite3.connect(self.path)

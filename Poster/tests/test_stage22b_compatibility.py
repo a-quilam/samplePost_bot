@@ -95,6 +95,12 @@ class Stage22BCompatibilityTests(unittest.TestCase):
             "announcement_values",
             "announcement_extras",
         }
+        # R3: таблицы конфликтов создаёт миграция 19, а не create_all —
+        # иначе имитация старой схемы получила бы их раньше миграции.
+        stage23_tables |= {
+            "brick_conflicts",
+            "brick_conflict_notifications",
+        }
         legacy_tables = [
             table
             for name, table in Base.metadata.tables.items()
@@ -193,8 +199,9 @@ class Stage22BCompatibilityTests(unittest.TestCase):
             backup_connection.close()
 
         self.assertIn((17, "archive_legacy_drafts"), journal(self.path))
+        self.assertIn((18, "builtin_templates_v3"), journal(self.path))
         self.assertEqual(
-            journal(self.path)[-1], (LATEST_VERSION, "builtin_templates_v3")
+            journal(self.path)[-1], (LATEST_VERSION, "brick_code_conflicts")
         )
         # Миграция 17 переименовала легаси-таблицу: строка прежнего черновика
         # читается из архива без потерь.

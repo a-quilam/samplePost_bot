@@ -29,7 +29,7 @@ from datetime import date, datetime
 
 from sqlalchemy import ColumnElement, and_, func, or_, select
 from sqlalchemy import update as sqlalchemy_update
-from sqlalchemy.exc import IntegrityError, OperationalError
+from sqlalchemy.exc import IntegrityError, OperationalError, SQLAlchemyError
 from sqlalchemy.orm import Session
 
 from brick_types import (
@@ -45,6 +45,7 @@ from brick_types import (
     FORBIDDEN_BRICK_CODES,
     SYSTEM_BRICK_CODES,
     SYSTEM_BRICKS,
+    BrickValidationError,
     BrickValueResult,
     BrickValueStatus,
     SystemBrickDefinition,
@@ -59,7 +60,19 @@ from brick_types import (
     validate_brick_code,
     validate_brick_value,
 )
-from models import Brick, Place, User, utcnow
+from models import (
+    Brick,
+    BrickConflict,
+    BrickConflictNotification,
+    Place,
+    PlaceAdmin,
+    PlaceName,
+    Template,
+    TemplateVersion,
+    TemplateVersionBrick,
+    User,
+    utcnow,
+)
 from permissions import can_manage_place, is_superadmin
 from place_store import get_place_details, get_place_name
 
@@ -1394,3 +1407,832 @@ def system_definitions() -> tuple[SystemBrickDefinition, ...]:
 def forbidden_brick_codes() -> frozenset[str]:
     """Коды, которые не могут стать токенами шаблона (фотографии)."""
     return FORBIDDEN_BRICK_CODES
+
+
+# --- Конфликты кодов: глобальный кирпичик и местные носители (R3) -----------
+#
+# Требование владельца (Poster 2.1 R3): глобальный (системный) кирпичик
+# выигрывает для НОВЫХ привязок, а существующие местные определения того же
+# кода не переписываются молча. Вместо тихого переименования или отказа
+# создаётся задача разрешения конфликта по каждому месту-носителю.
+#
+# Границы:
+# - задачи создаются только для МЕСТНЫХ (place) носителей: у личного
+#   кирпичика нет администратора места, а его владелец не теряет данные —
+#   его привязки и снимки остаются прежними, новые разрешаются на систему;
+# - уведомление получает действующий администратор места; если его нет,
+#   задача остаётся видимой суперадминистратору в карточке места;
+# - повторный вызов создания задач не дублирует ни задачи, ни уведомления
+#   (частичные уникальные индексы миграции 19);
+# - решение задачи терминально и выполняется одной транзакцией с
+#   `BEGIN IMMEDIATE`: два одновременных решения дают ровно одно применение,
+#   второе получает явный «уже решено».
+
+CONFLICT_STATUS_OPEN = "open"
+CONFLICT_STATUS_RENAMED = "renamed"
+CONFLICT_STATUS_SWITCHED = "switched"
+CONFLICT_STATUS_SUPERSEDED = "superseded"
+CONFLICT_STATUSES = (
+    CONFLICT_STATUS_OPEN,
+    CONFLICT_STATUS_RENAMED,
+    CONFLICT_STATUS_SWITCHED,
+    CONFLICT_STATUS_SUPERSEDED,
+)
+
+NOTIFICATION_STATUS_PENDING = "pending"
+NOTIFICATION_STATUS_SENT = "sent"
+NOTIFICATION_STATUS_FAILED = "failed"
+
+
+@dataclass(frozen=True)
+class BrickConflictView:
+    """Снимок задачи разрешения конфликта для экрана и уведомления."""
+
+    id: int
+    code: str
+    place_id: int
+    place_name: str | None
+    system_brick_id: int
+    local_brick_id: int
+    local_brick_title: str
+    local_brick_revision: int
+    local_brick_status: str
+    proposal_id: int | None
+    status: str
+    created_at: datetime
+    resolved_at: datetime | None
+    resolved_by_user_id: int | None
+
+    @property
+    def is_open(self) -> bool:
+        return self.status == CONFLICT_STATUS_OPEN
+
+
+@dataclass(frozen=True)
+class ConflictResolutionResult:
+    """Понятный результат решения задачи; без необработанных исключений."""
+
+    status: str
+    conflict: BrickConflictView | None = None
+    message: str | None = None
+    # Для «переключиться на глобальный»: создана ли новая версия шаблона.
+    template_updated: bool = False
+
+    @property
+    def ok(self) -> bool:
+        return self.status in {CONFLICT_STATUS_RENAMED, CONFLICT_STATUS_SWITCHED}
+
+
+@dataclass(frozen=True)
+class ConflictNotification:
+    """Ожидающее уведомление администратора места о задаче."""
+
+    notification_id: int
+    conflict_id: int
+    telegram_user_id: int
+    code: str
+    place_id: int
+    place_name: str | None
+    local_brick_title: str
+    system_brick_id: int
+    local_brick_id: int
+
+
+def _conflict_view(session: Session, row: BrickConflict) -> BrickConflictView | None:
+    local = session.get(Brick, row.local_brick_id)
+    if local is None:  # pragma: no cover — FK RESTRICT, строка обязана быть
+        return None
+    place_name = get_place_name_for_display(session, row.place_id)
+    return BrickConflictView(
+        id=row.id,
+        code=row.code,
+        place_id=row.place_id,
+        place_name=place_name,
+        system_brick_id=row.system_brick_id,
+        local_brick_id=row.local_brick_id,
+        local_brick_title=local.title,
+        local_brick_revision=local.revision,
+        local_brick_status=local.status,
+        proposal_id=row.proposal_id,
+        status=row.status,
+        created_at=row.created_at,
+        resolved_at=row.resolved_at,
+        resolved_by_user_id=row.resolved_by_user_id,
+    )
+
+
+def get_place_name_for_display(session: Session, place_id: int) -> str | None:
+    """Каноническое название места для экранов конфликта (None — нет места)."""
+    return session.scalar(
+        select(PlaceName.name).where(
+            PlaceName.place_id == place_id,
+            PlaceName.is_canonical == 1,
+        )
+    )
+
+
+def list_local_code_holders(session: Session, code: str) -> list[Brick]:
+    """
+    Действующие МЕСТНЫЕ носители кода (по одному на место).
+
+    Архивные строки не участвуют: код в месте остаётся занятым, но значение
+    из архива не резолвится, поэтому переносить привязки некуда.
+    """
+    return list(
+        session.scalars(
+            select(Brick)
+            .where(
+                Brick.scope == BRICK_SCOPE_PLACE,
+                Brick.code == code,
+                Brick.status == BRICK_STATUS_ACTIVE,
+                Brick.place_id.is_not(None),
+            )
+            .order_by(Brick.place_id, Brick.id)
+        ).all()
+    )
+
+
+def create_code_conflicts(
+    session: Session,
+    *,
+    system_brick_id: int,
+    code: str,
+    proposal_id: int | None = None,
+) -> list[BrickConflictView]:
+    """
+    Создаёт задачи разрешения конфликта и уведомления (БЕЗ commit).
+
+    Вызывается из транзакции одобрения глобального предложения, поэтому
+    кирпичик и задачи фиксируются вместе. Идемпотентность обеспечивают
+    уникальные индексы: повторный вызов находит существующую пару
+    «системный + местный» и не создаёт ни задачу, ни уведомление.
+    """
+    created: list[BrickConflictView] = []
+    for local in list_local_code_holders(session, code):
+        assert local.place_id is not None
+        existing = session.scalar(
+            select(BrickConflict).where(
+                BrickConflict.system_brick_id == system_brick_id,
+                BrickConflict.local_brick_id == local.id,
+            )
+        )
+        if existing is not None:
+            continue
+        row = BrickConflict(
+            code=code,
+            place_id=local.place_id,
+            system_brick_id=system_brick_id,
+            local_brick_id=local.id,
+            proposal_id=proposal_id,
+            status=CONFLICT_STATUS_OPEN,
+            created_at=utcnow(),
+        )
+        session.add(row)
+        session.flush()
+        _enqueue_conflict_notifications(session, row)
+        view = _conflict_view(session, row)
+        if view is not None:
+            created.append(view)
+    return created
+
+
+def _enqueue_conflict_notifications(session: Session, row: BrickConflict) -> None:
+    """
+    Ставит в очередь уведомление действующего админа места.
+
+    Получателей может не быть (место без администратора) — задача всё равно
+    создаётся: её увидит суперадминистратор. Дубли исключает уникальный
+    индекс `(conflict_id, telegram_user_id)`.
+    """
+    recipients = session.scalars(
+        select(User.telegram_user_id)
+        .join(PlaceAdmin, PlaceAdmin.user_id == User.id)
+        .where(
+            PlaceAdmin.place_id == row.place_id,
+            PlaceAdmin.revoked_at.is_(None),
+        )
+        .order_by(PlaceAdmin.id)
+    ).all()
+    for telegram_user_id in recipients:
+        exists = session.scalar(
+            select(BrickConflictNotification.id).where(
+                BrickConflictNotification.conflict_id == row.id,
+                BrickConflictNotification.telegram_user_id == int(telegram_user_id),
+            )
+        )
+        if exists is not None:
+            continue
+        session.add(
+            BrickConflictNotification(
+                conflict_id=row.id,
+                telegram_user_id=int(telegram_user_id),
+                status=NOTIFICATION_STATUS_PENDING,
+                attempts=0,
+                created_at=utcnow(),
+            )
+        )
+    session.flush()
+
+
+def list_place_conflicts(
+    session: Session,
+    actor_telegram_user_id: int | None,
+    place_id: int,
+    *,
+    include_closed: bool = False,
+) -> list[BrickConflictView]:
+    """Задачи места; права проверяются по актуальной роли администратора."""
+    _require_place(session, place_id)
+    if not can_manage_place(session, actor_telegram_user_id, place_id):
+        raise BrickPermissionError(
+            "Задачи конфликтов этого места доступны только его администратору."
+        )
+    statement = select(BrickConflict).where(BrickConflict.place_id == place_id)
+    if not include_closed:
+        statement = statement.where(BrickConflict.status == CONFLICT_STATUS_OPEN)
+    rows = session.scalars(
+        statement.order_by(BrickConflict.status, BrickConflict.id)
+    ).all()
+    views = [_conflict_view(session, row) for row in rows]
+    return [view for view in views if view is not None]
+
+
+def count_open_conflicts_for_place(session: Session, place_id: int) -> int:
+    """Число активных задач места (для карточки и кнопки)."""
+    return int(
+        session.scalar(
+            select(func.count(BrickConflict.id)).where(
+                BrickConflict.place_id == place_id,
+                BrickConflict.status == CONFLICT_STATUS_OPEN,
+            )
+        )
+        or 0
+    )
+
+
+def count_open_conflicts(session: Session) -> int:
+    """Все активные задачи (для кабинета суперадминистратора)."""
+    return int(
+        session.scalar(
+            select(func.count(BrickConflict.id)).where(
+                BrickConflict.status == CONFLICT_STATUS_OPEN
+            )
+        )
+        or 0
+    )
+
+
+def list_open_conflicts(
+    session: Session, actor_telegram_user_id: int | None, *, limit: int = 20
+) -> list[BrickConflictView]:
+    """
+    Активные задачи, доступные актору: суперадмин видит все, админ места —
+    только свои места.
+    """
+    statement = select(BrickConflict).where(
+        BrickConflict.status == CONFLICT_STATUS_OPEN
+    )
+    if not is_superadmin(actor_telegram_user_id):
+        actor = _actor_user(session, actor_telegram_user_id)
+        if actor is None:
+            return []
+        place_ids = session.scalars(
+            select(PlaceAdmin.place_id).where(
+                PlaceAdmin.user_id == actor.id,
+                PlaceAdmin.revoked_at.is_(None),
+            )
+        ).all()
+        if not place_ids:
+            return []
+        statement = statement.where(BrickConflict.place_id.in_(list(place_ids)))
+    rows = session.scalars(statement.order_by(BrickConflict.id).limit(limit)).all()
+    views = [_conflict_view(session, row) for row in rows]
+    return [view for view in views if view is not None]
+
+
+def get_conflict(
+    session: Session, actor_telegram_user_id: int | None, conflict_id: int
+) -> BrickConflictView | None:
+    """Задача, если актор вправе её видеть (админ места или суперадмин)."""
+    if isinstance(conflict_id, bool) or not isinstance(conflict_id, int):
+        return None
+    row = session.get(BrickConflict, conflict_id)
+    if row is None:
+        return None
+    if not can_manage_place(session, actor_telegram_user_id, row.place_id):
+        return None
+    return _conflict_view(session, row)
+
+
+def _begin_immediate_write(session: Session) -> None:
+    """
+    `BEGIN IMMEDIATE` до чтения статуса: два решения не проходят вместе.
+
+    Проверять нужно уровень DBAPI: после `session.connection()` SQLAlchemy уже
+    считает транзакцию открытой (deferred `BEGIN`), хотя блокировка записи
+    ещё не взята. Раньше проверка `connection.in_transaction()` была истинной
+    всегда, из-за чего `BEGIN IMMEDIATE` не выполнялся, а проигравший читал
+    статус задачи из устаревшего снимка и ложно объявлял `superseded`.
+    """
+    if session.in_transaction() and not (
+        session.new or session.dirty or session.deleted
+    ):
+        session.rollback()
+    connection = session.connection()
+    raw = connection.connection
+    if raw is None or not getattr(raw, "in_transaction", False):
+        connection.exec_driver_sql("BEGIN IMMEDIATE")
+    # Снимок задачи и местного кирпичика обязан быть прочитан уже под
+    # блокировкой записи, а не из identity map прошлого запроса: иначе
+    # проигравший увидел бы `open` и объявил ложный `superseded`.
+    session.expire_all()
+
+
+def _conflict_resolution(
+    status: str,
+    view: BrickConflictView | None,
+    message: str,
+    *,
+    template_updated: bool = False,
+) -> ConflictResolutionResult:
+    return ConflictResolutionResult(
+        status=status,
+        conflict=view,
+        message=message,
+        template_updated=template_updated,
+    )
+
+
+def _conflict_is_stale(session: Session, row: BrickConflict) -> bool:
+    """Носитель больше не держит этот код в этом месте (архив/переименование)."""
+    local = session.get(Brick, row.local_brick_id)
+    return (
+        local is None
+        or local.status != BRICK_STATUS_ACTIVE
+        or local.code != row.code
+        or local.scope != BRICK_SCOPE_PLACE
+        or local.place_id != row.place_id
+    )
+
+
+def _close_superseded(session: Session, row: BrickConflict) -> None:
+    session.execute(
+        sqlalchemy_update(BrickConflict)
+        .where(
+            BrickConflict.id == row.id,
+            BrickConflict.status == CONFLICT_STATUS_OPEN,
+        )
+        .values(status=CONFLICT_STATUS_SUPERSEDED, resolved_at=utcnow())
+        .execution_options(synchronize_session=False)
+    )
+    session.commit()
+
+
+def _finish_conflict(
+    session: Session,
+    *,
+    row: BrickConflict,
+    status: str,
+    actor: User,
+    note: str | None = None,
+) -> bool:
+    """
+    Терминальный переход `open` → решение. False — гонку выиграл другой актор.
+    """
+    now = utcnow()
+    changed = session.execute(
+        sqlalchemy_update(BrickConflict)
+        .where(
+            BrickConflict.id == row.id,
+            BrickConflict.status == CONFLICT_STATUS_OPEN,
+        )
+        .values(
+            status=status,
+            resolved_at=now,
+            resolved_by_user_id=actor.id,
+            resolution_note=note,
+        )
+        .execution_options(synchronize_session=False)
+    )
+    return getattr(changed, "rowcount", 0) == 1
+
+
+def _rename_place_brick(
+    session: Session,
+    *,
+    row: Brick,
+    actor: User,
+    new_code: str,
+) -> bool:
+    """
+    CAS-переименование местного кирпичика без потери привязок.
+
+    `brick_id` неизменен, поэтому версии и снимки шаблонов продолжают
+    ссылаться на тот же кирпичик; меняется только технический код.
+    """
+    changed = session.execute(
+        sqlalchemy_update(Brick)
+        .where(
+            Brick.id == row.id,
+            Brick.scope == BRICK_SCOPE_PLACE,
+            Brick.place_id == row.place_id,
+            Brick.status == BRICK_STATUS_ACTIVE,
+            Brick.code == row.code,
+            Brick.revision == row.revision,
+        )
+        .values(
+            code=new_code,
+            revision=row.revision + 1,
+            updated_at=utcnow(),
+        )
+        .execution_options(synchronize_session=False)
+    )
+    return getattr(changed, "rowcount", 0) == 1
+
+
+def _rebind_place_template_to_system(
+    session: Session,
+    *,
+    place_id: int,
+    code: str,
+    local_brick_id: int,
+    system_brick_id: int,
+    actor: User,
+) -> bool:
+    """
+    Новая версия стандартного шаблона места с привязкой на системный кирпичик.
+
+    Старая версия и снимки не изменяются: история неизменяема, а новые
+    привязки получает только СЛЕДУЮЩАЯ версия. Если шаблона или подходящих
+    привязок нет, ничего не пишется и возвращается False.
+    """
+    template = session.scalar(
+        select(Template).where(
+            Template.kind == "standard",
+            Template.place_id == place_id,
+        )
+    )
+    if template is None:
+        return False
+    current = session.scalar(
+        select(TemplateVersion).where(
+            TemplateVersion.template_id == template.id,
+            TemplateVersion.version == template.revision,
+        )
+    )
+    if current is None:  # pragma: no cover — revision указывает на версию
+        return False
+    bindings = list(
+        session.scalars(
+            select(TemplateVersionBrick).where(
+                TemplateVersionBrick.template_version_id == current.id
+            )
+        ).all()
+    )
+    targets = [
+        binding
+        for binding in bindings
+        if binding.code == code and binding.brick_id == local_brick_id
+    ]
+    if not targets:
+        return False
+
+    now = utcnow()
+    version = TemplateVersion(
+        template_id=template.id,
+        version=template.revision + 1,
+        header=current.header,
+        body=current.body,
+        footer=current.footer,
+        created_by_user_id=actor.id,
+        created_at=now,
+        builtin_version=None,
+    )
+    session.add(version)
+    session.flush()
+    for binding in bindings:
+        session.add(
+            TemplateVersionBrick(
+                template_version_id=version.id,
+                brick_id=(system_brick_id if binding in targets else binding.brick_id),
+                code=binding.code,
+            )
+        )
+    changed = session.execute(
+        sqlalchemy_update(Template)
+        .where(
+            Template.id == template.id,
+            Template.revision == template.revision,
+        )
+        .values(revision=template.revision + 1, updated_at=now)
+        .execution_options(synchronize_session=False)
+    )
+    if getattr(changed, "rowcount", 0) != 1:
+        raise BrickConflictError(
+            "Шаблон места изменился во время решения; повторите попытку."
+        )
+    return True
+
+
+def _load_conflict_for_write(
+    session: Session,
+    actor_telegram_user_id: int | None,
+    conflict_id: int,
+) -> tuple[BrickConflict | None, BrickConflictView | None, str | None]:
+    """Проверяет существование/права/статус; возвращает причину отказа."""
+    if isinstance(conflict_id, bool) or not isinstance(conflict_id, int):
+        return None, None, "not_found"
+    row = session.get(BrickConflict, conflict_id)
+    if row is None:
+        return None, None, "not_found"
+    if not can_manage_place(session, actor_telegram_user_id, row.place_id):
+        raise BrickPermissionError(
+            "Решать задачу конфликта может только администратор этого места "
+            "или суперадминистратор."
+        )
+    return row, _conflict_view(session, row), None
+
+
+def resolve_conflict_by_rename(
+    session: Session,
+    *,
+    actor_telegram_user_id: int | None,
+    conflict_id: int,
+    new_code: object,
+) -> ConflictResolutionResult:
+    """
+    Исход «переименовать местный кирпичик».
+
+    Код местного кирпичика меняется на свободный в этой области; `brick_id`
+    неизменен, поэтому существующие привязки шаблонов и снимки не теряются.
+    """
+    actor = _require_actor_user(session, actor_telegram_user_id)
+    try:
+        canonical = validate_brick_code(new_code)
+    except BrickValidationError as exc:
+        raise BrickConflictError(str(exc)) from exc
+    _begin_immediate_write(session)
+    row, view, missing = _load_conflict_for_write(
+        session, actor_telegram_user_id, conflict_id
+    )
+    if row is None or view is None:
+        session.rollback()
+        return _conflict_resolution(
+            missing or "not_found", None, "Задача конфликта не найдена."
+        )
+    if row.status != CONFLICT_STATUS_OPEN:
+        session.rollback()
+        return _conflict_resolution(
+            "already_resolved",
+            view,
+            "Задача уже решена. Изменения не применены.",
+        )
+    if _conflict_is_stale(session, row):
+        _close_superseded(session, row)
+        fresh = get_conflict(session, actor_telegram_user_id, conflict_id)
+        return _conflict_resolution(
+            CONFLICT_STATUS_SUPERSEDED,
+            fresh,
+            "Местный кирпичик уже не держит этот код; задача закрыта " "автоматически.",
+        )
+    local = session.get(Brick, row.local_brick_id)
+    assert local is not None
+    if canonical == row.code:
+        session.rollback()
+        return _conflict_resolution(
+            "unchanged",
+            view,
+            "Новый код совпадает с конфликтным. Введите другое обозначение.",
+        )
+    availability = check_code_availability(
+        session,
+        canonical,
+        scope=BRICK_SCOPE_PLACE,
+        place_id=row.place_id,
+        exclude_brick_id=local.id,
+    )
+    if not availability.available:
+        session.rollback()
+        return _conflict_resolution(
+            "conflict", view, availability.message or "Код уже используется."
+        )
+    try:
+        renamed = _rename_place_brick(
+            session, row=local, actor=actor, new_code=canonical
+        )
+        if not renamed:
+            session.rollback()
+            fresh = get_conflict(session, actor_telegram_user_id, conflict_id)
+            return _conflict_resolution(
+                "stale",
+                fresh,
+                "Кирпичик уже изменился в другом окне. Откройте задачу заново.",
+            )
+        if not _finish_conflict(
+            session,
+            row=row,
+            status=CONFLICT_STATUS_RENAMED,
+            actor=actor,
+            note=f"Новый код: {canonical}",
+        ):
+            session.rollback()
+            fresh = get_conflict(session, actor_telegram_user_id, conflict_id)
+            return _conflict_resolution(
+                "already_resolved",
+                fresh,
+                "Задачу уже решили в другом окне. Изменения не применены.",
+            )
+        session.commit()
+    except (IntegrityError, OperationalError, SQLAlchemyError):
+        session.rollback()
+        fresh = get_conflict(session, actor_telegram_user_id, conflict_id)
+        if fresh is not None and not fresh.is_open:
+            return _conflict_resolution(
+                "already_resolved",
+                fresh,
+                "Задачу уже решили в другом окне. Изменения не применены.",
+            )
+        return _conflict_resolution(
+            "error",
+            fresh,
+            "Не удалось переименовать кирпичик из-за ошибки базы. "
+            "Данные не изменены; повторите попытку.",
+        )
+    except Exception:
+        session.rollback()
+        raise
+    return _conflict_resolution(
+        CONFLICT_STATUS_RENAMED,
+        get_conflict(session, actor_telegram_user_id, conflict_id),
+        f"Местный кирпичик переименован в [{canonical}]; задача закрыта.",
+    )
+
+
+def resolve_conflict_by_switch(
+    session: Session,
+    *,
+    actor_telegram_user_id: int | None,
+    conflict_id: int,
+) -> ConflictResolutionResult:
+    """
+    Исход «переключиться на глобальный кирпичик».
+
+    Стандартный шаблон места получает НОВУЮ версию с привязкой конфликтного
+    кода к системному кирпичику; прежние версии и снимки остаются как были.
+    Местный кирпичик не удаляется и не переименовывается.
+    """
+    actor = _require_actor_user(session, actor_telegram_user_id)
+    _begin_immediate_write(session)
+    row, view, missing = _load_conflict_for_write(
+        session, actor_telegram_user_id, conflict_id
+    )
+    if row is None or view is None:
+        session.rollback()
+        return _conflict_resolution(
+            missing or "not_found", None, "Задача конфликта не найдена."
+        )
+    if row.status != CONFLICT_STATUS_OPEN:
+        session.rollback()
+        return _conflict_resolution(
+            "already_resolved",
+            view,
+            "Задача уже решена. Изменения не применены.",
+        )
+    if _conflict_is_stale(session, row):
+        _close_superseded(session, row)
+        fresh = get_conflict(session, actor_telegram_user_id, conflict_id)
+        return _conflict_resolution(
+            CONFLICT_STATUS_SUPERSEDED,
+            fresh,
+            "Местный кирпичик уже не держит этот код; задача закрыта " "автоматически.",
+        )
+    template_updated = False
+    try:
+        template_updated = _rebind_place_template_to_system(
+            session,
+            place_id=row.place_id,
+            code=row.code,
+            local_brick_id=row.local_brick_id,
+            system_brick_id=row.system_brick_id,
+            actor=actor,
+        )
+        if not _finish_conflict(
+            session,
+            row=row,
+            status=CONFLICT_STATUS_SWITCHED,
+            actor=actor,
+            note="Привязки шаблона места переведены на глобальный кирпичик.",
+        ):
+            session.rollback()
+            fresh = get_conflict(session, actor_telegram_user_id, conflict_id)
+            return _conflict_resolution(
+                "already_resolved",
+                fresh,
+                "Задачу уже решили в другом окне. Изменения не применены.",
+            )
+        session.commit()
+    except (IntegrityError, OperationalError, SQLAlchemyError):
+        session.rollback()
+        # Гонку мог выиграть другой сеанс уже после нашей проверки статуса:
+        # тогда конфликт версии шаблона — следствие чужого решения, а не
+        # ошибка. Отвечаем честно «уже решено», данные не тронуты.
+        fresh = get_conflict(session, actor_telegram_user_id, conflict_id)
+        if fresh is not None and not fresh.is_open:
+            return _conflict_resolution(
+                "already_resolved",
+                fresh,
+                "Задачу уже решили в другом окне. Изменения не применены.",
+            )
+        return _conflict_resolution(
+            "error",
+            fresh,
+            "Не удалось обновить привязки шаблона из-за ошибки базы. "
+            "Данные не изменены; повторите попытку.",
+        )
+    except Exception:
+        session.rollback()
+        raise
+    message = (
+        "Шаблон места переведён на глобальный кирпичик; задача закрыта."
+        if template_updated
+        else "Привязок к местному кирпичику в шаблоне не было; задача закрыта."
+    )
+    return _conflict_resolution(
+        CONFLICT_STATUS_SWITCHED,
+        get_conflict(session, actor_telegram_user_id, conflict_id),
+        message,
+        template_updated=template_updated,
+    )
+
+
+def list_pending_conflict_notifications(
+    session: Session, *, conflict_ids: list[int] | None = None
+) -> list[ConflictNotification]:
+    """
+    Очередь уведомлений со статусом `pending` (без изменения состояния).
+
+    Повторный вызов после отметки `sent` пуст: дублей рассылки нет.
+    """
+    statement = (
+        select(BrickConflictNotification, BrickConflict)
+        .join(BrickConflict, BrickConflict.id == BrickConflictNotification.conflict_id)
+        .where(BrickConflictNotification.status == NOTIFICATION_STATUS_PENDING)
+        .order_by(BrickConflictNotification.id)
+    )
+    if conflict_ids is not None:
+        if not conflict_ids:
+            return []
+        statement = statement.where(
+            BrickConflictNotification.conflict_id.in_(conflict_ids)
+        )
+    out: list[ConflictNotification] = []
+    for notification, conflict in session.execute(statement).all():
+        local = session.get(Brick, conflict.local_brick_id)
+        out.append(
+            ConflictNotification(
+                notification_id=notification.id,
+                conflict_id=conflict.id,
+                telegram_user_id=notification.telegram_user_id,
+                code=conflict.code,
+                place_id=conflict.place_id,
+                place_name=get_place_name_for_display(session, conflict.place_id),
+                local_brick_title=local.title if local is not None else "",
+                system_brick_id=conflict.system_brick_id,
+                local_brick_id=conflict.local_brick_id,
+            )
+        )
+    return out
+
+
+def mark_conflict_notification(
+    session: Session,
+    notification_id: int,
+    *,
+    delivered: bool,
+) -> bool:
+    """
+    Фиксирует попытку доставки: `pending` → `sent`/`failed` ровно один раз.
+
+    False — уведомление уже обработано (или не найдено), повторной отправки
+    не будет.
+    """
+    changed = session.execute(
+        sqlalchemy_update(BrickConflictNotification)
+        .where(
+            BrickConflictNotification.id == notification_id,
+            BrickConflictNotification.status == NOTIFICATION_STATUS_PENDING,
+        )
+        .values(
+            status=(
+                NOTIFICATION_STATUS_SENT if delivered else NOTIFICATION_STATUS_FAILED
+            ),
+            attempts=BrickConflictNotification.attempts + 1,
+            sent_at=utcnow(),
+        )
+        .execution_options(synchronize_session=False)
+    )
+    if getattr(changed, "rowcount", 0) != 1:
+        session.rollback()
+        return False
+    session.commit()
+    return True

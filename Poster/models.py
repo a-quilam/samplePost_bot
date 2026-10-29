@@ -771,6 +771,157 @@ class BrickProposal(Base):
         )
 
 
+class BrickConflict(Base):
+    """
+    Задача разрешения конфликта кодов (Poster 2.1 R3).
+
+    Возникает при одобрении ГЛОБАЛЬНОГО кирпичика, если у места уже есть
+    действующий местный носитель того же кода. Глобальный кирпичик при этом
+    создаётся и выигрывает для новых привязок; местный не переписывается и
+    не переименовывается автоматически — администратор места выбирает исход.
+
+    Одна задача = пара «системный кирпичик + конкретный местный». Повторное
+    одобрение/повторный прогон не создаёт дубль (частичный уникальный индекс).
+    Терминальный статус неизменяем; удаление истории запрещено триггерами.
+    """
+
+    __tablename__ = "brick_conflicts"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    code: Mapped[str] = mapped_column(Text, nullable=False)
+    place_id: Mapped[int] = mapped_column(
+        Integer,
+        ForeignKey("places.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    system_brick_id: Mapped[int] = mapped_column(
+        Integer,
+        ForeignKey("bricks.id", ondelete="RESTRICT"),
+        nullable=False,
+    )
+    local_brick_id: Mapped[int] = mapped_column(
+        Integer,
+        ForeignKey("bricks.id", ondelete="RESTRICT"),
+        nullable=False,
+    )
+    proposal_id: Mapped[int | None] = mapped_column(
+        Integer,
+        ForeignKey("brick_proposals.id", ondelete="RESTRICT"),
+        nullable=True,
+    )
+    status: Mapped[str] = mapped_column(
+        Text, nullable=False, default="open", server_default="open"
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime, default=utcnow, nullable=False
+    )
+    resolved_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    resolved_by_user_id: Mapped[int | None] = mapped_column(
+        Integer,
+        ForeignKey("users.id", ondelete="RESTRICT"),
+        nullable=True,
+    )
+    resolution_note: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+    __table_args__ = (
+        CheckConstraint(
+            "status IN ('open', 'renamed', 'switched', 'superseded')",
+            name="ck_brick_conflicts_status",
+        ),
+        CheckConstraint(
+            "length(code) BETWEEN 2 AND 64", name="ck_brick_conflicts_code_length"
+        ),
+        CheckConstraint(
+            "(status = 'open' AND resolved_at IS NULL "
+            "AND resolved_by_user_id IS NULL) "
+            "OR (status IN ('renamed', 'switched') AND resolved_at IS NOT NULL "
+            "AND resolved_by_user_id IS NOT NULL) "
+            "OR (status = 'superseded' AND resolved_at IS NOT NULL "
+            "AND resolved_by_user_id IS NULL)",
+            name="ck_brick_conflicts_shape",
+        ),
+        Index(
+            "ux_brick_conflicts_system_local",
+            "system_brick_id",
+            "local_brick_id",
+            unique=True,
+        ),
+        Index("ix_brick_conflicts_place_status", "place_id", "status"),
+        Index("ix_brick_conflicts_local_brick", "local_brick_id"),
+    )
+
+    def __repr__(self) -> str:
+        return (
+            f"<BrickConflict(id={self.id}, code={self.code!r}, "
+            f"status={self.status!r})>"
+        )
+
+
+class BrickConflictNotification(Base):
+    """
+    Идемпотентное уведомление администратора места о конфликте кодов.
+
+    Строка создаётся вместе с задачей в транзакции одобрения; повторное
+    одобрение/повторный прогон не создаёт новую пару
+    «задача + получатель» (уникальный индекс). Повторная отправка
+    невозможно: `pending` — единственный статус, из которого разрешён
+    переход, а `sent`/`failed` терминальны.
+    """
+
+    __tablename__ = "brick_conflict_notifications"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    conflict_id: Mapped[int] = mapped_column(
+        Integer,
+        ForeignKey("brick_conflicts.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    telegram_user_id: Mapped[int] = mapped_column(Integer, nullable=False)
+    status: Mapped[str] = mapped_column(
+        Text, nullable=False, default="pending", server_default="pending"
+    )
+    attempts: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=0, server_default=text("0")
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime, default=utcnow, nullable=False
+    )
+    sent_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+
+    __table_args__ = (
+        CheckConstraint(
+            "status IN ('pending', 'sent', 'failed')",
+            name="ck_brick_conflict_notifications_status",
+        ),
+        CheckConstraint(
+            "attempts >= 0",
+            name="ck_brick_conflict_notifications_attempts",
+        ),
+        CheckConstraint(
+            "(status = 'pending' AND sent_at IS NULL) "
+            "OR (status IN ('sent', 'failed') AND sent_at IS NOT NULL)",
+            name="ck_brick_conflict_notifications_shape",
+        ),
+        Index(
+            "ux_brick_conflict_notifications_target",
+            "conflict_id",
+            "telegram_user_id",
+            unique=True,
+        ),
+        Index(
+            "ix_brick_conflict_notifications_status",
+            "status",
+            "created_at",
+        ),
+    )
+
+    def __repr__(self) -> str:
+        return (
+            f"<BrickConflictNotification(id={self.id}, "
+            f"conflict_id={self.conflict_id}, status={self.status!r})>"
+        )
+
+
 # --- Шаблоны анонсов, версии, связи и снимки (Stage 23) ---------------------
 
 

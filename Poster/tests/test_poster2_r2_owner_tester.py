@@ -348,7 +348,7 @@ class MigrationEighteenOwnerTests(unittest.TestCase):
     """Требование 2: обновляются только доказуемо нетронутые копии v2."""
 
     def setUp(self) -> None:
-        self.assertEqual(LATEST_VERSION, 18)
+        self.assertEqual(LATEST_VERSION, 19)
         self.path = temp_db_path("poster-r2-owner-m18-")
         self.addCleanup(shutil.rmtree, os.path.dirname(self.path), True)
         self.engine = make_engine(self.path)
@@ -421,7 +421,9 @@ class MigrationEighteenOwnerTests(unittest.TestCase):
         self._personal(4, name="Копия для концертов")
 
     def test_only_untouched_copies_get_v3_and_rename_happens_with_it(self) -> None:
-        self.assertEqual(run_migrations(self.engine), 18)
+        # Возвращается LATEST_VERSION: R3 добавил миграцию 19 (no-op для
+        # этого теста), логика миграции 18 не менялась.
+        self.assertEqual(run_migrations(self.engine), LATEST_VERSION)
 
         # Нетронутая личная копия: новая версия ровно с текстом v3, старая цела.
         rows = _sql(
@@ -485,7 +487,7 @@ class MigrationEighteenOwnerTests(unittest.TestCase):
         )
 
     def test_repeat_run_is_noop_and_schema_is_clean(self) -> None:
-        self.assertEqual(run_migrations(self.engine), 18)
+        self.assertEqual(run_migrations(self.engine), LATEST_VERSION)
         templates = _sql(
             self.path, "SELECT id, name, revision FROM templates ORDER BY id"
         )
@@ -494,7 +496,7 @@ class MigrationEighteenOwnerTests(unittest.TestCase):
             "SELECT id, template_id, version, body, builtin_version "
             "FROM template_versions ORDER BY id",
         )
-        self.assertEqual(run_migrations(self.engine), 18)
+        self.assertEqual(run_migrations(self.engine), LATEST_VERSION)
         self.assertEqual(
             _sql(self.path, "SELECT id, name, revision FROM templates ORDER BY id"),
             templates,

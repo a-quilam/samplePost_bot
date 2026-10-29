@@ -9,8 +9,9 @@ R1 (Poster 2.1), дефект №30 — независимые проверки 
 2. внутрисистемный дубль по-прежнему отклоняется;
 3. системные резервы («название», «фото») запрещены во всех областях;
 4. поведение place/personal-уникальности не изменилось;
-5. при ДВУХ и более несистемных носителях кода исход явный (`status="error"`),
-   а не «одобрено» и не тишина (известное ограничение R1, не дефект).
+5. при ДВУХ и более несистемных носителях кода одобрение проходит, местные
+   носители не переписываются, а по местам создаются задачи конфликта
+   (модель R3 заменила временное ограничение R1 `status="error"`).
 
 Ни один сценарий не открывает реальную `post_bot.db`: используется временная
 SQLite из `tests.stage22a_helpers` / `tests.stage19a_helpers`, а сценарии
@@ -451,11 +452,13 @@ class GlobalApprovalTests(BrickDatabaseTestCase):
         )
         self.assertEqual(place_codes, ["цена_местная"])
 
-    def test_place_holder_of_same_code_is_reported_but_not_silent(self) -> None:
+    def test_place_holder_of_same_code_gets_conflict_task(self) -> None:
         """
-        Известное ограничение R1: при ДВУХ несистемных носителях (личный
-        источник + кирпичик места с тем же кодом) INSERT системного кирпичика
-        отклоняет триггер. Требование: исход явный и НЕ выглядит успехом.
+        R3 заменил ограничение R1 «два носителя → error» на модель конфликта.
+
+        Глобальное предложение одобряется (явный успех, а не тихий отказ),
+        местный кирпичик остаётся нетронутым, а по месту создаётся задача
+        разрешения конфликта. Требование R1 «исход явный» сохранено.
         """
         author, personal = self._author_with_personal(tg=3_910_003, code="цена_двойная")
         place = self.make_place("Место с тем же кодом")
@@ -478,20 +481,22 @@ class GlobalApprovalTests(BrickDatabaseTestCase):
             proposal_id=proposal_id,
         )
 
-        # Явный отказ, не «одобрено».
-        self.assertNotEqual(result.status, PROPOSAL_STATUS_APPROVED)
-        self.assertEqual(result.status, "error")
-        self.assertIsNone(result.brick)
-        self.assertFalse(result.ok)
+        self.assertEqual(result.status, PROPOSAL_STATUS_APPROVED, result.message)
+        self.assertIsNotNone(result.brick)
+        self.assertEqual(len(result.conflicts), 1)
         assert result.message
-        self.assertIn("Не удалось одобрить", result.message)
-        # Данные не изменились: системного кирпичика нет, предложение ожидает.
-        self.assertIsNone(get_system_brick(self.session, "цена_двойная"))
+        self.assertIn("задачи разрешения конфликта", result.message)
+        # Системный кирпичик создан, местный не переписан.
+        self.assertIsNotNone(get_system_brick(self.session, "цена_двойная"))
         self.session.expire_all()
+        place_codes = list(
+            self.session.scalars(select(Brick.code).where(Brick.scope == "place"))
+        )
+        self.assertEqual(place_codes, ["цена_двойная"])
         proposal = self.session.get(BrickProposal, proposal_id)
         assert proposal is not None
-        self.assertEqual(proposal.status, PROPOSAL_STATUS_PENDING)
-        self.assertIsNone(proposal.approved_brick_id)
+        self.assertEqual(proposal.status, PROPOSAL_STATUS_APPROVED)
+        self.assertIsNotNone(proposal.approved_brick_id)
 
     def test_internal_system_duplicate_is_conflict(self) -> None:
         """
@@ -660,8 +665,11 @@ class GlobalApprovalUiTests(unittest.TestCase):
         self.assertIn("Одобрено", h.screen_text())
 
     @scenario_test
-    async def test_ui_two_holders_shows_failure_and_keeps_proposal_pending(self, h):
-        """Два носителя: кабинет явно сообщает о неудаче, не «Одобрено»."""
+    async def test_ui_two_holders_approves_and_creates_conflict_task(self, h):
+        """
+        R3: два носителя больше не отказ. Кабинет показывает явное «Одобрено»
+        с числом задач конфликта, местный кирпичик и шаблон не переписаны.
+        """
         place_id, personal_id = self._author_with_personal(h, code="глоб_двойной")
         with h.session_factory() as session:
             create_place_brick(
@@ -678,25 +686,29 @@ class GlobalApprovalUiTests(unittest.TestCase):
         await self._approve_via_ui(h, proposal_id)
 
         text = h.screen_text()
-        self.assertIn("Ожидает решения", text)
-        self.assertNotIn("✅ Одобрено", text)
-        self.assertIn("Не удалось одобрить", text)
+        self.assertIn("✅ Одобрено", text)
+        self.assertIn("задачи разрешения конфликта", text)
+        self.assertNotIn("Не удалось одобрить", text)
         with h.session_factory() as session:
             proposal = session.get(BrickProposal, proposal_id)
             assert proposal is not None
-            self.assertEqual(proposal.status, "pending")
-            self.assertIsNone(
+            self.assertEqual(proposal.status, "approved")
+            self.assertIsNotNone(
                 session.scalar(
                     select(Brick).where(
                         Brick.code == "глоб_двойной", Brick.scope == "system"
                     )
                 )
             )
-        # Автору НЕ отправлено ложное «одобрено».
-        author_messages = [
-            call
-            for call in h.calls
-            if call["type"] == "message" and int(call.get("chat_id") or 0) == AUTHOR_TG
-        ]
-        for call in author_messages:
-            self.assertNotIn("одобрено", str(call.get("text") or "").lower())
+            self.assertEqual(
+                session.scalar(
+                    select(func.count())
+                    .select_from(Brick)
+                    .where(
+                        Brick.code == "глоб_двойной",
+                        Brick.scope == "place",
+                        Brick.place_id == place_id,
+                    )
+                ),
+                1,
+            )
