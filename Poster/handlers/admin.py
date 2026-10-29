@@ -5029,9 +5029,19 @@ async def _handle_brick_proposal_decision(
         )
     conflict_ids = [view.id for view in result.conflicts]
     if approved and conflict_ids:
-        notified = await _notify_conflict_admins(context, conflict_ids)
-        if notified:
+        notified, undelivered = await _notify_conflict_admins(context, conflict_ids)
+        if notified and undelivered:
+            notice_extra = (
+                f" Администраторов мест уведомлено: {notified}, "
+                f"не доставлено: {undelivered}."
+            )
+        elif notified:
             notice_extra = f" Администраторов мест уведомлено: {notified}."
+        elif undelivered:
+            notice_extra = (
+                f" Уведомления администраторам мест не доставлены: {undelivered}; "
+                "задача видна в карточке места."
+            )
         else:
             notice_extra = (
                 " Уведомления администраторам мест поставлены в очередь; "
@@ -5414,15 +5424,20 @@ def _conflict_notification_text(notification) -> str:
 async def _notify_conflict_admins(
     context: ContextTypes.DEFAULT_TYPE,
     conflict_ids: list[int] | None = None,
-) -> int:
+) -> tuple[int, int]:
     """
     Best-effort рассылка уведомлений из очереди `brick_conflict_notifications`.
+
+    Возвращает `(доставлено, не доставлено)`: счётчик доставки растёт только
+    после подтверждённой отправки, сбой отправки учитывается отдельно, чтобы
+    итоговая плашка не сообщала «уведомлено» без доставки.
 
     Дубли невозможны: `mark_conflict_notification` переводит только `pending`,
     повторный прогон находит пустую очередь.
     """
     session = SessionLocal()
     delivered = 0
+    undelivered = 0
     try:
         notifications = list_pending_conflict_notifications(
             session, conflict_ids=conflict_ids
@@ -5440,10 +5455,13 @@ async def _notify_conflict_admins(
             if mark_conflict_notification(
                 session, notification.notification_id, delivered=ok
             ):
-                delivered += 1
+                if ok:
+                    delivered += 1
+                else:
+                    undelivered += 1
         finally:
             session.close()
-    return delivered
+    return delivered, undelivered
 
 
 async def handle_admin_stale(
