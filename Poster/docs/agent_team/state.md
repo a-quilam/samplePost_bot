@@ -9,8 +9,14 @@ U1–U5 (исправление подтверждённых UX-дефектов
 кирпичик «город» id=11), миграция 22 (BUILTIN v4: дата/время/место/адрес в
 шапке, тело=описание, подвал=контакт), автозаполнение живого анонса
 данными места (re-read снимка при фиксации шаблона), город в списках/
-поиске/карточках/регистрации/редактировании. Тестов: 1473 OK. U1b
-(форматирование Telegram entities) и U2–U5 — впереди.
+поиске/карточках/регистрации/редактировании. Тестов: 1473 OK.
+**U1b принят** (908ade8 + 86fb9c5): сохранение Telegram-форматирования —
+capture_message_text (entities во всех точках ввода), каноническая модель
+SafeHtml с allow-list санитизацией при записи и чтении, рендер-шов
+(значения не экранируются повторно, вложенность с разметкой шаблона),
+LinkPreviewOptions(is_disabled=True) во всех точках отправки, усечение
+длинных HTML-значений на экранах, strip_link_tags в подписях ссылок.
+Тестов: 1522 OK. U2–U5 — впереди.
 
 Единый документ состояния, который ведёт `poster-manager` после каждого
 завершённого этапа. Владелец читает его, чтобы понять, где остановилась
@@ -35,6 +41,59 @@ Push: <нет | выполнено по разрешению>
 ---
 
 ## Журнал
+
+## Этап U1b — Сохранение Telegram-форматирования
+Дата: 2026-10-30
+Статус: done
+Задание: исправление №4 (критический дефект целостности данных): entities
+пользователя (bold/italic/underline/strike/spoiler/code/pre/blockquote/
+expandable_blockquote/text_link) терялись при вводе значений кирпичиков.
+Изменено:
+- `Poster/utils/tg_html.py` — FormattedText, capture_text/
+  capture_message_text (захват entities, UTF-16 offsets), SafeHtml,
+  sanitize_html (allow-list: теги/атрибуты Telegram, href только
+  http(s)/tg, идемпотентность), _TAG_TAIL_RE (текст `a < b & c` не
+  «съедается»), strip_link_tags, `#` в language-class.
+- `Poster/announcement_store.py` — payload значений `{"text","html"}`;
+  html пишется только через sanitize при видимой разнице; allow-list при
+  чтении (defense-in-depth); пустой по видимому тексту html → plain;
+  _render_value — шов рендера (SafeHtml для текстовых типов).
+- `Poster/template_compiler.py` — SafeHtml не экранируется повторно
+  (вложенность с разметкой шаблона); strip_link_tags в подписи LinkNode
+  (без nested links).
+- `Poster/delivery.py`, `handlers/wizard_live.py`, `utils/screen.py`,
+  `handlers/admin.py` — LinkPreviewOptions(is_disabled=True) во всех
+  точках; disable_web_page_preview удалён.
+- `Poster/handlers/announcement_wizard.py`, `handlers/wizard_questions.py`
+  — capture_message_text во всех точках ввода значений; экраны показывают
+  сохранённое форматирование (stored_value_html) с усечением
+  truncate_html (закрытие тегов, visible ≤ лимита).
+- `tests/integration_harness.py` — link_preview_options в
+  POST_MESSAGE_KEYS, is_live_record/is_notification_record,
+  классификация записей по identity-инстансам.
+- Тесты: новые test_poster2_u1b_formatting.py (15) и
+  test_poster2_u1b_tester.py (16 + регрессии A/B/C/D + strip_link_tags);
+  актуализированы live/s5/humor/calendar/u1a_verify/audit/stage11/stage21.
+Проверки:
+- `make check PYTHON=.venv/bin/python` → `Ran 1522 tests ... OK`,
+  ruff/black/mypy чисто (145 файлов).
+- Мутационная проверка: 6 мутаций ловятся (плоский захват теряет entities,
+  SafeHtml-ветка, link preview, _render_value plain, stored_value_html,
+  sanitize при чтении, strip_link_tags).
+- poster-tester (независимо): полный цикл 8 состояний (ввод → вопрос →
+  возврат → рестарт → завершение → медиа/альбом → редактирование),
+  UTF-16 эмодзи+кириллица, безопасность (~40 векторов инъекций), двойное
+  экранирование, негативы. Найдены и закрыты дефекты: A/B (длинный
+  HTML-значение ломал экран вопроса — нет усечения), C (пустой html в БД
+  обнулял анонс), D (language-c#).
+Замечания ревизора: approve по 7 компонентам. Неблокирующие:
+sanitize_html не балансирует разметку (путь только через правку БД,
+capture всегда сбалансирован); text/html расхождение в подделанной строке
+(html выигрывает, но allow-list'нут); перекрывающиеся entities и разрезанная
+суррогатная пара в entities_to_html — пред-существующее ограничение PTB.
+Открытые вопросы: нет блокирующих.
+Коммиты: 908ade8, 86fb9c5 (+chore ac34527 — уборка случайного probe.txt).
+Push: выполнен. CI: success (run 40987581243).
 
 ## Этап U1a — Город, стандартный шаблон v4, автозаполнение места
 Дата: 2026-10-30
