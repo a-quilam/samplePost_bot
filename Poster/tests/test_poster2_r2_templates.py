@@ -272,7 +272,7 @@ class MigrationEighteenTests(_MigrationEighteenTestCase):
     """Миграция 18 обновляет только доказуемо нетронутые копии."""
 
     def test_untouched_personal_copy_is_updated_and_renamed(self) -> None:
-        self.assertEqual(LATEST_VERSION, 22)
+        self.assertEqual(LATEST_VERSION, 23)
         template = self.session.get(Template, 1)
         assert template is not None
         self.assertEqual(template.name, "Дефолтный шаблон")

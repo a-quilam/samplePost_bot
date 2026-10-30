@@ -294,6 +294,61 @@ class PlaceAdmin(Base):
         )
 
 
+class PlaceInviteLink(Base):
+    """
+    Ссылка «создать анонс этой площадки» (Poster 2.2 U4b, миграция 23).
+
+    Администратор площадки или суперадминистратор выдаёт короткую ссылку
+    `https://t.me/<бот>?start=<token>`; открывший её человек сразу попадает
+    в конструктор анонса с этой площадкой и её стандартным шаблоном.
+
+    - `token` — случайный URL-safe идентификатор (16–22 символа), а НЕ
+      `place_id`: по ссылке нельзя перебрать площадки и нельзя прочитать
+      внутренние ключи;
+    - ссылка НЕ даёт прав: `place_admins` по ней не создаётся, площадку и
+      шаблон открывший не редактирует;
+    - на площадку не больше одной ДЕЙСТВУЮЩЕЙ ссылки (частичный уникальный
+      индекс `ux_place_invite_links_one_active`); перевыпуск отзывает
+      прежнюю строку (`revoked_at`) и создаёт новую в одной транзакции;
+    - отозванные строки остаются аудитом.
+    """
+
+    __tablename__ = "place_invite_links"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    token: Mapped[str] = mapped_column(String(32), nullable=False, unique=True)
+    place_id: Mapped[int] = mapped_column(
+        Integer,
+        ForeignKey("places.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    created_by_user_id: Mapped[int | None] = mapped_column(
+        Integer,
+        ForeignKey("users.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime, default=utcnow, nullable=False
+    )
+    revoked_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+
+    __table_args__ = (
+        Index(
+            "ux_place_invite_links_one_active",
+            "place_id",
+            unique=True,
+            sqlite_where=text("revoked_at IS NULL"),
+        ),
+    )
+
+    def __repr__(self) -> str:
+        return (
+            f"<PlaceInviteLink(id={self.id}, place_id={self.place_id}, "
+            f"revoked={self.revoked_at is not None})>"
+        )
+
+
 class AdminTransfer(Base):
     """
     Предложение передачи администратора места (Stage 21).

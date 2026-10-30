@@ -1475,12 +1475,12 @@ class R3MigrationTests(unittest.TestCase):
         return None if row is None else str(row[0])
 
     def test_latest_version_is_19(self) -> None:
-        self.assertEqual(LATEST_VERSION, 22)
+        self.assertEqual(LATEST_VERSION, 23)
 
     def test_fresh_database_has_conflict_tables_and_integrity(self) -> None:
         from migrations import run_migrations
 
-        self.assertEqual(run_migrations(self.engine), 22)
+        self.assertEqual(run_migrations(self.engine), LATEST_VERSION)
         with self.engine.connect() as connection:
             names = {
                 str(row[0])
@@ -1565,7 +1565,7 @@ class R3MigrationTests(unittest.TestCase):
                 connection, "SELECT id, created_by_user_id FROM places ORDER BY id"
             )
 
-        self.assertEqual(run_migrations(self.engine), 22)
+        self.assertEqual(run_migrations(self.engine), LATEST_VERSION)
 
         # Таблицы, к которым более поздние миграции добавляют колонки:
         # `brick_proposals.description` (миграция 20) и `places.city`
@@ -1683,14 +1683,14 @@ class R3MigrationTests(unittest.TestCase):
                 self._rows(
                     connection, "SELECT version FROM schema_migrations ORDER BY version"
                 )[-1],
-                (22,),
+                (LATEST_VERSION,),
             )
 
     def test_migration_is_idempotent(self) -> None:
         from migrations import DEFAULT_MIGRATIONS, run_migrations
 
         self.assertEqual(run_migrations(self.engine, DEFAULT_MIGRATIONS[:18]), 18)
-        self.assertEqual(run_migrations(self.engine), 22)
+        self.assertEqual(run_migrations(self.engine), LATEST_VERSION)
         with self.engine.connect() as connection:
             names_after_first = sorted(
                 str(row[0])
@@ -1709,7 +1709,7 @@ class R3MigrationTests(unittest.TestCase):
                 "SELECT version, name FROM schema_migrations ORDER BY version",
             )
         # Повторный запуск ничего не меняет и не падает.
-        self.assertEqual(run_migrations(self.engine), 22)
+        self.assertEqual(run_migrations(self.engine), LATEST_VERSION)
         with self.engine.connect() as connection:
             self.assertEqual(
                 sorted(

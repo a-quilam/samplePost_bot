@@ -105,6 +105,7 @@ class MigrationMechanismTests(unittest.TestCase):
                 (20, "brick_proposal_description"),
                 (21, "place_city"),
                 (22, "builtin_templates_v4"),
+                (23, "place_invite_links"),
             ],
         )
 
@@ -211,6 +212,7 @@ class MigrationMechanismTests(unittest.TestCase):
                 (20, "brick_proposal_description"),
                 (21, "place_city"),
                 (22, "builtin_templates_v4"),
+                (23, "place_invite_links"),
             ],
         )
 

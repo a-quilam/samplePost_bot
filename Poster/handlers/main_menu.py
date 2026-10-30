@@ -30,6 +30,7 @@ from telegram.ext import (
     CallbackQueryHandler,
     CommandHandler,
     ContextTypes,
+    ConversationHandler,
     MessageHandler,
     filters,
 )
@@ -181,26 +182,37 @@ async def render_main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     screen.save_screen_ref(user_id, user_data, chat_id)
 
 
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     """
-    Команда /start: главное меню.
+    Команда /start: главное меню или конструктор по deep-link.
 
     Стартовый личный шаблон выдаётся раньше — при первом контакте с ботом
     (`handlers/user_tracking.py`), поэтому `/start` внутри активного диалога
     ничего не теряет: выдача не зависит от того, какая ветка обработала
     команду. Повторный `/start` и удаление шаблона его не воскрешают.
+
+    Deep-link payload разбирается ДО меню: `/start tf_...` — передача прав,
+    `/start <token>` — ссылка на создание анонса площадки (Poster 2.2 U4b).
+    `/start` без payload работает как прежде.
     """
     from handlers.admin import handle_transfer_start
+    from handlers.place_invite import open_invite_payload
 
     if await handle_transfer_start(update, context):
         # /start с payload передачи — отдельный экран; команду убираем так же,
         # как в обычном меню. WIP-пост не трогается.
         await screen.drop_user_input(update, context)
-        return
+        return ConversationHandler.END
+    invite_state = await open_invite_payload(update, context)
+    if invite_state is not None:
+        # Ссылка обработана: конструктор площадки или отказ. WIP-пост не
+        # трогается; сообщение с командой обработчик убирает сам.
+        return invite_state
     await render_main_menu(update, context)
     # Сообщение с командой — временный ввод: меню уже на экране, убираем
     # его best-effort (при сбое очистки диалог не ломается)
     await screen.drop_user_input(update, context)
+    return ConversationHandler.END
 
 
 def help_text() -> str:
@@ -422,7 +434,7 @@ def main_menu_handlers() -> list[BaseHandler]:
     стоят ПОСЛЕ команд и callback'ов — они не перехватывают ни их, ни
     состояния диалогов (ConversationHandler'ы идут первой группой в bot.py).
     """
-    handlers = [
+    handlers: list[BaseHandler] = [
         CommandHandler("start", start),
         CommandHandler("help", help_command),
         CallbackQueryHandler(handle_main_menu_selection, pattern=r"^main_menu$"),

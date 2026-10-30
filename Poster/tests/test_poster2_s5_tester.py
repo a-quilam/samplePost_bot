@@ -183,7 +183,7 @@ class Migration17Tests(unittest.TestCase):
         run_migrations(self.engine)
         versions = self._journal()
         self.assertIn((17, "archive_legacy_drafts"), versions)
-        self.assertEqual(versions[-1], (LATEST_VERSION, "builtin_templates_v4"))
+        self.assertEqual(versions[-1], (LATEST_VERSION, "place_invite_links"))
 
         for _ in range(2):
             run_migrations(self.engine)
@@ -229,7 +229,7 @@ class Migration17Tests(unittest.TestCase):
         self.assertNotIn("drafts", tables)
         self.assertNotIn("legacy_drafts_backup", tables)
         self.assertIn((17, "archive_legacy_drafts"), self._journal())
-        self.assertEqual(self._journal()[-1], (LATEST_VERSION, "builtin_templates_v4"))
+        self.assertEqual(self._journal()[-1], (LATEST_VERSION, "place_invite_links"))
 
 
 # —— описание кирпичика ------------------------------------------------------

@@ -58,6 +58,7 @@ from template_state import clear_template_session
 from user_store import get_or_create_user
 from utils import screen
 from utils import tg_context as ctx
+from utils.deep_links import deep_link
 from utils.place_labels import place_title
 from utils.ui_texts import tr, tr_safe
 
@@ -104,6 +105,8 @@ PHASES = {
     "manage_search_results",
     "manage_card",
     "manage_admin_request",
+    # Poster 2.2 U4b: ссылка на создание анонса площадки.
+    "manage_invite",
 }
 
 
@@ -813,6 +816,26 @@ async def _render_phase(
                     ),
                     superadmin=is_superadmin(telegram_user_id),
                 )
+        elif phase == "manage_invite":
+            place_id = state.get("place_id")
+            details = (
+                get_place_details(session, int(place_id))
+                if isinstance(place_id, int)
+                else None
+            )
+            if details is None:
+                state.clear()
+                state.update(_new_manage())
+                notice = notice or "Место не существует или было удалено."
+                text, keyboard = _manage_list_content(session, state)
+            else:
+                text, keyboard = await _invite_content(
+                    context,
+                    session,
+                    details,
+                    telegram_user_id=telegram_user_id,
+                    regenerated=bool(state.get("invite_regenerated")),
+                )
         elif phase == "manage_admin_request":
             place_id = state.get("place_id")
             details = (
@@ -1214,7 +1237,13 @@ def _new_pick() -> dict:
 
 
 MANAGE_LIST_PHASES = frozenset(
-    {"manage_list", "manage_search_input", "manage_search_results", "manage_card"}
+    {
+        "manage_list",
+        "manage_search_input",
+        "manage_search_results",
+        "manage_card",
+        "manage_invite",
+    }
 )
 
 # Фазы, которые существуют только в справочнике «Управление → Площадки».
@@ -1424,6 +1453,15 @@ def _manage_card_content(
                 )
             ]
         )
+        # Poster 2.2 U4b: ссылка на создание анонса — только управляющему.
+        rows.append(
+            [
+                InlineKeyboardButton(
+                    tr("buttons.places.invite"),
+                    callback_data=f"plm_invite:{details.place_id}",
+                )
+            ]
+        )
     if superadmin:
         rows.append(
             [
@@ -1444,6 +1482,61 @@ def _manage_card_content(
         )
     rows.append([InlineKeyboardButton("◀️ К списку", callback_data="plm_back")])
     rows.append([InlineKeyboardButton("🏠 Главное меню", callback_data="main_menu")])
+    return "\n".join(lines), InlineKeyboardMarkup(rows)
+
+
+async def _invite_content(
+    context: ContextTypes.DEFAULT_TYPE,
+    session: Session,
+    details: PlaceDetails,
+    *,
+    telegram_user_id: int,
+    regenerated: bool = False,
+) -> tuple[str, InlineKeyboardMarkup]:
+    """
+    Экран ссылки на создание анонса площадки (Poster 2.2 U4b).
+
+    Ссылка показывается текстом; превью ссылки отключено самим экраном
+    (`render_screen` передаёт `LinkPreviewOptions(is_disabled=True)`).
+    Перевыпуск отзывает прежний токен — об этом говорит плашка, новая ссылка
+    уже в тексте.
+    """
+    lines: list[str] = []
+    if regenerated:
+        lines.append(tr("places.invite.regenerated"))
+        lines.append("")
+    lines.append(tr("places.invite.title", place=details.canonical_name))
+    lines.append("")
+
+    from place_invite_store import PlaceInviteError, ensure_invite
+
+    token: str | None = None
+    try:
+        token = ensure_invite(
+            session,
+            actor_telegram_user_id=telegram_user_id,
+            place_id=details.place_id,
+        ).token
+    except PlaceInviteError as exc:
+        logger.info("Ссылка для площадки %s не выдана: %s", details.place_id, exc)
+    link = await deep_link(context, token) if token else None
+    lines.append(
+        tr("places.invite.link", link=link) if link else tr("places.invite.no_link")
+    )
+    rows = [
+        [
+            InlineKeyboardButton(
+                tr("buttons.places.invite_regenerate"),
+                callback_data=f"plm_invite_regen:{details.place_id}",
+            )
+        ],
+        [
+            InlineKeyboardButton(
+                "◀️ К карточке", callback_data=f"plm_card:{details.place_id}"
+            )
+        ],
+        [InlineKeyboardButton(tr("buttons.nav.main_menu"), callback_data="main_menu")],
+    ]
     return "\n".join(lines), InlineKeyboardMarkup(rows)
 
 
@@ -1800,6 +1893,120 @@ async def handle_manage_edit(
     from handlers.admin import open_place_admin_editor
 
     await open_place_admin_editor(update, context, place_id)
+
+
+async def handle_manage_invite(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> None:
+    """
+    «🔗 Ссылка для создания анонса»: экран ссылки (Poster 2.2 U4b).
+
+    Права проверяются по БД заново: подделанная кнопка по чужой площадке
+    получает отказ, и ссылка не выдаётся. Повторное открытие раздела не
+    создаёт дублей — `ensure_invite` возвращает действующую ссылку.
+    """
+    query = ctx.query(update)
+    state = load_place_session(ctx.user(update).id)
+    if state is None or state.get("phase") != "manage_card":
+        await query.answer(tr("errors.stale.manage"), show_alert=True)
+        return
+    place_id = _parse_prefixed_id(query.data or "", "plm_invite:")
+    if place_id is None or state.get("place_id") != place_id:
+        await query.answer(tr("errors.stale.manage"), show_alert=True)
+        return
+    user_id = ctx.user(update).id
+    session = SessionLocal()
+    try:
+        details = get_place_details(session, place_id)
+        allowed = details is not None and can_manage_place(session, user_id, place_id)
+    finally:
+        session.close()
+    if details is None:
+        await query.answer("Место не существует или удалено.", show_alert=True)
+        return
+    if not allowed:
+        await query.answer(tr("places.invite.no_rights"), show_alert=True)
+        return
+    await query.answer()
+    state["phase"] = "manage_invite"
+    state["place_id"] = place_id
+    state.pop("invite_regenerated", None)
+    await _render_phase(update, context, state)
+
+
+async def handle_manage_invite_regenerate(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> None:
+    """«🔁 Перевыпустить»: старый токен отзывается, выдаётся новый."""
+    query = ctx.query(update)
+    state = load_place_session(ctx.user(update).id)
+    if state is None or state.get("phase") != "manage_invite":
+        await query.answer(tr("errors.stale.manage"), show_alert=True)
+        return
+    place_id = _parse_prefixed_id(query.data or "", "plm_invite_regen:")
+    if place_id is None or state.get("place_id") != place_id:
+        await query.answer(tr("errors.stale.manage"), show_alert=True)
+        return
+    user_id = ctx.user(update).id
+    from place_invite_store import PlaceInvitePermissionError, regenerate_invite
+
+    session = SessionLocal()
+    details = None
+    refused = True
+    try:
+        details = get_place_details(session, place_id)
+        if details is not None and can_manage_place(session, user_id, place_id):
+            regenerate_invite(
+                session, actor_telegram_user_id=user_id, place_id=place_id
+            )
+            refused = False
+    except PlaceInvitePermissionError:
+        refused = True
+    finally:
+        session.close()
+    if refused:
+        await query.answer(
+            (
+                tr("places.invite.no_rights")
+                if details is not None
+                else "Место не существует или удалено."
+            ),
+            show_alert=True,
+        )
+        return
+    await query.answer("Ссылка перевыпущена")
+    state["invite_regenerated"] = True
+    await _render_phase(update, context, state)
+
+
+async def handle_manage_card(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> None:
+    """«◀️ К карточке» с экрана ссылки: возврат в карточку площадки."""
+    query = ctx.query(update)
+    state = load_place_session(ctx.user(update).id)
+    if state is None or state.get("phase") != "manage_invite":
+        await query.answer(tr("errors.stale.manage"), show_alert=True)
+        return
+    place_id = _parse_prefixed_id(query.data or "", "plm_card:")
+    if place_id is None or state.get("place_id") != place_id:
+        await query.answer(tr("errors.stale.manage"), show_alert=True)
+        return
+    await query.answer()
+    state["phase"] = "manage_card"
+    state.pop("invite_regenerated", None)
+    await _render_phase(update, context, state)
+
+
+def _parse_prefixed_id(data: str, prefix: str) -> int | None:
+    """Целое после префикса callback'а (None — кнопка испорчена)."""
+    if not data.startswith(prefix):
+        return None
+    try:
+        value = int(data[len(prefix) :])
+    except (TypeError, ValueError):
+        return None
+    return value if value > 0 else None
 
 
 async def handle_manage_admins(
@@ -2906,6 +3113,11 @@ def places_handlers() -> list[BaseHandler]:
         CallbackQueryHandler(handle_manage_back, pattern=r"^plm_back$"),
         CallbackQueryHandler(handle_manage_open, pattern=r"^plm_open:\d+$"),
         CallbackQueryHandler(handle_manage_edit, pattern=r"^plm_edit:\d+$"),
+        CallbackQueryHandler(handle_manage_invite, pattern=r"^plm_invite:\d+$"),
+        CallbackQueryHandler(
+            handle_manage_invite_regenerate, pattern=r"^plm_invite_regen:\d+$"
+        ),
+        CallbackQueryHandler(handle_manage_card, pattern=r"^plm_card:\d+$"),
         CallbackQueryHandler(handle_manage_admins, pattern=r"^plm_admins:\d+$"),
         CallbackQueryHandler(
             handle_manage_admin_request, pattern=r"^plm_admin_request:\d+$"

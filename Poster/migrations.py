@@ -3162,6 +3162,54 @@ MIGRATION_22_BUILTIN_TEMPLATES_V4 = Migration(
 )
 
 
+# --- Версия 23: ссылки «создать анонс площадки» (Poster 2.2 U4b) -------------
+#
+# Админ площадки (или суперадмин) показывает ссылку
+# `https://t.me/<бот>?start=<token>`; открывший её сразу попадает в
+# конструктор анонса этой площадки. Токен случайный и не связан с `place_id`:
+# перебрать площадки по ссылке нельзя.
+#
+# Ограничения:
+# - `token` непустой и уникален (UNIQUE);
+# - одна ДЕЙСТВУЮЩАЯ ссылка на площадку (частичный уникальный индекс по
+#   `revoked_at IS NULL`); перевыпуск отзывает прежнюю строку;
+# - `place_id` — каскадное удаление вместе с площадкой; автор —
+#   `SET NULL`, чтобы отозванная история переживала удаление автора.
+# Миграция только создаёт таблицу: существующие площадки ссылок не получают
+# (ссылка выдаётся по явному действию администратора).
+MIGRATION_23_PLACE_INVITE_LINKS = Migration(
+    version=23,
+    name="place_invite_links",
+    statements=(
+        """
+        CREATE TABLE place_invite_links (
+            id INTEGER NOT NULL PRIMARY KEY,
+            token VARCHAR(32) NOT NULL,
+            place_id INTEGER NOT NULL,
+            created_by_user_id INTEGER,
+            created_at DATETIME NOT NULL,
+            revoked_at DATETIME,
+            CONSTRAINT fk_place_invite_links_place_id
+                FOREIGN KEY (place_id) REFERENCES places (id)
+                ON DELETE CASCADE,
+            CONSTRAINT fk_place_invite_links_created_by_user_id
+                FOREIGN KEY (created_by_user_id) REFERENCES users (id)
+                ON DELETE SET NULL,
+            CONSTRAINT ck_place_invite_links_token_not_empty
+                CHECK (length(trim(token)) > 0)
+        )
+        """,
+        "CREATE UNIQUE INDEX ux_place_invite_links_token ON place_invite_links (token)",
+        "CREATE INDEX ix_place_invite_links_place_id ON place_invite_links (place_id)",
+        """
+        CREATE UNIQUE INDEX ux_place_invite_links_one_active
+            ON place_invite_links (place_id) WHERE revoked_at IS NULL
+        """,
+    ),
+    requires_tables=("places", "users"),
+)
+
+
 DEFAULT_MIGRATIONS: tuple[Migration, ...] = (
     MIGRATION_1_USERS_PLACES,
     MIGRATION_2_PLACE_CONTACTS_UI,
@@ -3185,6 +3233,7 @@ DEFAULT_MIGRATIONS: tuple[Migration, ...] = (
     MIGRATION_20_PROPOSAL_DESCRIPTION,
     MIGRATION_21_PLACE_CITY,
     MIGRATION_22_BUILTIN_TEMPLATES_V4,
+    MIGRATION_23_PLACE_INVITE_LINKS,
 )
 
 LATEST_VERSION = DEFAULT_MIGRATIONS[-1].version if DEFAULT_MIGRATIONS else 0

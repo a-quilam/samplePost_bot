@@ -464,6 +464,77 @@ def _session_details(user_id: int, draft_id: int):
         )
 
 
+def _active_place_draft(user_id: int, place_id: int):
+    """
+    Незавершённый черновик этого пользователя по этой площадке (U4b).
+
+    Повторное открытие ссылки на площадку должно ПРОДОЛЖАТЬ уже начатый
+    анонс, а не создавать второй черновик той же площадки. Завершённые
+    (отправленный анонс, `stage=completed`) и чужие черновики не
+    считаются: ссылка на площадку после отправки открывает новый анонс,
+    как и раньше. Из нескольких незавершённых берётся самый свежий.
+    """
+    with SessionLocal() as session:
+        drafts = list_announcement_drafts(session, actor_telegram_user_id=user_id)
+    for draft in drafts:
+        if draft.place_id != place_id:
+            continue
+        if draft.stage == WizardStage.COMPLETED:
+            continue
+        if draft.publication_status == PUBLICATION_STATUS_SENT:
+            continue
+        return draft
+    return None
+
+
+def _resume_question_brick(user_id: int, details) -> int | None:
+    """
+    Вопрос, на котором автор остановился: последний заполненный.
+
+    Так повторный вход по ссылке показывает уже введённое значение
+    («Текущее значение: …») вместо пустого вопроса, а «Далее» ведёт к
+    следующему незаполненному полю.
+    """
+    if details.stage != WizardStage.QUESTIONS:
+        return None
+    answered: int | None = None
+    for field in _askable_fields(_load_fields(user_id, details.draft_id)):
+        if field.status in {FIELD_STATUS_VALID, FIELD_STATUS_SKIPPED}:
+            answered = field.brick_id
+    return answered
+
+
+async def resume_place_announcement(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+    place_id: int,
+) -> int | None:
+    """
+    Продолжает незавершённый черновик площадки, если он есть (U4b).
+
+    Возвращает состояние диалога или None — тогда вызывающий открывает
+    новый черновик обычным путём. Используется входом по ссылке
+    `/start <token>`: та же площадка и уже начатый анонс → продолжение
+    с сохранёнными данными.
+    """
+    user_id = _user_id(update)
+    draft = _active_place_draft(user_id, place_id)
+    if draft is None:
+        return None
+    await _answer(update)
+    _end_foreign_conversations(update, context)
+    _clear_other_sessions(user_id)
+    await _reanchor(update, context)
+    # R1, дефект №23: вход в конструктор — актуальный UI, без reply-клавиатур.
+    await screen.drop_legacy_reply_keyboard(update, context)
+    return await _open_draft(
+        update,
+        context,
+        draft.draft_id,
+        active_brick_id=_resume_question_brick(user_id, draft),
+    )
+
+
 def _guard_details(
     update: Update,
     context: ContextTypes.DEFAULT_TYPE,
@@ -1062,6 +1133,9 @@ async def _open_draft(
     update: Update,
     context: ContextTypes.DEFAULT_TYPE,
     draft_id: int,
+    *,
+    active_brick_id: int | None = None,
+    notice: str | None = None,
 ) -> int:
     user_id = _user_id(update)
     try:
@@ -1076,7 +1150,23 @@ async def _open_draft(
 
     ui = _fresh_ui()
     _set_details(ui, details)
+    # U4b: повторное открытие ссылки возвращает к вопросу с последним
+    # сохранённым ответом — человек видит свои данные, а не пустой вопрос.
+    if active_brick_id is not None:
+        ui["active_brick_id"] = active_brick_id
     ctx.data(context)["announcement_ui"] = ui
+    return await _render_draft_stage(update, context, details, notice=notice)
+
+
+async def _render_draft_stage(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+    details,
+    *,
+    notice: str | None = None,
+) -> int:
+    """Экран сохранённого черновика по его этапу (общий для всех входов)."""
+    ui = _ui(context)
     stage = details.stage
     if stage == WizardStage.PLACE:
         ui["place"].update(
@@ -1087,16 +1177,16 @@ async def _open_draft(
                 "return_phase": "hub",
             }
         )
-        return await _render_place_card(update, context)
+        return await _render_place_card(update, context, notice=notice)
     if stage == WizardStage.TEMPLATE:
-        return await _render_template_screen(update, context, details)
+        return await _render_template_screen(update, context, details, notice=notice)
     if stage == WizardStage.QUESTIONS:
-        return await _enter_questions(update, context, details)
+        return await _enter_questions(update, context, details, notice=notice)
     if stage == WizardStage.EXTRAS:
-        return await _render_extras(update, context, details)
+        return await _render_extras(update, context, details, notice=notice)
     if details.publication_status not in {None, PUBLICATION_STATUS_SENT}:
-        return await _render_publish_status(update, context, details)
-    return await _render_preview(update, context, details)
+        return await _render_publish_status(update, context, details, notice=notice)
+    return await _render_preview(update, context, details, notice=notice)
 
 
 async def _confirm_place(
@@ -6195,6 +6285,19 @@ async def _render_my_announcements(
 
 
 async def _command_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """
+    `/start` внутри активного конструктора.
+
+    Обычный `/start` закрывает конструктор и показывает меню; deep-link
+    payload (передача прав или ссылка на создание анонса площадки)
+    обрабатывается по общим правилам, иначе открытие ссылки внутри диалога
+    молча возвращало бы в меню (Poster 2.2 U4b).
+    """
+    from handlers.place_invite import open_invite_payload
+
+    invite_state = await open_invite_payload(update, context)
+    if invite_state is not None:
+        return invite_state
     return await _exit_to_main_menu(update, context)
 
 
@@ -6299,6 +6402,8 @@ async def handle_pick_callback(
 
 
 def announcement_wizard_handlers() -> list[BaseHandler]:
+    from handlers.place_invite import invite_start_handler
+
     text_handler = MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text)
     photo_handler = MessageHandler(filters.PHOTO, handle_photo)
     states: dict[object, list[Any]] = {
@@ -6341,6 +6446,10 @@ def announcement_wizard_handlers() -> list[BaseHandler]:
             # конструктор — entry-точки, поэтому состояние диалога ведётся.
             CallbackQueryHandler(handle_pick_callback, pattern=r"^(pl|tp)_pick:\d+$"),
             CallbackQueryHandler(open_my_announcements, pattern=r"^my_announcements$"),
+            # Poster 2.2 U4b: ссылка `/start <token>` открывает конструктор
+            # сразу — только как entry-point диалога он продолжит принимать
+            # ответы на вопросы.
+            invite_start_handler(),
         ],
         states=states,
         fallbacks=[

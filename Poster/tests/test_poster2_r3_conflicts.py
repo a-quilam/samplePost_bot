@@ -1190,10 +1190,10 @@ class ConflictMigrationTests(unittest.TestCase):
         self.addCleanup(self.engine.dispose)
         self.addCleanup(shutil.rmtree, os.path.dirname(self.path), True)
 
-    def test_latest_version_is_twenty_two(self) -> None:
+    def test_latest_version_is_twenty_three(self) -> None:
         # U1a добавил 21 (`place_city`) и 22 (`builtin_templates_v4`)
         # поверх R4-овской 20; все применяются штатно.
-        self.assertEqual(LATEST_VERSION, 22)
+        self.assertEqual(LATEST_VERSION, 23)
 
     def test_migration_19_on_filled_database_keeps_data(self) -> None:
         from sqlalchemy import text

@@ -24,7 +24,6 @@ from __future__ import annotations
 import logging
 from datetime import datetime
 from html import escape as html_escape
-from urllib.parse import quote
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -678,18 +677,10 @@ def _incoming_transfer_content(
 
 
 async def _deep_link(context: ContextTypes.DEFAULT_TYPE, payload: str) -> str | None:
-    """Ссылка t.me/<bot>?start=...; username бота не секрет."""
-    username = getattr(context.bot, "username", None)
-    if not username:
-        try:
-            me = await context.bot.get_me()
-            username = getattr(me, "username", None)
-        except Exception as e:  # noqa: BLE001 — без username ссылку не показать
-            logger.error("Не удалось получить username бота для ссылки: %s", e)
-            return None
-    if not username:
-        return None
-    return f"https://t.me/{username}?start={quote(payload, safe='')}"
+    """Ссылка t.me/<bot>?start=...; username бота не секрет (utils.deep_links)."""
+    from utils.deep_links import deep_link
+
+    return await deep_link(context, payload)
 
 
 async def _send_user_notification(

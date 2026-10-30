@@ -126,6 +126,19 @@ def expected_domain_errors() -> tuple[type[BaseException], ...]:
         add(AnnouncementError, AnnouncementActorError)
     except Exception:  # noqa: BLE001
         logger.debug("Классификация ошибок анонсов недоступна", exc_info=True)
+    try:  # ссылки «создать анонс площадки» (U4b)
+        from place_invite_store import (
+            PlaceInviteError,
+            PlaceInvitePermissionError,
+        )
+
+        # Оба исключения слоя ссылок — доменные: гонка прав между проверкой
+        # в обработчике и повторной проверкой при отрисовке, удалённая
+        # площадка, редкая одновременная запись. Это не сбой кода, поэтому
+        # пользователю нужен понятный fallback, а не «внутренняя ошибка».
+        add(PlaceInviteError, PlaceInvitePermissionError)
+    except Exception:  # noqa: BLE001
+        logger.debug("Классификация ошибок ссылок площадки недоступна", exc_info=True)
 
     _expected_error_types = tuple(types)
     return _expected_error_types
