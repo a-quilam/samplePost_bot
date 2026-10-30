@@ -59,6 +59,7 @@ try:
         capture_text,
         escape_html,
         sanitize_html,
+        strip_link_tags,
     )
 
     INTEGRATION_IMPORT_ERROR = HARNESS_IMPORT_ERROR
@@ -173,6 +174,73 @@ class SafeHtmlSeamTests(unittest.TestCase):
 
     def test_sanitize_escapes_loose_specials(self) -> None:
         self.assertEqual(str(sanitize_html("a < b & c > d")), "a &lt; b &amp; c &gt; d")
+
+    def test_url_value_as_link_label_keeps_single_anchor(self) -> None:
+        """U1b-fix: подпись-ссылка не даёт вложенных `<a>` (Telegram их отвергает)."""
+        from template_compiler import (  # noqa: PLC0415 — локальный импорт теста
+            TEMPLATE_SECTION_BODY,
+            render_announcement,
+        )
+        from template_parser import BrickNode, FormatNode, LinkNode, parse_template
+
+        tokens = parse_template(
+            "[main](https://example.com)", section=TEMPLATE_SECTION_BODY
+        )
+
+        def bind(nodes: list[Any]) -> None:
+            for node in nodes:
+                if isinstance(node, BrickNode):
+                    node.brick_id = 1
+                elif isinstance(node, LinkNode):
+                    bind(list(node.label))
+                elif isinstance(node, FormatNode):
+                    bind(list(node.children))
+
+        bind(cast(list[Any], tokens))
+        value = sanitize_html(
+            '<a href="https://example.com/x">https://example.com/x</a> и <b>жир</b>'
+        )
+        rendered = render_announcement(
+            {TEMPLATE_SECTION_BODY: tokens},
+            {1: value},
+            {1: self._definition()},
+        )
+        self.assertEqual(len(re.findall(r"<a\b", rendered)), 1, rendered)
+        self.assertEqual(rendered.count("</a>"), 1, rendered)
+        self.assertIn('<a href="https://example.com">', rendered)
+        self.assertIn("https://example.com/x", rendered)
+        self.assertIn("<b>жир</b>", rendered)
+
+
+class StripLinkTagsTests(unittest.TestCase):
+    """
+    U1b-fix: `<a>` снимается из подписи ссылки, остальная разметка цела.
+
+    Значение с URL-entity содержит собственную ссылку; в подписи шаблонной
+    ссылки `[код](url)` это давало вложенные `<a>`, и Telegram отклонял пост.
+    """
+
+    def test_removes_anchor_tags_but_keeps_text(self) -> None:
+        self.assertEqual(
+            strip_link_tags('<a href="https://e.com/x">https://e.com/x</a>'),
+            "https://e.com/x",
+        )
+
+    def test_keeps_other_markup_and_entities(self) -> None:
+        cleaned = strip_link_tags(
+            '<a href="https://e.com">т</a> <b>жир</b> &amp; <code>a&lt;b</code>'
+        )
+        self.assertEqual(cleaned, "т <b>жир</b> &amp; <code>a&lt;b</code>")
+        self.assertNotIn("<a", cleaned)
+        self.assertNotIn("</a>", cleaned)
+
+    def test_no_anchor_is_unchanged(self) -> None:
+        plain = "<b>x</b> &amp; <i>y</i>"
+        self.assertEqual(strip_link_tags(plain), plain)
+
+    def test_stray_closing_tag_is_removed(self) -> None:
+        # Закрывающий тег без пары не должен «съесть» текст.
+        self.assertEqual(strip_link_tags("a</a>b"), "ab")
 
 
 class CaptureTests(unittest.TestCase):
@@ -386,6 +454,37 @@ class MutationCaptureTests(unittest.TestCase):
         await h.callback(_callback(h, "aw_qgoto"))
         self.assertNotIn("<img", h.screen()["text"])
         self.assertIn("<b>ok</b>", h.screen()["text"])
+
+    @scenario_test
+    async def test_url_label_value_does_not_nest_links(self, h):
+        """
+        U1b-fix: значение-ссылка как подпись шаблонной ссылки — без вложенных <a>.
+
+        До фикса `[main](https://example.com)` с ответом-URL давал
+        `<a href="…"><a href="…">…</a></a>`; Telegram отклоняет такой пост
+        («nested links»), и пользователь не мог опубликовать анонс.
+        """
+        await h.text("/start")
+        place_id, _alias = _seed_place(h)
+        template_id, _revision, bricks = _seed_personal_template(
+            h,
+            name="Ссылка в подписи",
+            specs=[("main", "Основное", "short_text", {})],
+            body="[main](https://example.com)",
+        )
+        await _start_to_template(h, place_id)
+        await _choose_personal(h, template_id)
+        await h.text(
+            "https://example.com/x",
+            entities=[ent(MessageEntity.URL, 0, 21)],
+        )
+
+        live = _live_text(h)
+        self.assertEqual(len(re.findall(r"<a\b", live)), 1, live)
+        self.assertEqual(live.count("</a>"), 1, live)
+        # Внешняя ссылка — из шаблона, текст подписи сохранён.
+        self.assertIn('<a href="https://example.com">', live)
+        self.assertIn("https://example.com/x", live)
 
 
 LONG_TEXT_LENGTH = 4000

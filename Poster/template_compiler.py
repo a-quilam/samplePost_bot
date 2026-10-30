@@ -57,7 +57,7 @@ from template_types import (
     TEMPLATE_SECTION_FOOTER,
     TEMPLATE_SECTION_HEADER,
 )
-from utils.tg_html import SafeHtml, utf16_len
+from utils.tg_html import SafeHtml, strip_link_tags, utf16_len
 from utils.validators import normalize_url
 
 _SECTION_ORDER = (
@@ -400,7 +400,13 @@ def _section_html(
                 url = _normalize_render_url(node.url)
             if not url:
                 return label
-            return f'<a href="{_escape_html(url, quote=True)}">{label}</a>'
+            # U1b-fix: значение с URL-entity уже содержит <a>; в подписи
+            # ссылки оставляем внешнюю обёртку — вложенные ссылки Telegram
+            # отклоняет. Текст подписи и прочая разметка сохраняются.
+            return (
+                f'<a href="{_escape_html(url, quote=True)}">'
+                f"{strip_link_tags(label)}</a>"
+            )
         if isinstance(node, FormatNode):
             inner = _visit_token_list(node.children)
             tag = _FORMAT_TAGS.get(node.marker)
