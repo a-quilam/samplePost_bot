@@ -39,6 +39,7 @@ try:
         DEFAULT_USER_ID,
         HARNESS_IMPORT_ERROR,
         frozen_today,
+        is_live_record,
         scenario_test,
     )
     from user_store import get_or_create_user
@@ -207,9 +208,7 @@ class CalendarOnQuestionTests(unittest.TestCase):
             live = [
                 call
                 for call in h.calls
-                if call.get("disable_web_page_preview") is False
-                and call["type"] in {"message", "edit_message"}
-                and call.get("reply_markup") is None
+                if is_live_record(call) and call.get("reply_markup") is None
             ]
             self.assertTrue(live, "живой блок анонса не отправлен")
             self.assertIn(chosen.strftime("%d.%m.%Y"), live[-1].get("text") or "")

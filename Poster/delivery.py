@@ -31,9 +31,16 @@ import logging
 from collections.abc import Awaitable, Callable, Sequence
 from typing import Any
 
-from telegram import InputMediaPhoto
+from telegram import InputMediaPhoto, LinkPreviewOptions
 
 logger = logging.getLogger(__name__)
+
+# U1b: превью ссылок выключено и в живом блоке, и в готовом анонсе.
+# Экземпляры разные (но равные по значению): для Telegram они означают одно
+# и то же, а журнал FakeBot/тесты по идентичности объекта отличают живой
+# предпросмотр от итоговой доставки, не заглядывая в БД.
+LIVE_LINK_PREVIEW = LinkPreviewOptions(is_disabled=True)
+FINAL_LINK_PREVIEW = LinkPreviewOptions(is_disabled=True)
 
 # Лимиты Telegram для одного анонса (после разбора entities, т.е. по
 # видимому тексту). Без фото — обычное сообщение, с фото — подпись.
@@ -190,10 +197,11 @@ async def send_announcement_post(
     вызывается после каждой подтверждённой Telegram операции, поэтому
     запись в БД не опережает реальную отправку.
 
-    `live` помечает верхний блок конструктора (`disable_web_page_preview=
-    False`): payload тот же, отличается только маркер «это ещё не готовый
-    пост», по которому служебный экран (`True`) и доставка (без маркера)
-    отличаются от живого предпросмотра.
+    `live` помечает верхний блок конструктора: payload тот же, отличается
+    только маркер «это ещё не готовый пост» (`LIVE_LINK_PREVIEW`), по которому
+    служебный экран (свои отключённые превью) и итоговая доставка
+    (`FINAL_LINK_PREVIEW`) отличаются от живого предпросмотра. Превью ссылок
+    выключено в обоих случаях (U1b).
     """
     file_ids = [str(item) for item in photos if item]
     batches = media_batches(len(file_ids))
@@ -274,7 +282,9 @@ async def send_announcement_post(
                 chat_id=chat_id,
                 text=text,
                 parse_mode="HTML",
-                **({"disable_web_page_preview": False} if live else {}),
+                link_preview_options=(
+                    LIVE_LINK_PREVIEW if live else FINAL_LINK_PREVIEW
+                ),
             )
         )
         return sent

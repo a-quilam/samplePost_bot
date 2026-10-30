@@ -44,6 +44,7 @@ try:
     import admin_state as admin_state_module
     import bot as bot_module
     import brick_state as brick_state_module
+    import delivery as delivery_module
     import errors as errors_module
     import handlers.admin as admin_module
     import handlers.announcement_wizard as announcement_wizard_module
@@ -376,37 +377,65 @@ def make_photo_update(
 
 
 # Ключи записей ПРЯМЫХ send_message из send_post (и его частей): ровно
-# chat_id/text/parse_mode[/reply_markup], без «лишних» параметров. Ответы
-# бота на сообщения пользователя (Message.reply_text) всегда передают
-# полный пакет параметров (reply_parameters, entities, read_timeout, ...) —
-# по этому набору ключей пост и отличается от ответа/лид-сообщения
-# (у лид-сообщения нет parse_mode вовсе).
+# chat_id/text/parse_mode/link_preview_options[/reply_markup], без «лишних»
+# параметров. Ответы бота на сообщения пользователя (Message.reply_text)
+# всегда передают полный пакет параметров (reply_parameters, entities,
+# read_timeout, ...) — по этому набору ключей пост и отличается от
+# ответа/лид-сообщения (у лид-сообщения нет parse_mode вовсе).
 POST_MESSAGE_KEYS = frozenset(
-    {"type", "args", "chat_id", "text", "parse_mode", "reply_markup"}
+    {
+        "type",
+        "args",
+        "chat_id",
+        "text",
+        "parse_mode",
+        "reply_markup",
+        "link_preview_options",
+    }
 )
 
-# ЭКРАН (utils/screen.render_screen): тот же send_message, что и у поста,
-# плюс маркер disable_web_page_preview=True — по нему экран и отличается
-# от поста (send_post этот параметр не передаёт).
+
+# ЭКРАН (utils/screen.render_screen), ЖИВОЙ БЛОК (delivery, live=True),
+# ГОТОВЫЙ ПОСТ (delivery, live=False) и ЛИЧНОЕ УВЕДОМЛЕНИЕ
+# (handlers.admin._send_user_notification) отличаются ОБЪЕКТОМ
+# `link_preview_options`: у каждого свой экземпляр LinkPreviewOptions.
+# Для Telegram они равнозначны (превью выключено везде — U1b), а тестам
+# дают устойчивый маркер вида записи без осмотра БД. Уведомление — не
+# экран и не пост: у него свой адресат, и `screen_text()` его не видит
+# (раньше он совпадал с экраном по флагу и подменял текст экрана).
+
+
+def is_notification_record(record: dict) -> bool:
+    """Личное уведомление (передача прав, ошибка) — не экран и не пост."""
+    if record["type"] not in ("message", "edit_message"):
+        return False
+    return record.get("link_preview_options") is admin_module.NOTIFICATION_LINK_PREVIEW
 
 
 def is_screen_record(record: dict) -> bool:
-    """
-    Экран (постоянное сообщение управления): send или edit с маркером
-    disable_web_page_preview=True. Значение важно: PTB передаёт этот ключ
-    (со значением None) во всех Message.reply_* — различаем именно True.
-    """
-    if record.get("disable_web_page_preview") is not True:
+    """Экран (постоянное сообщение управления): send или edit с маркером экрана."""
+    if record.get("link_preview_options") is not screen_module.SCREEN_LINK_PREVIEW:
         return False
     return record["type"] in ("message", "edit_message")
 
 
+def is_live_record(record: dict) -> bool:
+    """Живой верхний блок конструктора: тот же payload, но ещё не готовый пост."""
+    if record["type"] not in ("message", "edit_message"):
+        return False
+    return record.get("link_preview_options") is delivery_module.LIVE_LINK_PREVIEW
+
+
 def is_post_message(record: dict) -> bool:
-    """Сообщение поста (превью/готовый пост), а не ответ на сообщение юзера."""
+    """Сообщение готового поста (не живой блок), а не ответ на сообщение юзера."""
     return (
         record["type"] == "message"
         and "parse_mode" in record
         and frozenset(record) <= POST_MESSAGE_KEYS
+        and record.get("link_preview_options") is not delivery_module.LIVE_LINK_PREVIEW
+        and record.get("link_preview_options") is not screen_module.SCREEN_LINK_PREVIEW
+        and record.get("link_preview_options")
+        is not admin_module.NOTIFICATION_LINK_PREVIEW
     )
 
 

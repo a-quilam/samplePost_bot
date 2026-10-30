@@ -55,10 +55,13 @@ from announcement_wizard import (
     snapshot_brick_ids_by_code,
     snapshot_section,
     snapshot_tokens_by_section,
+    visible_announcement_text,
     visible_brick_issue,
 )
 from brick_store import BrickDefinition, get_visible_brick
 from brick_types import (
+    BRICK_TYPE_LONG_TEXT,
+    BRICK_TYPE_SHORT_TEXT,
     BrickValueResult,
     BrickValueStatus,
     validate_brick_value,
@@ -98,6 +101,7 @@ from template_types import (
     TEMPLATE_SECTION_FOOTER,
     TEMPLATE_SECTION_HEADER,
 )
+from utils.tg_html import escape_html, sanitize_html
 
 _UNSET = object()
 
@@ -348,6 +352,10 @@ class AnnouncementFieldState:
     # Poster 2.0 S5: инструкция автора кирпичика для экрана вопроса. Только
     # подсказка интерфейса — в текст анонса и в шаблон не попадает.
     description: str | None = None
+    # U1b: сохранённый HTML значения (только безопасный allow-list). Экран
+    # редактирования показывает значение с форматированием, чтобы его можно
+    # было прочитать и скопировать. `None` — старая запись без HTML.
+    raw_html: str | None = None
 
     @property
     def is_filled(self) -> bool:
@@ -646,6 +654,24 @@ def _decode_value(row: AnnouncementValue) -> AnnouncementValueDetails:
         raise AnnouncementSnapshotError(
             f"Значение кирпичика #{row.brick_id} должно быть JSON-объектом."
         )
+    # U1b: HTML значения приходит из БД и потому не доверяется. Allow-list
+    # применяется при каждом чтении (defense-in-depth): подделанная строка
+    # с <script>/onclick не дойдёт до отправки. Старые записи без `html`
+    # остаются валидными и рендерятся экранированным текстом.
+    html = payload.get("html")
+    if html is not None:
+        if not isinstance(html, str):
+            raise AnnouncementSnapshotError(
+                f"Значение кирпичика #{row.brick_id} содержит некорректный HTML."
+            )
+        safe = sanitize_html(html)
+        if visible_announcement_text(str(safe)):
+            payload["html"] = str(safe)
+        else:
+            # HTML без видимого текста (`""`, `<b></b>`) не источник значения:
+            # plain-текст — источник истины, иначе живой блок и готовый пост
+            # оказались бы пустыми при непустом значении (U1b-fix).
+            payload.pop("html", None)
     return AnnouncementValueDetails(
         brick_id=row.brick_id,
         status=BrickValueStatus.VALID,
@@ -819,6 +845,16 @@ def _encode_value(
     *,
     today: date | None,
 ) -> tuple[str, str | None]:
+    """
+    Нормализует значение и сериализует его в `value_json`.
+
+    Текст кирпичика хранится вместе с уже безопасным HTML-представлением:
+    `{"text": plain, "html": safe_html}`. `text` — источник истины для
+    валидации, длины и сравнений; `html` пишется ТОЛЬКО кодировщиком
+    `entities_to_html` (см. `FormattedText`) и перепроверяется allow-list
+    перед записью. Старые строки без `html` читаются как раньше и
+    рендерятся экранированным текстом — миграция данных не нужна.
+    """
     result = validate_brick_value(
         definition.value_type,
         raw,
@@ -827,7 +863,21 @@ def _encode_value(
         today=today,
     )
     if result.status is BrickValueStatus.VALID:
-        payload = result.payload or {}
+        payload = dict(result.payload or {})
+        html = getattr(raw, "html", None)
+        if (
+            definition.value_type in (BRICK_TYPE_SHORT_TEXT, BRICK_TYPE_LONG_TEXT)
+            and isinstance(payload.get("text"), str)
+            and html is not None
+        ):
+            sanitized = str(sanitize_html(html))
+            # HTML без видимого текста не хранится (U1b-fix): источник истины
+            # — plain-текст, а пустая разметка (`<b></b>`) сделала бы анонс
+            # пустым при непустом значении.
+            if sanitized != escape_html(str(payload["text"])) and (
+                visible_announcement_text(sanitized)
+            ):
+                payload["html"] = sanitized
         return (
             "valid",
             json.dumps(payload, ensure_ascii=False, sort_keys=True),
@@ -2386,6 +2436,36 @@ def build_announcement_questions(
     )
 
 
+def _render_value(
+    definition: BrickDefinition, result: BrickValueResult
+) -> object | None:
+    """
+    Значение кирпичика в виде для компилятора шаблона (шов рендера U1b).
+
+    Для текстовых кирпичиков возвращается HTML с сохранённым форматированием
+    (`SafeHtml`), чтобы компилятор не экранировал разметку повторно. Если
+    HTML в записи нет (старая строка БД), возвращается обычный текст —
+    компилятор экранирует его сам, двойного экранирования не возникает.
+    Пустое/пропущенное значение — `None`.
+
+    HTML без видимого текста (`""`, `<b></b>`) источником значения не
+    считается (U1b-fix): plain-текст — источник истины, иначе анонс
+    рендерился как пустой и превращался в заглушку `.`.
+    """
+    if result.status is not BrickValueStatus.VALID:
+        return answer_payload_to_raw(result)
+    payload = result.payload or {}
+    if definition.value_type in (BRICK_TYPE_SHORT_TEXT, BRICK_TYPE_LONG_TEXT):
+        text = payload.get("text")
+        html = payload.get("html")
+        if isinstance(text, str) and isinstance(html, str):
+            safe = sanitize_html(html)
+            if visible_announcement_text(str(safe)):
+                return safe
+        return answer_payload_to_raw(result)
+    return answer_payload_to_raw(result)
+
+
 def build_announcement_render_payload(
     session: Session,
     *,
@@ -2435,14 +2515,13 @@ def build_announcement_render_payload(
 
     values_by_id: dict[int, object] = {}
     for value in details.values:
-        raw = answer_payload_to_raw(
-            BrickValueResult(
-                status=value.status,
-                payload=dict(value.payload) if value.payload is not None else None,
-            )
+        result = BrickValueResult(
+            status=value.status,
+            payload=dict(value.payload) if value.payload is not None else None,
         )
-        if raw is not None:
-            values_by_id[value.brick_id] = raw
+        rendered = _render_value(definitions[value.brick_id], result)
+        if rendered is not None:
+            values_by_id[value.brick_id] = rendered
     for brick_id, raw in place_context_values(
         display_name=row.place_display_name,
         address=row.place_address,
@@ -2504,6 +2583,7 @@ def build_announcement_fields(
         question = question_map.get(brick_id)
         value = details.value_for(brick_id)
         raw: object | None = None
+        raw_html: str | None = None
         if value is not None and value.status is BrickValueStatus.VALID:
             status = FIELD_STATUS_VALID
             raw = answer_payload_to_raw(
@@ -2512,6 +2592,9 @@ def build_announcement_fields(
                     payload=dict(value.payload) if value.payload is not None else None,
                 )
             )
+            stored_html = (value.payload or {}).get("html")
+            if isinstance(stored_html, str):
+                raw_html = stored_html
         elif value is not None and value.status is BrickValueStatus.EMPTY_OPTIONAL:
             status = FIELD_STATUS_SKIPPED
         elif question is not None:
@@ -2541,6 +2624,7 @@ def build_announcement_fields(
                     question.rules if question is not None else definition.rules
                 ),
                 description=definition.description,
+                raw_html=raw_html,
             )
         )
     return tuple(states)

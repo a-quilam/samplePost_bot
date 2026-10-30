@@ -56,6 +56,7 @@ try:
     from tests.integration_harness import (
         DEFAULT_USER_ID,
         HARNESS_IMPORT_ERROR,
+        is_live_record,
         scenario_test,
     )
     from tests.stage19a_helpers import make_engine, temp_db_path
@@ -911,12 +912,7 @@ class AnnouncementFromPlaceUiTests(unittest.TestCase):
         self.assertIn("Дом культуры · Москва", h.screen_text())
         await h.callback(f"pl_pick:{place_id}")
 
-        live = [
-            call
-            for call in h.calls
-            if call["type"] in {"message", "edit_message"}
-            and call.get("disable_web_page_preview") is False
-        ]
+        live = [call for call in h.calls if is_live_record(call)]
         self.assertTrue(live, "живой анонс не отправлен")
         html = live[-1].get("text") or ""
         self.assertIn(

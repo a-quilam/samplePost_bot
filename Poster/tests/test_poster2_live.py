@@ -32,6 +32,7 @@ try:
     from tests.integration_harness import (
         DEFAULT_USER_ID,
         HARNESS_IMPORT_ERROR,
+        is_live_record,
         scenario_test,
     )
     from user_store import get_or_create_user
@@ -97,14 +98,12 @@ def _details(h, draft_id: int):
 
 
 def _live_records(h) -> list[dict]:
-    """Сообщения/правки живого блока: HTML-предпросмотр без клавиатуры."""
+    """Сообщения/правки живого блока: HTML-предпросмотр без клавиатуры (U1b)."""
     records = []
     for call in h.calls:
         if call.get("reply_markup") is not None:
             continue
-        if call.get("disable_web_page_preview") is not False:
-            continue
-        if call["type"] not in {"message", "edit_message"}:
+        if not is_live_record(call):
             continue
         records.append(call)
     return records

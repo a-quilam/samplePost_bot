@@ -17,6 +17,7 @@ import unittest
 try:
     from tests.integration_harness import (
         HARNESS_IMPORT_ERROR,
+        is_screen_record,
         scenario_test,
     )
     from tests.test_stage27b_announcement_ui import (
@@ -75,7 +76,7 @@ def _screen_send_ids(h) -> set[int]:
         if call["type"] not in {"message", "photo", "media_group"}:
             continue
         index += 1
-        if call.get("disable_web_page_preview") is True:
+        if is_screen_record(call):
             out.add(100 + index)
     return out
 

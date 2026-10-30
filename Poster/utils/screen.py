@@ -13,7 +13,7 @@ best-effort — только после надёжного сохранения 
 - таблица user_states (SQLite) — message_id экрана и JSON-снимок WIP:
   выживает при рестарте процесса (см. models.UserState).
 
-Экраны шлются с disable_web_page_preview=True: сводка поста может
+Экраны шлются с LinkPreviewOptions(is_disabled=True): сводка поста может
 содержать ссылки, превью не должно раздувать интерфейсное сообщение.
 """
 
@@ -21,7 +21,7 @@ import json
 import logging
 from typing import Any
 
-from telegram import Message, ReplyKeyboardRemove
+from telegram import LinkPreviewOptions, Message, ReplyKeyboardRemove
 from telegram.error import TelegramError
 from telegram.ext import ContextTypes
 
@@ -30,6 +30,10 @@ from models import UserState, utcnow
 from utils import tg_context as ctx
 
 logger = logging.getLogger(__name__)
+
+# U1b: служебный экран не разворачивает превью ссылок (PTB 22.8: современная
+# форма параметра вместо устаревшего disable_web_page_preview).
+SCREEN_LINK_PREVIEW = LinkPreviewOptions(is_disabled=True)
 
 # Текст служебного сообщения, снимающего reply-клавиатуру старых версий
 # (R1, дефект №23). Сообщение сразу удаляется, поэтому видит его только
@@ -77,7 +81,7 @@ async def render_screen(
                 message_id=ref["message_id"],
                 parse_mode="HTML",
                 reply_markup=reply_markup,
-                disable_web_page_preview=True,
+                link_preview_options=SCREEN_LINK_PREVIEW,
             )
             return
         except TelegramError as e:
@@ -90,7 +94,7 @@ async def render_screen(
         text=text,
         parse_mode="HTML",
         reply_markup=reply_markup,
-        disable_web_page_preview=True,
+        link_preview_options=SCREEN_LINK_PREVIEW,
     )
     if message is not None:
         remember_screen(user_data, chat_id, message.message_id)

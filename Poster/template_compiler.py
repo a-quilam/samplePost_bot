@@ -57,7 +57,7 @@ from template_types import (
     TEMPLATE_SECTION_FOOTER,
     TEMPLATE_SECTION_HEADER,
 )
-from utils.tg_html import utf16_len
+from utils.tg_html import SafeHtml, utf16_len
 from utils.validators import normalize_url
 
 _SECTION_ORDER = (
@@ -365,6 +365,10 @@ def _section_html(
             value = values_by_id[node.brick_id]
             if value is None or (isinstance(value, str) and not value.strip()):
                 return None
+            if isinstance(value, SafeHtml):
+                # U1b: значение уже прошло allow-list (разметка сохранена,
+                # текст экранирован) — повторно не экранируем.
+                return str(value)
             return _escape_html(_brick_text(value, definition))
         if isinstance(node, LinkNode):
             label = _visit_token_list(node.label)

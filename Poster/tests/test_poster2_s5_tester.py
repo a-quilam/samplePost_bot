@@ -47,6 +47,7 @@ try:
     from tests.integration_harness import (
         DEFAULT_USER_ID,
         HARNESS_IMPORT_ERROR,
+        is_live_record,
         scenario_test,
     )
     from user_store import get_or_create_user
@@ -127,9 +128,8 @@ def _live_texts(h) -> list[str]:
         str(call.get("text") or "")
         for call in h.calls
         if call.get("reply_markup") is None
-        and call.get("disable_web_page_preview") is False
+        and is_live_record(call)
         and call.get("text") is not None
-        and call["type"] in {"message", "edit_message"}
     ]
 
 

@@ -45,6 +45,7 @@ try:
     from tests.integration_harness import (
         DEFAULT_USER_ID,
         HARNESS_IMPORT_ERROR,
+        is_live_record,
         scenario_test,
     )
     from user_store import get_or_create_user
@@ -69,13 +70,11 @@ def _callback(h, prefix: str) -> str:
 
 
 def _live_records(h) -> list[dict]:
-    """Живой верхний блок: HTML-предпросмотр без клавиатуры и без превью-флага True."""
+    """Живой верхний блок: HTML-предпросмотр без клавиатуры (U1b)."""
     return [
         call
         for call in h.calls
-        if call.get("reply_markup") is None
-        and call.get("disable_web_page_preview") is False
-        and call["type"] in {"message", "edit_message"}
+        if call.get("reply_markup") is None and is_live_record(call)
     ]
 
 

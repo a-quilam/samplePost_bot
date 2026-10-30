@@ -16,7 +16,9 @@ Poster 2.0 S3: вопросы, календарь и время конструк
 
 from __future__ import annotations
 
+import re
 from datetime import date
+from html import unescape as _unescape
 from typing import Any
 
 from telegram import InlineKeyboardButton
@@ -39,11 +41,29 @@ from brick_types import (
 )
 from utils import calendar_view
 from utils.parsers import app_today
-from utils.tg_html import escape_html
+from utils.tg_html import escape_html, utf16_len
 
 # Быстрые значения времени (S3 п.5): самые частые начала вечеринок/встреч.
 # Ручной ввод остаётся: кнопки — сокращение, а не замена.
 TIME_PRESETS = ("18:00", "18:30", "19:00")
+
+# Сколько видимых символов сохранённого значения показывает служебный
+# экран. Совпадает с умолчанием `format_value`: плоская и HTML-ветки
+# усекаются одинаково, иначе длинный форматированный ответ раздувает
+# экран за предел Telegram (4096) и вопрос не отрисовывается.
+DISPLAY_TEXT_LIMIT = 800
+
+# Во сколько раз сырой HTML может быть длиннее видимого текста. Плотная
+# разметка (`<b>x</b>` на каждый символ) иначе сама раздула бы экран до
+# лимита Telegram, поэтому бюджет ограничен.
+DISPLAY_HTML_RATIO = 2
+
+# Токен разметки (тег с кавычками атрибутов) или ссылка-сущность `&...;`.
+_HTML_TOKEN_RE = re.compile(
+    r"""<(?:[^<>"']|"[^"]*"|'[^']*')*>"""
+    r"""|&(?:amp|lt|gt|quot|apos|#[0-9]{1,7}|#x[0-9a-fA-F]{1,6});"""
+)
+_TAG_RE = re.compile(r"<[^>]*>")
 
 # Сколько дней показывать в компактной сетке «текущая неделя».
 CALENDAR_DAYS_PER_ROW = 4
@@ -64,7 +84,7 @@ def field_status_text(field: AnnouncementFieldState) -> str:
     return "из справочника"
 
 
-def format_value(value: object | None, *, limit: int = 800) -> str:
+def format_value(value: object | None, *, limit: int = DISPLAY_TEXT_LIMIT) -> str:
     if value is None:
         return ""
     if isinstance(value, (list, tuple)):
@@ -86,6 +106,131 @@ def field_value_text(field: AnnouncementFieldState) -> str:
     ):
         return f"{raw} {field.rules['suffix']}"
     return raw
+
+
+def visible_html_text(html: str) -> str:
+    """Видимый текст HTML: теги сняты, сущности раскрыты."""
+    return _unescape(_TAG_RE.sub("", html))
+
+
+def _closes_len(stack: list[tuple[str, str]]) -> int:
+    return sum(len(f"</{name}>") for name, _tag in stack)
+
+
+def _apply_token(stack: list[tuple[str, str]], token: str) -> list[tuple[str, str]]:
+    """Стек открытых тегов после токена (закрывающий — снимает верхний)."""
+    if token.startswith("</"):
+        name = token[2:-1].strip().lower()
+        for position in range(len(stack) - 1, -1, -1):
+            if stack[position][0] == name:
+                return stack[:position]
+        return stack
+    if token.endswith("/>"):
+        return stack  # самозакрывающихся тегов в allow-list нет
+    return stack + [(token[1:-1].split()[0].lower(), token)]
+
+
+def truncate_html(
+    html: str,
+    *,
+    limit: int = DISPLAY_TEXT_LIMIT,
+    max_raw: int | None = None,
+) -> str:
+    """
+    Усекает HTML до `limit` видимых символов, не ломая разметку (U1b-fix).
+
+    Усечение идёт по границам токенов: теги и ссылки-сущности `&...;`
+    целиком сохраняются или целиком отбрасываются. Открытые на месте
+    разреза теги закрываются, а многоточие ставится ВНУТРИ них — как в
+    плоской ветке (`format_value`), поэтому длина видимого текста
+    результата не больше `limit`.
+
+    `max_raw` ограничивает длину сырого HTML: плотная разметка (`<b>x</b>`
+    на каждый символ) иначе раздула бы служебный экран до предела Telegram
+    даже при коротком видимом тексте.
+
+    Короткий HTML возвращается как есть — экранирование и валидность не
+    меняются.
+    """
+    if limit <= 0:
+        raise ValueError("Лимит видимого текста должен быть положительным")
+    raw_budget = max_raw if max_raw is not None else limit * DISPLAY_HTML_RATIO
+    if utf16_len(visible_html_text(html)) <= limit and utf16_len(html) <= raw_budget:
+        return html
+
+    budget = limit - 1  # один видимый символ занимает многоточие
+    parts: list[str] = []
+    stack: list[tuple[str, str]] = []
+    visible = 0
+    raw_length = 0
+    index = 0
+    while index < len(html):
+        match = _HTML_TOKEN_RE.match(html, index)
+        if match is not None:
+            token = match.group(0)
+            if not token.startswith("<"):
+                # Ссылка-сущность (&amp;) — один видимый символ.
+                if visible >= budget:
+                    break
+                visible += 1
+                parts.append(token)
+                raw_length += len(token)
+                index = match.end()
+                continue
+            new_stack = _apply_token(stack, token)
+            # Тег неделим: единственный негабаритный тег (длинный href)
+            # пропускается, пока ничего не показано — иначе экран остался бы
+            # с одним многоточием. Остальные негабаритные токены обрывают
+            # вывод: бюджет сырого HTML ограничивает разметку.
+            oversized = (
+                raw_length + len(token) + 1 + _closes_len(new_stack) > raw_budget
+            )
+            if oversized and (visible > 0 or parts):
+                break
+            parts.append(token)
+            raw_length += len(token)
+            stack = new_stack
+            index = match.end()
+            continue
+        char = html[index]
+        if visible >= budget:
+            break
+        if raw_length + 2 + _closes_len(stack) > raw_budget:
+            break
+        parts.append(char)
+        visible += 1
+        raw_length += 1
+        index += 1
+    closing = "".join(f"</{name}>" for name, _tag in reversed(stack))
+    return f"{''.join(parts)}…{closing}"
+
+
+def stored_value_html(field: AnnouncementFieldState) -> str:
+    """
+    Сохранённое значение для служебного экрана — с форматированием (U1b).
+
+    `field.raw_html` уже прошёл allow-list при записи и при чтении из БД,
+    поэтому повторно экранировать его нельзя: иначе пользователь увидит
+    `&lt;b&gt;` вместо жирного текста. Старые записи без HTML (и все не
+    текстовые типы) выводятся экранированным plain-значением как раньше.
+
+    Обе ветки усекаются одинаково (U1b-fix): длинный ответ не должен
+    раздувать экран вопроса за предел Telegram — иначе вопрос не
+    отрисовывается вовсе. Видимый текст HTML-ветки тоже ограничен
+    `DISPLAY_TEXT_LIMIT` и обрывается многоточием.
+    """
+    value = field_value_text(field)
+    html = field.raw_html
+    if isinstance(html, str) and html.strip():
+        suffix = ""
+        if (
+            field.value_type == BRICK_TYPE_NUMBER
+            and isinstance(field.rules.get("suffix"), str)
+            and field.rules["suffix"]
+        ):
+            suffix = f" {h(field.rules['suffix'])}"
+        return f"{truncate_html(html)}{suffix}"
+    return h(value)
 
 
 def number_rules_hint(rules: dict[str, Any]) -> str:
@@ -210,8 +355,9 @@ def question_text(
         ]
     )
     if field.status == FIELD_STATUS_VALID:
-        value = field_value_text(field)
-        blocks.append(f"Текущее значение: {h(value)}")
+        # U1b: сохранённое значение показываем с форматированием (allow-list
+        # пройден при записи и чтении); plain-значения экранируются внутри.
+        blocks.append(f"Текущее значение: {stored_value_html(field)}")
     elif field.status == FIELD_STATUS_SKIPPED:
         blocks.append("Сейчас поле пропущено. Можно заполнить его или перейти дальше.")
     elif field.status == FIELD_STATUS_MISSING:

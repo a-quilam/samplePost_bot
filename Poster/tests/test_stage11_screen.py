@@ -63,7 +63,7 @@ class ScreenRenderTests(unittest.TestCase):
         sends = [c for c in self.bot.calls if c["type"] == "message"]
         self.assertEqual(len(sends), 1)
         self.assertEqual(call_text(sends[0]), "Главное меню")
-        self.assertTrue(sends[0]["disable_web_page_preview"])
+        self.assertTrue(sends[0]["link_preview_options"].is_disabled)
         ref = screen.screen_ref(self.user_data)
         self.assertIsNotNone(ref)
         assert ref is not None
@@ -79,7 +79,7 @@ class ScreenRenderTests(unittest.TestCase):
         self.assertEqual(kinds, ["message", "edit_message"])
         edit = self.bot.calls[1]
         self.assertEqual(call_text(edit), "Шаг 1/9 — Заголовок")
-        self.assertTrue(edit["disable_web_page_preview"])
+        self.assertTrue(edit["link_preview_options"].is_disabled)
 
     def test_deleted_screen_creates_new_without_error(self) -> None:
         self.render("Главное меню")

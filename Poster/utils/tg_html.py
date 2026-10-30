@@ -19,10 +19,64 @@ Telegram), поэтому разбор ведётся по utf-16-байтам �
 Telegram виде.
 """
 
+import re
 from collections.abc import Sequence
 from html import escape as _escape
+from html import unescape as _unescape
 
 from telegram import MessageEntity
+
+
+class FormattedText(str):
+    """
+    Пользовательский текст вместе с его безопасным HTML (U1b).
+
+    Строковое значение — обычный текст: по нему считаются длина, пустота и
+    валидность. `html` — результат `entities_to_html`, то есть ровно то, что
+    уйдёт в Telegram. Так форматирование не теряется между захватом ввода и
+    записью в черновик.
+    """
+
+    html: str
+
+    def __new__(cls, text: str, html: str) -> "FormattedText":
+        instance = super().__new__(cls, text)
+        instance.html = html
+        return instance
+
+
+class SafeHtml(str):
+    """
+    HTML значения, уже прошедший allow-list (U1b).
+
+    Подкласс `str`, чтобы значение оставалось строкой для существующей
+    валидации и сравнений, но компилятор шаблона видел маркер и НЕ экранировал
+    разметку повторно. Создаётся только функцией `sanitize_html` этого
+    модуля, не пользовательским вводом.
+    """
+
+
+def capture_text(
+    text: str | None, entities: Sequence[MessageEntity] | None
+) -> FormattedText:
+    """Текст сообщения Telegram вместе с его разметкой (точка захвата U1b)."""
+    plain = text or ""
+    return FormattedText(plain, entities_to_html(plain, entities))
+
+
+def capture_message_text(message: object) -> FormattedText:
+    """
+    Захват пользовательского ввода из сообщения Telegram.
+
+    Заменяет плоское `message.text`: entities переводятся в безопасный HTML
+    тем же кодировщиком, что и раньше для превью старых сценариев.
+    """
+    if message is None:
+        return FormattedText("", "")
+    return capture_text(
+        getattr(message, "text", None),
+        getattr(message, "entities", None),
+    )
 
 
 def escape_html(text: str) -> str:
@@ -160,6 +214,164 @@ def _wrap(entity: MessageEntity, inner: str, raw_text: str) -> str:
         emoji_id = escape_html(str(entity.custom_emoji_id))
         return f'<tg-emoji emoji-id="{emoji_id}">{inner}</tg-emoji>'
     return inner
+
+
+# —— Allow-list HTML значения (U1b, defense-in-depth) ————————————————————
+
+# Разрешённая разметка Telegram. Всё остальное из БД (старые/подделанные
+# строки, ручная правка SQLite) считается обычным текстом и экранируется.
+_ALLOWED_TAGS = frozenset(
+    {
+        "b",
+        "strong",
+        "i",
+        "em",
+        "u",
+        "ins",
+        "s",
+        "strike",
+        "del",
+        "code",
+        "pre",
+        "blockquote",
+        "a",
+        "tg-spoiler",
+        "span",
+        "tg-emoji",
+    }
+)
+
+# Атрибуты по тегам: остальные молча отбрасываются (onclick, style и пр.).
+_ALLOWED_ATTRIBUTES = {
+    "a": frozenset({"href"}),
+    "code": frozenset({"class"}),
+    "span": frozenset({"class"}),
+    "blockquote": frozenset({"expandable"}),
+    "pre": frozenset({"expandable"}),
+    "tg-emoji": frozenset({"emoji-id"}),
+}
+# Булевы атрибуты Telegram: достаточно самого факта наличия.
+_FLAG_ATTRIBUTES = frozenset({"expandable"})
+# Разрешённые class: спойлер и язык блока кода (`language-python`).
+_LANGUAGE_CLASS_RE = re.compile(r"language-[A-Za-z0-9_+#-]{1,32}")
+_ALLOWED_HREF_PREFIXES = ("http://", "https://", "tg://")
+
+_OPEN_TAG_RE = re.compile(r"<([a-zA-Z][a-zA-Z0-9-]*)([^<>]*)>")
+_CLOSE_TAG_RE = re.compile(r"<\s*/\s*([a-zA-Z][a-zA-Z0-9-]*)\s*>")
+_ATTR_RE = re.compile(r"""([a-zA-Z-]+)\s*=\s*(?:"([^"]*)"|'([^']*)')""")
+# Строгий вид открывающего тега: имя без пробела после '<', затем только
+# пары `ключ="значение"`, `ключ='значение'` или булев флаг. Текст вида
+# «a <b & c> d» тегом не считается: иначе часть строки молча пропала бы.
+_TAG_TAIL_RE = re.compile(r"""(?:\s+[a-zA-Z-]+(?:\s*=\s*(?:"[^"]*"|'[^']*'))?)*\s*/?""")
+_ENTITY_RE = re.compile(r"&(?:amp|lt|gt|quot|apos|#[0-9]{1,7}|#x[0-9a-fA-F]{1,6});")
+
+
+def sanitize_html(value: object) -> SafeHtml:
+    """
+    Проверяет HTML значения по allow-list и возвращает безопасную строку.
+
+    Разрешены только теги/атрибуты Telegram; опасные теги и атрибуты
+    вырезаются, их содержимое остаётся текстом. Значения атрибутов
+    дополнительно проверяются: `href` — только http(s)/tg, `class` — только
+    служебный, `emoji-id` — цифры. Символы `<`, `>`, `&` вне разметки
+    экранируются, поэтому вызов идемпотентен: повторная проверка уже
+    проверенного HTML ничего не меняет. Возвращается `SafeHtml`, чтобы
+    компилятор шаблона не экранировал разметку второй раз.
+    """
+    raw = str(value if value is not None else "")
+    out: list[str] = []
+    index = 0
+    while index < len(raw):
+        char = raw[index]
+        if char == "<":
+            close = _CLOSE_TAG_RE.match(raw, index)
+            if close is not None:
+                name = close.group(1).lower()
+                if name in _ALLOWED_TAGS:
+                    out.append(f"</{name}>")
+                index = close.end()
+                continue
+            opening = _OPEN_TAG_RE.match(raw, index)
+            if opening is None or not _TAG_TAIL_RE.fullmatch(opening.group(2)):
+                # Одиночный '<' — обычный текст, а не разметка.
+                out.append("&lt;")
+                index += 1
+                continue
+            name = opening.group(1).lower()
+            if name in _ALLOWED_TAGS:
+                attributes = _safe_attributes(name, opening.group(2))
+                out.append(f"<{name}{attributes}>")
+            # Неразрешённый тег выброшен, его текст остаётся содержимым.
+            index = opening.end()
+            continue
+        if char == "&":
+            entity = _ENTITY_RE.match(raw, index)
+            if entity is not None:
+                out.append(entity.group(0))
+                index = entity.end()
+            else:
+                out.append("&amp;")
+                index += 1
+            continue
+        if char == ">":
+            out.append("&gt;")
+            index += 1
+            continue
+        out.append(char)
+        index += 1
+    return SafeHtml("".join(out))
+
+
+def _safe_attributes(name: str, raw: str) -> str:
+    """Собирает разрешённые атрибуты тега; прочие отбрасываются."""
+    allowed = _ALLOWED_ATTRIBUTES.get(name)
+    if not allowed or not raw:
+        return ""
+    found = {
+        match.group(1).lower(): (
+            match.group(2) if match.group(2) is not None else match.group(3)
+        )
+        for match in _ATTR_RE.finditer(raw)
+    }
+    parts: list[str] = []
+    for key in sorted(set(found) | _bare_flags(name, raw)):
+        if key not in allowed:
+            continue
+        value = _unescape(found.get(key) or "")
+        if key in _FLAG_ATTRIBUTES:
+            parts.append(f" {key}")
+        elif key == "href":
+            if not value.lower().startswith(_ALLOWED_HREF_PREFIXES):
+                continue
+            parts.append(f' href="{escape_html(value)}"')
+        elif key == "class":
+            allowed_classes = [
+                item
+                for item in value.split()
+                if item == "tg-spoiler" or _LANGUAGE_CLASS_RE.fullmatch(item)
+            ]
+            if allowed_classes:
+                parts.append(f' class="{escape_html(" ".join(allowed_classes))}"')
+        elif key == "emoji-id":
+            if not value.isdigit():
+                continue
+            parts.append(f' emoji-id="{value}"')
+    return "".join(parts)
+
+
+def _bare_flags(name: str, raw: str) -> set[str]:
+    """
+    Булевы атрибуты без значения (`<blockquote expandable>`).
+
+    Telegram документирует их именно в таком виде, а `_ATTR_RE` ищет только
+    `key="value"`; без этой проверки повторная валидация теряла бы флаг.
+    """
+    allowed = _ALLOWED_ATTRIBUTES.get(name) or frozenset()
+    return {
+        token.lower()
+        for token in re.findall(r"(?<![=\w-])([a-zA-Z-]+)(?=[\s/>]|$)", raw)
+        if token.lower() in _FLAG_ATTRIBUTES and token.lower() in allowed
+    }
 
 
 # —— Разбиение длинного HTML на части ————————————————————————————————————

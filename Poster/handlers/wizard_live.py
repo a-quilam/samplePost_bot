@@ -42,6 +42,7 @@ from announcement_store import (
 )
 from database import SessionLocal
 from delivery import (
+    LIVE_LINK_PREVIEW,
     delivery_fingerprint,
     media_batches,
     send_announcement_post,
@@ -195,7 +196,7 @@ async def _edit_text_block(
             message_id=message_ids[0],
             parse_mode="HTML",
             reply_markup=None,
-            disable_web_page_preview=False,
+            link_preview_options=LIVE_LINK_PREVIEW,
         )
     except TelegramError as exc:
         if _is_not_modified(exc):

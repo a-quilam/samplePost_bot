@@ -263,6 +263,22 @@ def message_texts_to(h, chat_id: int) -> list[str]:
     ]
 
 
+def notification_texts_to(h, chat_id: int) -> list[str]:
+    """
+    Тексты личных уведомлений пользователю: send и правка сообщения.
+
+    Уведомление — не экран управления: `h.screen_text()` описывает только
+    постоянный экран инициатора и не должен подменяться чужим сообщением
+    (U1b: у видов записей разные `link_preview_options`).
+    """
+    return [
+        str(call.get("text") or "")
+        for call in h.calls
+        if call["type"] in ("message", "edit_message")
+        and int(call.get("chat_id") or 0) == chat_id
+    ]
+
+
 def callback_answers(h) -> list[dict]:
     return [c for c in h.calls if c["type"] == "callback_answer"]
 
@@ -509,7 +525,15 @@ class KnownRecipientFlowTests(unittest.TestCase):
         await h.callback(accept, user_id=TARGET_TG, chat_id=TARGET_TG)
         self.assertEqual(transfer_row(h, transfer_id).status, "cancelled")
         self.assertEqual(active_admin_tg(h, place_id), INITIATOR_TG)
-        self.assertIn("Передача отменена инициатором", h.screen_text())
+        # Получатель видит объяснение в своём уведомлении, а не молчание.
+        self.assertTrue(
+            any(
+                "Передача отменена инициатором" in text
+                for text in notification_texts_to(h, TARGET_TG)
+            ),
+            notification_texts_to(h, TARGET_TG),
+        )
+        self.assertIn("Права остались у вас", h.screen_text())
 
     @scenario_test
     async def test_restart_restores_outgoing_offer_and_verification(self, h):
@@ -717,7 +741,13 @@ class InviteFlowTests(unittest.TestCase):
 
         await h.callback(accept, user_id=TARGET_TG, chat_id=TARGET_TG)
         self.assertEqual(active_admin_tg(h, place_id), THIRD_TG)
-        self.assertIn("Предложение недействительно", h.screen_text())
+        self.assertTrue(
+            any(
+                "Предложение недействительно" in text
+                for text in notification_texts_to(h, TARGET_TG)
+            ),
+            notification_texts_to(h, TARGET_TG),
+        )
 
 
 @unittest.skipIf(

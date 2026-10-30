@@ -126,7 +126,7 @@ from utils import calendar_view, screen, ui_humor
 from utils import tg_context as ctx
 from utils.parsers import app_today
 from utils.place_labels import place_title
-from utils.tg_html import escape_html
+from utils.tg_html import capture_message_text, escape_html
 
 # Poster 2.0 S3 п.1: вид вопроса/календаря вынесен в `wizard_questions`,
 # поведение прежнее. Имена с подчёркиванием сохранены как локальные
@@ -1814,6 +1814,7 @@ def _extra_field_state(details, extra, definition) -> AnnouncementFieldState:
     value = details.value_for(extra.brick_id)
     status = FIELD_STATUS_MISSING
     raw: object | None = None
+    raw_html: str | None = None
     if value is not None and value.status is BrickValueStatus.VALID:
         status = FIELD_STATUS_VALID
         raw = answer_payload_to_raw(
@@ -1822,6 +1823,9 @@ def _extra_field_state(details, extra, definition) -> AnnouncementFieldState:
                 payload=dict(value.payload) if value.payload is not None else None,
             )
         )
+        stored_html = (value.payload or {}).get("html")
+        if isinstance(stored_html, str):
+            raw_html = stored_html
     elif value is not None and value.status is BrickValueStatus.EMPTY_OPTIONAL:
         status = FIELD_STATUS_SKIPPED
     return AnnouncementFieldState(
@@ -1834,6 +1838,7 @@ def _extra_field_state(details, extra, definition) -> AnnouncementFieldState:
         raw_value=raw,
         rules=dict(definition.rules),
         description=definition.description,
+        raw_html=raw_html,
     )
 
 
@@ -2687,7 +2692,8 @@ def _extra_value_text(extra, field: AnnouncementFieldState) -> str:
         lines.append(f"📝 {description}")
     lines.append(_type_hint(field))
     if field.status == FIELD_STATUS_VALID:
-        lines.append(f"Текущее значение: {_h(_field_value_text(field))}")
+        # U1b: сохранённое значение — с форматированием (см. stored_value_html).
+        lines.append(f"Текущее значение: {wizard_questions.stored_value_html(field)}")
     elif field.status == FIELD_STATUS_SKIPPED:
         lines.append("Сейчас значение пропущено.")
     else:
@@ -4471,13 +4477,13 @@ async def _handle_active_text(
             return await _reject_choice_text(
                 update, context, details, field, index, "question"
             )
-        raw = update.effective_message.text if update.effective_message else ""
+        raw = capture_message_text(update.effective_message)
         return await _save_question_value(
             update,
             context,
             details,
             field,
-            raw or "",
+            raw,
             index=index,
             drop_input=True,
         )
@@ -4493,13 +4499,13 @@ async def _handle_active_text(
     await _reanchor(update, context)
     if field.value_type == BRICK_TYPE_CHOICE:
         return await _reject_choice_text(update, context, details, field, -1, "extra")
-    raw = update.effective_message.text if update.effective_message else ""
+    raw = capture_message_text(update.effective_message)
     return await _save_extra_value(
         update,
         context,
         details,
         extra,
-        raw or "",
+        raw,
         drop_input=True,
         notice="Значение дополнительного кирпичика сохранено.",
     )

@@ -32,6 +32,7 @@ from telegram import (
     CallbackQuery,
     InlineKeyboardButton,
     InlineKeyboardMarkup,
+    LinkPreviewOptions,
     Update,
 )
 from telegram.ext import (
@@ -239,6 +240,13 @@ def _short(value: object, limit: int = 100) -> str:
 # Экран Telegram ограничен 4096 символами. Длинный адрес хранится полностью;
 # на экране показываем начало с ЯВНОЙ пометкой, а не молчаливое «…».
 DISPLAY_VALUE_LIMIT = 1500
+
+# U1b: личные уведомления не разворачивают превью ссылок (PTB 22.8:
+# `LinkPreviewOptions` вместо устаревшего `disable_web_page_preview`).
+# Отдельный экземпляр (не тот, что у экрана): по идентичности объекта
+# тестовый каркас отличает уведомление от экрана управления, хотя для
+# Telegram значения равнозначны.
+NOTIFICATION_LINK_PREVIEW = LinkPreviewOptions(is_disabled=True)
 
 
 def _long_value(value: object, limit: int = DISPLAY_VALUE_LIMIT) -> str:
@@ -701,7 +709,7 @@ async def _send_user_notification(
             text=text,
             parse_mode="HTML",
             reply_markup=keyboard,
-            disable_web_page_preview=True,
+            link_preview_options=NOTIFICATION_LINK_PREVIEW,
         )
         return True
     except Exception as e:  # noqa: BLE001 — сбой Telegram не ломает операцию
@@ -743,7 +751,7 @@ async def _edit_notification_message(
             text=text,
             parse_mode="HTML",
             reply_markup=keyboard,
-            disable_web_page_preview=True,
+            link_preview_options=NOTIFICATION_LINK_PREVIEW,
         )
     except Exception as e:  # noqa: BLE001 — устаревшее сообщение не должно падать
         logger.info("Не удалось обновить сообщение передачи: %s", e)
