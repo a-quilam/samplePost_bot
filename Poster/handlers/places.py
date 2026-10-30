@@ -59,6 +59,7 @@ from user_store import get_or_create_user
 from utils import screen
 from utils import tg_context as ctx
 from utils.place_labels import place_title
+from utils.ui_texts import tr, tr_safe
 
 logger = logging.getLogger(__name__)
 
@@ -67,7 +68,6 @@ SEARCH_PAGE_SIZE = 8
 NAMES_PAGE_SIZE = 6
 CARD_ALIASES_LIMIT = 5
 BUTTON_TEXT_LIMIT = 60
-STALE_TEXT = "Кнопка устарела: откройте раздел «Места» заново."
 
 TEXT_INPUT_PHASES = {
     "search_input",
@@ -195,9 +195,14 @@ def _page_note(
 ) -> str:
     if total <= 0:
         return ""
-    return (
-        f"Показано {offset + 1}–{offset + count} из {total}.\n"
-        f"Страница {offset // page_size + 1}."
+    return tr(
+        "places.page_note",
+        **{
+            "from": offset + 1,
+            "to": offset + count,
+            "total": total,
+            "page": offset // page_size + 1,
+        },
     )
 
 
@@ -254,8 +259,8 @@ def _card_text(
     if selected.is_canonical:
         text = f"📍 {_h(selected.name)}"
     else:
-        text = (
-            f"📍 {_h(selected.name)}\n" f"Каноническое название: {_h(canonical.name)}"
+        text = f"📍 {_h(selected.name)}\n" + tr(
+            "places.card.canonical", name=canonical.name
         )
 
     alternatives = [
@@ -274,16 +279,14 @@ def _card_text(
                 "«Выбрать альтернативное название»."
             )
     if details.address:
-        text += f"\n\nАдрес: {_h(details.address)}"
+        text += f"\n\n{tr('places.card.addresses', address=details.address)}"
     if details.url:
-        text += f"\nСсылка: {_safe_link(details.url)}"
+        # tr_safe: ссылка уже приведена к безопасному виду `_safe_link`.
+        text += "\n" + tr_safe("places.card.link", url=_safe_link(details.url))
     # Poster 2.0 U1a: город есть у новых площадок; у старых записей его нет,
     # и пустое значение показывается явным «—», а не пропадает из карточки.
-    text += f"\nГород: {_h(details.city) if details.city else '—'}"
-    text += (
-        "\n\nНажмите «✅ Подтвердить», чтобы выбрать это место, или "
-        "«🔤 Выбрать альтернативное название» для другого написания."
-    )
+    text += "\n" + tr("places.card.city", city=details.city or "—")
+    text += f"\n\n{tr('places.card.hint')}"
     return text
 
 
@@ -292,7 +295,7 @@ def _confirmation_text(details: PlaceDetails, state: dict) -> str:
     canonical = next(item for item in details.names if item.is_canonical)
     text = f"✅ Место выбрано\n\n📍 {_h(selected.name)}"
     if not selected.is_canonical:
-        text += f"\nКаноническое название: {_h(canonical.name)}"
+        text += "\n" + tr("places.card.canonical", name=canonical.name)
     return (
         text + "\n\nСценарий выбора места завершён. Выбранное место сохранено "
         "только в состоянии этого сценария — в черновик оно не записывается."
@@ -322,17 +325,17 @@ def _result_label(result: SearchResult, *, check: bool = False) -> str:
 
 
 def _hub_content() -> tuple[str, InlineKeyboardMarkup]:
-    text = (
-        "📍 Места\n\n"
-        "Найдите место по названию или добавьте новое. Поиск учитывает "
-        "канонические и альтернативные названия."
-    )
+    text = f"{tr('places.hub.title')}\n\n{tr('places.hub.intro')}"
     keyboard = InlineKeyboardMarkup(
         [
-            [InlineKeyboardButton("🔎 Найти место", callback_data="pl_search")],
-            [InlineKeyboardButton("📚 Все места", callback_data="pl_all")],
-            [InlineKeyboardButton("➕ Добавить место", callback_data="pl_add")],
-            [InlineKeyboardButton("◀️ Назад", callback_data="main_menu")],
+            [
+                InlineKeyboardButton(
+                    tr("buttons.places.search"), callback_data="pl_search"
+                )
+            ],
+            [InlineKeyboardButton(tr("buttons.places.all"), callback_data="pl_all")],
+            [InlineKeyboardButton(tr("buttons.places.add"), callback_data="pl_add")],
+            [InlineKeyboardButton(tr("buttons.nav.back"), callback_data="main_menu")],
         ]
     )
     return text, keyboard
@@ -349,14 +352,14 @@ def _all_places_content(
     state["page"] = offset
 
     if total == 0:
-        text = "📚 Все места\n\nВ справочнике пока нет мест."
+        text = tr("places.all.empty")
         empty_keyboard = [
-            [InlineKeyboardButton("➕ Добавить место", callback_data="pl_add")],
-            [InlineKeyboardButton("◀️ Назад", callback_data="main_menu")],
+            [InlineKeyboardButton(tr("buttons.places.add"), callback_data="pl_add")],
+            [InlineKeyboardButton(tr("buttons.nav.back"), callback_data="main_menu")],
         ]
         return text, InlineKeyboardMarkup(empty_keyboard)
 
-    text = f"📚 Все места — {total}\n\n"
+    text = f"{tr('places.all.title', total=total)}\n\n"
     for index, item in enumerate(places, start=offset + 1):
         text += f"{index}. {_h(_place_title(item.canonical_name, item.city))}\n"
     text += "\n" + _page_note(offset, len(places), total, PLACES_PAGE_SIZE)
@@ -378,21 +381,25 @@ def _all_places_content(
     if offset > 0:
         nav.append(
             InlineKeyboardButton(
-                "⬅️ Назад",
+                tr("buttons.nav.prev"),
                 callback_data=f"pl_page:{max(offset - PLACES_PAGE_SIZE, 0)}",
             )
         )
     if offset + len(places) < total:
         nav.append(
             InlineKeyboardButton(
-                "Вперёд ➡️",
+                tr("buttons.nav.next"),
                 callback_data=f"pl_page:{offset + len(places)}",
             )
         )
     if nav:
         keyboard.append(nav)
-    keyboard.append([InlineKeyboardButton("➕ Добавить место", callback_data="pl_add")])
-    keyboard.append([InlineKeyboardButton("◀️ Назад", callback_data="pl_back")])
+    keyboard.append(
+        [InlineKeyboardButton(tr("buttons.places.add"), callback_data="pl_add")]
+    )
+    keyboard.append(
+        [InlineKeyboardButton(tr("buttons.nav.back"), callback_data="pl_back")]
+    )
     return text, InlineKeyboardMarkup(keyboard)
 
 
@@ -407,19 +414,19 @@ def _search_results_content(
     page_results = results[offset : offset + SEARCH_PAGE_SIZE]
 
     if not results:
-        text = (
-            f"🔎 Поиск: «{_h(query)}»\n\n"
-            "Ничего не найдено. Место не создаётся автоматически — его можно "
-            "добавить отдельно, после проверки дублей."
-        )
+        text = tr("places.search.empty", query=query)
         empty_keyboard = [
-            [InlineKeyboardButton("➕ Добавить место", callback_data="pl_add")],
-            [InlineKeyboardButton("🔁 Искать снова", callback_data="pl_search")],
-            [InlineKeyboardButton("◀️ Назад", callback_data="pl_back")],
+            [InlineKeyboardButton(tr("buttons.places.add"), callback_data="pl_add")],
+            [
+                InlineKeyboardButton(
+                    tr("buttons.nav.retry_search"), callback_data="pl_search"
+                )
+            ],
+            [InlineKeyboardButton(tr("buttons.nav.back"), callback_data="pl_back")],
         ]
         return text, InlineKeyboardMarkup(empty_keyboard)
 
-    text = f"🔎 Результаты поиска: «{_h(query)}»\n\n"
+    text = f"{tr('places.search.title', query=query)}\n\n"
     for index, result in enumerate(page_results, start=offset + 1):
         text += (
             f"{index}. {_h(_place_title(result.canonical_name, result.city))} — "
@@ -444,23 +451,29 @@ def _search_results_content(
     if offset > 0:
         nav.append(
             InlineKeyboardButton(
-                "⬅️ Назад",
+                tr("buttons.nav.prev"),
                 callback_data=f"pl_spage:{max(offset - SEARCH_PAGE_SIZE, 0)}",
             )
         )
     if offset + len(page_results) < total:
         nav.append(
             InlineKeyboardButton(
-                "Вперёд ➡️",
+                tr("buttons.nav.next"),
                 callback_data=f"pl_spage:{offset + len(page_results)}",
             )
         )
     if nav:
         keyboard.append(nav)
     keyboard.append(
-        [InlineKeyboardButton("🔁 Искать снова", callback_data="pl_search")]
+        [
+            InlineKeyboardButton(
+                tr("buttons.nav.retry_search"), callback_data="pl_search"
+            )
+        ]
     )
-    keyboard.append([InlineKeyboardButton("◀️ Назад", callback_data="pl_back")])
+    keyboard.append(
+        [InlineKeyboardButton(tr("buttons.nav.back"), callback_data="pl_back")]
+    )
     return text, InlineKeyboardMarkup(keyboard)
 
 
@@ -470,12 +483,12 @@ def _create_check_content(
     candidate = str(state.get("candidate") or "")
     results = search_places(session, candidate)[:PLACES_PAGE_SIZE]
     text = (
-        "🔍 Проверьте, нет ли уже этого места в базе\n\n"
-        f"Вы ввели: «{_h(candidate)}»\n\n"
+        f"{tr('places.create_check.title')}\n\n"
+        f"{tr('places.create_check.input', name=candidate)}\n\n"
     )
     keyboard: list[list[InlineKeyboardButton]] = []
     if results:
-        text += "Возможные совпадения:\n"
+        text += f"{tr('places.create_check.possible')}\n"
         for index, result in enumerate(results, start=1):
             text += (
                 f"{index}. {_h(_place_title(result.canonical_name, result.city))} — "
@@ -492,19 +505,18 @@ def _create_check_content(
                     )
                 ]
             )
-        text += (
-            "\nЕсли это другое заведение с похожим названием, создание нового "
-            "места допустимо — но только по явной кнопке ниже."
-        )
+        text += f"\n{tr('places.create_check.confirm')}"
     else:
-        text += "Похожих мест не найдено."
+        text += tr("places.create_check.none")
     keyboard.append(
         [InlineKeyboardButton("✅ Это новое место", callback_data="pl_create_confirm")]
     )
     keyboard.append(
         [InlineKeyboardButton("✏️ Исправить название", callback_data="pl_create_edit")]
     )
-    keyboard.append([InlineKeyboardButton("◀️ Назад", callback_data="pl_back")])
+    keyboard.append(
+        [InlineKeyboardButton(tr("buttons.nav.back"), callback_data="pl_back")]
+    )
     return text, InlineKeyboardMarkup(keyboard)
 
 
@@ -595,14 +607,14 @@ def _names_content(
     if offset > 0:
         nav.append(
             InlineKeyboardButton(
-                "⬅️ Назад",
+                tr("buttons.nav.prev"),
                 callback_data=f"pl_names:{max(offset - NAMES_PAGE_SIZE, 0)}",
             )
         )
     if offset + len(page) < total:
         nav.append(
             InlineKeyboardButton(
-                "Вперёд ➡️",
+                tr("buttons.nav.next"),
                 callback_data=f"pl_names:{offset + len(page)}",
             )
         )
@@ -611,7 +623,9 @@ def _names_content(
     keyboard.append(
         [InlineKeyboardButton("➕ Добавить название", callback_data="pl_addname")]
     )
-    keyboard.append([InlineKeyboardButton("◀️ Назад", callback_data="pl_back")])
+    keyboard.append(
+        [InlineKeyboardButton(tr("buttons.nav.back"), callback_data="pl_back")]
+    )
     return text, InlineKeyboardMarkup(keyboard)
 
 
@@ -734,11 +748,7 @@ async def _render_phase(
         elif phase == "pick":
             text, keyboard = _pick_content(session, state)
         elif phase == "pick_search_input":
-            text = (
-                "🔎 Поиск площадки\n\n"
-                "Введите часть названия. Регистр, «е/ё», пробелы и пунктуация "
-                "не важны."
-            )
+            text = tr("places.pick_search_input")
             keyboard = InlineKeyboardMarkup(
                 [[InlineKeyboardButton("◀️ К списку", callback_data="pl_pick_back")]]
             )
@@ -750,13 +760,15 @@ async def _render_phase(
             else:
                 text, keyboard = _pick_search_content(session, state)
         elif phase == "search_input":
-            text = (
-                "🔎 Поиск места\n\n"
-                "Введите часть названия места. Регистр, «е/ё», пробелы и "
-                "пунктуация не важны."
-            )
+            text = tr("places.search_input")
             keyboard = InlineKeyboardMarkup(
-                [[InlineKeyboardButton("◀️ Назад", callback_data="pl_back")]]
+                [
+                    [
+                        InlineKeyboardButton(
+                            tr("buttons.nav.back"), callback_data="pl_back"
+                        )
+                    ]
+                ]
             )
         elif phase == "search_results":
             if not state.get("query"):
@@ -770,11 +782,7 @@ async def _render_phase(
         elif phase == "manage_list":
             text, keyboard = _manage_list_content(session, state)
         elif phase == "manage_search_input":
-            text = (
-                "🔎 Поиск места\n\n"
-                "Введите часть названия. Регистр, «е/ё», пробелы и пунктуация "
-                "не важны."
-            )
+            text = tr("places.manage_search_input")
             keyboard = InlineKeyboardMarkup(
                 [[InlineKeyboardButton("◀️ К списку", callback_data="plm_back")]]
             )
@@ -823,23 +831,18 @@ async def _render_phase(
                     [[InlineKeyboardButton("◀️ К карточке", callback_data="plm_back")]]
                 )
         elif phase == "create_input":
-            text = (
-                "➕ Новое место\n\n"
-                "Введите название нового места. Сначала проверим, нет ли уже "
-                "похожего места в справочнике."
-            )
+            text = tr("places.create_input")
             if state.get("candidate"):
-                text += f"\n\nТекущее название: «{_h(state['candidate'])}»"
-            if state.get("manage_mode"):
-                text += (
-                    "\n\nУ нового места сразу появится стандартный шаблон "
-                    "анонса. Анонс не запускается."
+                text += "\n\n" + tr(
+                    "places.create_input.current", name=state["candidate"]
                 )
+            if state.get("manage_mode"):
+                text += "\n\n" + tr("places.create_input.manage_hint")
             keyboard = InlineKeyboardMarkup(
                 [
                     [
                         InlineKeyboardButton(
-                            "◀️ Назад",
+                            tr("buttons.nav.back"),
                             callback_data=(
                                 "plm_back" if state.get("manage_mode") else "pl_back"
                             ),
@@ -855,18 +858,15 @@ async def _render_phase(
             else:
                 text, keyboard = _create_check_content(session, state)
         elif phase == "create_city_input":
-            text = (
-                "🏙 В каком городе площадка?\n\n"
-                f"Название: «{_h(str(state.get('candidate') or ''))}»\n\n"
-                "Введите город обычным текстом (например, Москва или "
-                "Санкт-Петербург). Город виден в списке площадок и помогает "
-                "найти место поиском."
+            text = tr(
+                "places.create_city_input",
+                name=str(state.get("candidate") or ""),
             )
             keyboard = InlineKeyboardMarkup(
                 [
                     [
                         InlineKeyboardButton(
-                            "◀️ Назад",
+                            tr("buttons.nav.back"),
                             callback_data=(
                                 "plm_back" if state.get("manage_mode") else "pl_back"
                             ),
@@ -954,7 +954,13 @@ async def _render_phase(
                     "Оно появится у всех пользователей после отправки."
                 )
                 keyboard = InlineKeyboardMarkup(
-                    [[InlineKeyboardButton("◀️ Назад", callback_data="pl_back")]]
+                    [
+                        [
+                            InlineKeyboardButton(
+                                tr("buttons.nav.back"), callback_data="pl_back"
+                            )
+                        ]
+                    ]
                 )
         elif phase == "alias_warning":
             place_id = state.get("place_id")
@@ -1042,14 +1048,14 @@ async def _render_phase(
     )
 
 
-async def _stale(update: Update, text: str = STALE_TEXT) -> None:
-    await ctx.query(update).answer(text, show_alert=True)
+async def _stale(update: Update, text: str | None = None) -> None:
+    """Ответ на устаревшую кнопку: текст читается в момент нажатия."""
+    await ctx.query(update).answer(text or tr("errors.stale.places"), show_alert=True)
 
 
 # --- Poster 2.0 S2: выбор площадки для немедленного старта анонса -------------
 
 PICK_PAGE_SIZE = 8
-PICK_STALE_TEXT = "Кнопка устарела: откройте «Создать для площадки» заново."
 
 
 def _pick_content(session: Session, state: dict) -> tuple[str, InlineKeyboardMarkup]:
@@ -1062,11 +1068,7 @@ def _pick_content(session: Session, state: dict) -> tuple[str, InlineKeyboardMar
     state["pick_page"] = offset
 
     if total == 0:
-        text = (
-            "📍 Создать для площадки\n\n"
-            "В справочнике пока нет площадок. Добавьте первую — анонс "
-            "начнётся сразу по её стандартному шаблону."
-        )
+        text = f"{tr('places.pick.title')}\n\n{tr('places.pick.empty')}"
         keyboard = InlineKeyboardMarkup(
             [
                 [
@@ -1074,16 +1076,16 @@ def _pick_content(session: Session, state: dict) -> tuple[str, InlineKeyboardMar
                         "➕ Новая площадка", callback_data="pl_pick_add"
                     )
                 ],
-                [InlineKeyboardButton("◀️ Главное меню", callback_data="main_menu")],
+                [
+                    InlineKeyboardButton(
+                        tr("buttons.nav.main_menu"), callback_data="main_menu"
+                    )
+                ],
             ]
         )
         return text, keyboard
 
-    text = (
-        "📍 Создать для площадки\n\n"
-        "Выберите площадку — анонс начнётся сразу по её стандартному "
-        "шаблону, без лишних подтверждений.\n\n"
-    )
+    text = f"{tr('places.pick.title')}\n\n{tr('places.pick.intro')}\n\n"
     for number, item in enumerate(places, start=offset + 1):
         text += f"{number}. {_h(_place_title(item.canonical_name, item.city))}\n"
     text += "\n" + _page_note(offset, len(places), total, PICK_PAGE_SIZE)
@@ -1102,14 +1104,14 @@ def _pick_content(session: Session, state: dict) -> tuple[str, InlineKeyboardMar
     if offset > 0:
         nav.append(
             InlineKeyboardButton(
-                "⬅️ Назад",
+                tr("buttons.nav.prev"),
                 callback_data=f"pl_pickp:{max(offset - PICK_PAGE_SIZE, 0)}",
             )
         )
     if offset + len(places) < total:
         nav.append(
             InlineKeyboardButton(
-                "Вперёд ➡️",
+                tr("buttons.nav.next"),
                 callback_data=f"pl_pickp:{offset + len(places)}",
             )
         )
@@ -1121,7 +1123,9 @@ def _pick_content(session: Session, state: dict) -> tuple[str, InlineKeyboardMar
     rows.append(
         [InlineKeyboardButton("➕ Новая площадка", callback_data="pl_pick_add")]
     )
-    rows.append([InlineKeyboardButton("◀️ Главное меню", callback_data="main_menu")])
+    rows.append(
+        [InlineKeyboardButton(tr("buttons.nav.main_menu"), callback_data="main_menu")]
+    )
     return text, InlineKeyboardMarkup(rows)
 
 
@@ -1136,11 +1140,7 @@ def _pick_search_content(
     state["page"] = offset
     page_results = results[offset : offset + SEARCH_PAGE_SIZE]
     if not results:
-        text = (
-            f"🔎 Поиск площадки: «{_h(query)}»\n\n"
-            "Ничего не найдено. Площадка не создаётся автоматически — её можно "
-            "добавить отдельно."
-        )
+        text = tr("places.pick_search.empty", query=query)
         keyboard = InlineKeyboardMarkup(
             [
                 [
@@ -1150,7 +1150,7 @@ def _pick_search_content(
                 ],
                 [
                     InlineKeyboardButton(
-                        "🔁 Искать снова", callback_data="pl_pick_search"
+                        tr("buttons.nav.retry_search"), callback_data="pl_pick_search"
                     )
                 ],
                 [InlineKeyboardButton("◀️ К списку", callback_data="pl_pick_back")],
@@ -1182,21 +1182,25 @@ def _pick_search_content(
     if offset > 0:
         nav.append(
             InlineKeyboardButton(
-                "⬅️ Назад",
+                tr("buttons.nav.prev"),
                 callback_data=f"pl_picksp:{max(offset - SEARCH_PAGE_SIZE, 0)}",
             )
         )
     if offset + len(page_results) < total:
         nav.append(
             InlineKeyboardButton(
-                "Вперёд ➡️",
+                tr("buttons.nav.next"),
                 callback_data=f"pl_picksp:{offset + len(page_results)}",
             )
         )
     if nav:
         rows.append(nav)
     rows.append(
-        [InlineKeyboardButton("🔁 Искать снова", callback_data="pl_pick_search")]
+        [
+            InlineKeyboardButton(
+                tr("buttons.nav.retry_search"), callback_data="pl_pick_search"
+            )
+        ]
     )
     rows.append([InlineKeyboardButton("◀️ К списку", callback_data="pl_pick_back")])
     return text, InlineKeyboardMarkup(rows)
@@ -1208,7 +1212,6 @@ def _new_pick() -> dict:
 
 # --- Poster 2.1 R2: справочник «Управление → Площадки» ----------------------
 
-MANAGE_STALE_TEXT = "Кнопка устарела: откройте «Управление → Площадки» заново."
 
 MANAGE_LIST_PHASES = frozenset(
     {"manage_list", "manage_search_input", "manage_search_results", "manage_card"}
@@ -1248,27 +1251,24 @@ def _manage_list_content(
     state["page"] = offset
 
     if total == 0:
-        text = (
-            "📍 Площадки\n\n"
-            "В справочнике пока нет площадок. Добавьте первую — у неё сразу "
-            "появится стандартный шаблон анонса."
-        )
+        text = tr("places.manage.empty")
         keyboard = InlineKeyboardMarkup(
             [
-                [InlineKeyboardButton("➕ Добавить место", callback_data="plm_add")],
-                [InlineKeyboardButton("◀️ Назад", callback_data="manage")],
+                [
+                    InlineKeyboardButton(
+                        tr("buttons.places.add"), callback_data="plm_add"
+                    )
+                ],
+                [InlineKeyboardButton(tr("buttons.nav.back"), callback_data="manage")],
             ]
         )
         return text, keyboard
 
-    text = f"📍 Площадки — {total}\n\n"
+    text = f"{tr('places.manage.title', total=total)}\n\n"
     for index, item in enumerate(places, start=offset + 1):
         text += f"{index}. {_h(_place_title(item.canonical_name, item.city))}\n"
     text += "\n" + _page_note(offset, len(places), total, PLACES_PAGE_SIZE)
-    text += (
-        "\nТап по площадке открывает карточку справочника: название, "
-        "альтернативные названия, адрес и ссылка."
-    )
+    text += f"\n{tr('places.manage.hint')}"
 
     rows: list[list[InlineKeyboardButton]] = []
     for index, item in enumerate(places, start=offset + 1):
@@ -1287,22 +1287,26 @@ def _manage_list_content(
     if offset > 0:
         nav.append(
             InlineKeyboardButton(
-                "⬅️ Назад",
+                tr("buttons.nav.prev"),
                 callback_data=f"plm_page:{max(offset - PLACES_PAGE_SIZE, 0)}",
             )
         )
     if offset + len(places) < total:
         nav.append(
             InlineKeyboardButton(
-                "Вперёд ➡️",
+                tr("buttons.nav.next"),
                 callback_data=f"plm_page:{offset + len(places)}",
             )
         )
     if nav:
         rows.append(nav)
-    rows.append([InlineKeyboardButton("🔎 Найти место", callback_data="plm_search")])
-    rows.append([InlineKeyboardButton("➕ Добавить место", callback_data="plm_add")])
-    rows.append([InlineKeyboardButton("◀️ Назад", callback_data="manage")])
+    rows.append(
+        [InlineKeyboardButton(tr("buttons.places.search"), callback_data="plm_search")]
+    )
+    rows.append(
+        [InlineKeyboardButton(tr("buttons.places.add"), callback_data="plm_add")]
+    )
+    rows.append([InlineKeyboardButton(tr("buttons.nav.back"), callback_data="manage")])
     return text, InlineKeyboardMarkup(rows)
 
 
@@ -1318,21 +1322,25 @@ def _manage_search_content(
     page_results = results[offset : offset + SEARCH_PAGE_SIZE]
 
     if not results:
-        text = (
-            f"🔎 Поиск: «{_h(query)}»\n\n"
-            "Ничего не найдено. Место не создаётся автоматически — его можно "
-            "добавить отдельно, после проверки дублей."
-        )
+        text = tr("places.search.empty", query=query)
         keyboard = InlineKeyboardMarkup(
             [
-                [InlineKeyboardButton("➕ Добавить место", callback_data="plm_add")],
-                [InlineKeyboardButton("🔁 Искать снова", callback_data="plm_search")],
+                [
+                    InlineKeyboardButton(
+                        tr("buttons.places.add"), callback_data="plm_add"
+                    )
+                ],
+                [
+                    InlineKeyboardButton(
+                        tr("buttons.nav.retry_search"), callback_data="plm_search"
+                    )
+                ],
                 [InlineKeyboardButton("◀️ К списку", callback_data="plm_back")],
             ]
         )
         return text, keyboard
 
-    text = f"🔎 Результаты поиска: «{_h(query)}»\n\n"
+    text = f"{tr('places.search.title', query=query)}\n\n"
     for index, result in enumerate(page_results, start=offset + 1):
         text += (
             f"{index}. {_h(_place_title(result.canonical_name, result.city))} — "
@@ -1357,20 +1365,26 @@ def _manage_search_content(
     if offset > 0:
         nav.append(
             InlineKeyboardButton(
-                "⬅️ Назад",
+                tr("buttons.nav.prev"),
                 callback_data=f"plm_spage:{max(offset - SEARCH_PAGE_SIZE, 0)}",
             )
         )
     if offset + len(page_results) < total:
         nav.append(
             InlineKeyboardButton(
-                "Вперёд ➡️",
+                tr("buttons.nav.next"),
                 callback_data=f"plm_spage:{offset + len(page_results)}",
             )
         )
     if nav:
         rows.append(nav)
-    rows.append([InlineKeyboardButton("🔁 Искать снова", callback_data="plm_search")])
+    rows.append(
+        [
+            InlineKeyboardButton(
+                tr("buttons.nav.retry_search"), callback_data="plm_search"
+            )
+        ]
+    )
     rows.append([InlineKeyboardButton("◀️ К списку", callback_data="plm_back")])
     return text, InlineKeyboardMarkup(rows)
 
@@ -1458,11 +1472,11 @@ async def handle_pick_page(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     query = ctx.query(update)
     state = load_place_session(ctx.user(update).id)
     if state is None or state.get("phase") != "pick":
-        await query.answer(PICK_STALE_TEXT, show_alert=True)
+        await query.answer(tr("errors.stale.pick"), show_alert=True)
         return
     offset = _parse_offset(query.data or "", "pl_pickp:")
     if offset is None:
-        await query.answer(PICK_STALE_TEXT, show_alert=True)
+        await query.answer(tr("errors.stale.pick"), show_alert=True)
         return
     await query.answer()
     state["pick_page"] = offset
@@ -1480,7 +1494,7 @@ async def handle_pick_search(
         "pick_search_input",
         "pick_search_results",
     }:
-        await query.answer(PICK_STALE_TEXT, show_alert=True)
+        await query.answer(tr("errors.stale.pick"), show_alert=True)
         return
     await query.answer()
     state["phase"] = "pick_search_input"
@@ -1495,11 +1509,11 @@ async def handle_pick_search_page(
     query = ctx.query(update)
     state = load_place_session(ctx.user(update).id)
     if state is None or state.get("phase") != "pick_search_results":
-        await query.answer(PICK_STALE_TEXT, show_alert=True)
+        await query.answer(tr("errors.stale.pick"), show_alert=True)
         return
     offset = _parse_offset(query.data or "", "pl_picksp:")
     if offset is None:
-        await query.answer(PICK_STALE_TEXT, show_alert=True)
+        await query.answer(tr("errors.stale.pick"), show_alert=True)
         return
     await query.answer()
     state["page"] = offset
@@ -1514,7 +1528,7 @@ async def handle_pick_back(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         "pick_search_input",
         "pick_search_results",
     }:
-        await query.answer(PICK_STALE_TEXT, show_alert=True)
+        await query.answer(tr("errors.stale.pick"), show_alert=True)
         return
     await query.answer()
     state.clear()
@@ -1540,7 +1554,7 @@ async def handle_pick_add(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         "pick_search_input",
         "pick_search_results",
     }:
-        await query.answer(PICK_STALE_TEXT, show_alert=True)
+        await query.answer(tr("errors.stale.pick"), show_alert=True)
         return
     await query.answer()
     state.clear()
@@ -1599,11 +1613,11 @@ async def handle_manage_page(
     query = ctx.query(update)
     state = load_place_session(ctx.user(update).id)
     if state is None or state.get("phase") != "manage_list":
-        await query.answer(MANAGE_STALE_TEXT, show_alert=True)
+        await query.answer(tr("errors.stale.manage"), show_alert=True)
         return
     offset = _parse_offset(query.data or "", "plm_page:")
     if offset is None:
-        await query.answer(MANAGE_STALE_TEXT, show_alert=True)
+        await query.answer(tr("errors.stale.manage"), show_alert=True)
         return
     await query.answer()
     state["page"] = offset
@@ -1617,7 +1631,7 @@ async def handle_manage_search(
     query = ctx.query(update)
     state = load_place_session(ctx.user(update).id)
     if state is None or state.get("phase") not in MANAGE_LIST_PHASES:
-        await query.answer(MANAGE_STALE_TEXT, show_alert=True)
+        await query.answer(tr("errors.stale.manage"), show_alert=True)
         return
     await query.answer()
     state["phase"] = "manage_search_input"
@@ -1633,11 +1647,11 @@ async def handle_manage_search_page(
     query = ctx.query(update)
     state = load_place_session(ctx.user(update).id)
     if state is None or state.get("phase") != "manage_search_results":
-        await query.answer(MANAGE_STALE_TEXT, show_alert=True)
+        await query.answer(tr("errors.stale.manage"), show_alert=True)
         return
     offset = _parse_offset(query.data or "", "plm_spage:")
     if offset is None:
-        await query.answer(MANAGE_STALE_TEXT, show_alert=True)
+        await query.answer(tr("errors.stale.manage"), show_alert=True)
         return
     await query.answer()
     state["page"] = offset
@@ -1682,7 +1696,7 @@ async def handle_manage_back(
             and not state.get("manage_mode")
         )
     ):
-        await query.answer(MANAGE_STALE_TEXT, show_alert=True)
+        await query.answer(tr("errors.stale.manage"), show_alert=True)
         return
     if phase == "manage_list":
         # «Назад» из списка справочника — выход в «Управление»; open_manage
@@ -1712,13 +1726,13 @@ async def handle_manage_open(
         "manage_list",
         "manage_search_results",
     }:
-        await query.answer(MANAGE_STALE_TEXT, show_alert=True)
+        await query.answer(tr("errors.stale.manage"), show_alert=True)
         return
     data = query.data or ""
     try:
         place_id = int(data[len("plm_open:") :])
     except (TypeError, ValueError):
-        await query.answer(MANAGE_STALE_TEXT, show_alert=True)
+        await query.answer(tr("errors.stale.manage"), show_alert=True)
         return
     session = SessionLocal()
     try:
@@ -1727,7 +1741,7 @@ async def handle_manage_open(
     finally:
         session.close()
     if visible is not None and place_id not in visible:
-        await query.answer(MANAGE_STALE_TEXT, show_alert=True)
+        await query.answer(tr("errors.stale.manage"), show_alert=True)
         return
     if details is None:
         await query.answer()
@@ -1755,16 +1769,16 @@ async def handle_manage_edit(
     query = ctx.query(update)
     state = load_place_session(ctx.user(update).id)
     if state is None or state.get("phase") != "manage_card":
-        await query.answer(MANAGE_STALE_TEXT, show_alert=True)
+        await query.answer(tr("errors.stale.manage"), show_alert=True)
         return
     data = query.data or ""
     try:
         place_id = int(data[len("plm_edit:") :])
     except (TypeError, ValueError):
-        await query.answer(MANAGE_STALE_TEXT, show_alert=True)
+        await query.answer(tr("errors.stale.manage"), show_alert=True)
         return
     if state.get("place_id") != place_id:
-        await query.answer(MANAGE_STALE_TEXT, show_alert=True)
+        await query.answer(tr("errors.stale.manage"), show_alert=True)
         return
     user_id = ctx.user(update).id
     session = SessionLocal()
@@ -1795,16 +1809,16 @@ async def handle_manage_admins(
     query = ctx.query(update)
     state = load_place_session(ctx.user(update).id)
     if state is None or state.get("phase") != "manage_card":
-        await query.answer(MANAGE_STALE_TEXT, show_alert=True)
+        await query.answer(tr("errors.stale.manage"), show_alert=True)
         return
     data = query.data or ""
     try:
         place_id = int(data[len("plm_admins:") :])
     except (TypeError, ValueError):
-        await query.answer(MANAGE_STALE_TEXT, show_alert=True)
+        await query.answer(tr("errors.stale.manage"), show_alert=True)
         return
     if state.get("place_id") != place_id:
-        await query.answer(MANAGE_STALE_TEXT, show_alert=True)
+        await query.answer(tr("errors.stale.manage"), show_alert=True)
         return
     user_id = ctx.user(update).id
     if not is_superadmin(user_id):
@@ -1835,16 +1849,16 @@ async def handle_manage_admin_request(
     query = ctx.query(update)
     state = load_place_session(ctx.user(update).id)
     if state is None or state.get("phase") != "manage_card":
-        await query.answer(MANAGE_STALE_TEXT, show_alert=True)
+        await query.answer(tr("errors.stale.manage"), show_alert=True)
         return
     data = query.data or ""
     try:
         place_id = int(data[len("plm_admin_request:") :])
     except (TypeError, ValueError):
-        await query.answer(MANAGE_STALE_TEXT, show_alert=True)
+        await query.answer(tr("errors.stale.manage"), show_alert=True)
         return
     if state.get("place_id") != place_id:
-        await query.answer(MANAGE_STALE_TEXT, show_alert=True)
+        await query.answer(tr("errors.stale.manage"), show_alert=True)
         return
     user_id = ctx.user(update).id
     session = SessionLocal()
@@ -1871,7 +1885,7 @@ async def handle_manage_add(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     if state is None or state.get("phase") not in (
         MANAGE_LIST_PHASES | {"manage_search_input"}
     ):
-        await _stale(update, MANAGE_STALE_TEXT)
+        await _stale(update, tr("errors.stale.manage"))
         return
     await ctx.query(update).answer()
     state.clear()

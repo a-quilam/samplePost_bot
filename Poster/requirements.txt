@@ -12,3 +12,7 @@ python-dotenv>=1.0,<2
 
 # ORM и работа с SQLite (database.py, models.py)
 SQLAlchemy>=2.0,<3
+
+# Единый YAML-каталог текстов интерфейса (utils/ui_texts.py, config/ui_texts.yaml):
+# владелец правит формулировки без Python-кода (U4a, дефект №10).
+PyYAML>=6,<7

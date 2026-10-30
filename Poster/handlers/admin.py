@@ -165,11 +165,12 @@ from template_state import clear_template_session
 from user_store import get_or_create_user
 from utils import screen
 from utils import tg_context as ctx
+from utils.ui_texts import tr
 
 logger = logging.getLogger(__name__)
 
 BUTTON_TEXT_LIMIT = 60
-STALE_TEXT = "Кнопка устарела: откройте административный кабинет заново."
+STALE_TEXT = tr("errors.stale.admin")
 DENIED_TEXT = "Раздел доступен только администраторам Poster."
 DENIED_ALERT = "Доступ к административному разделу закрыт."
 
@@ -5182,22 +5183,19 @@ async def _handle_brick_proposal_decision(
     if approved and conflict_ids:
         notified, undelivered = await _notify_conflict_admins(context, conflict_ids)
         if notified and undelivered:
-            notice_extra = (
-                f" Администраторов мест уведомлено: {notified}, "
-                f"не доставлено: {undelivered}."
+            notice_extra = tr(
+                "admin.conflict.admins_both",
+                notified=notified,
+                undelivered=undelivered,
             )
         elif notified:
-            notice_extra = f" Администраторов мест уведомлено: {notified}."
+            notice_extra = tr("admin.conflict.admins_notified", notified=notified)
         elif undelivered:
-            notice_extra = (
-                f" Уведомления администраторам мест не доставлены: {undelivered}; "
-                "задача видна в карточке места."
+            notice_extra = tr(
+                "admin.conflict.admins_undelivered", undelivered=undelivered
             )
         else:
-            notice_extra = (
-                " Уведомления администраторам мест поставлены в очередь; "
-                "если администратора нет, задача видна в карточке места."
-            )
+            notice_extra = tr("admin.conflict.admins_queued")
     else:
         notice_extra = ""
     state["phase"] = "proposal_card"
@@ -5208,12 +5206,9 @@ async def _handle_brick_proposal_decision(
     )
     notice += notice_extra
     if delivered:
-        notice += " Автору отправлено уведомление."
+        notice += tr("admin.conflict.author_delivered")
     else:
-        notice += (
-            " Уведомление автору не доставлено; решение сохранено, статус "
-            "доступен в «Мои предложения»."
-        )
+        notice += tr("admin.conflict.author_undelivered")
     await _render_phase(update, context, state, notice=notice)
 
 
@@ -5565,16 +5560,13 @@ async def handle_conflict_text(
 
 
 def _conflict_notification_text(notification) -> str:
+    """Плашка-уведомление администратору места (шаблон с разметкой в каталоге)."""
     place = notification.place_name or f"место #{notification.place_id}"
-    return (
-        "⚔️ <b>Конфликт кодов кирпичиков</b>\n\n"
-        f"📍 {_h(place)}\n"
-        f"Код: <code>[{_h(notification.code)}]</code>\n"
-        f"Местный кирпичик: {_h(notification.local_brick_title)}\n\n"
-        "Глобальный кирпичик с этим кодом одобрен и уже действует для новых "
-        "привязок. Местный кирпичик не изменён: выберите, переименовать его "
-        "или переключить шаблон места на глобальный.\n\n"
-        "Откройте: /admin → «Мои места» → место → «⚔️ Конфликты кодов»."
+    return tr(
+        "admin.conflict.notification_html",
+        place=place,
+        code=notification.code,
+        brick=notification.local_brick_title,
     )
 
 

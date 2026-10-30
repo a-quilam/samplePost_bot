@@ -28,6 +28,7 @@ from telegram.ext import ContextTypes
 from database import SessionLocal
 from models import UserState, utcnow
 from utils import tg_context as ctx
+from utils.ui_texts import tr
 
 logger = logging.getLogger(__name__)
 
@@ -37,8 +38,8 @@ SCREEN_LINK_PREVIEW = LinkPreviewOptions(is_disabled=True)
 
 # Текст служебного сообщения, снимающего reply-клавиатуру старых версий
 # (R1, дефект №23). Сообщение сразу удаляется, поэтому видит его только
-# клиент в момент доставки.
-LEGACY_KEYBOARD_RESET_TEXT = "Интерфейс обновлён: кнопки теперь на экране сообщения."
+# клиент в момент доставки. Строка — в каталоге config/ui_texts.yaml.
+LEGACY_KEYBOARD_RESET_TEXT = tr("screen.legacy_keyboard_reset")
 LEGACY_KEYBOARD_RESET_KEY = "legacy_reply_keyboard_dropped"
 
 

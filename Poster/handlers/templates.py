@@ -98,6 +98,7 @@ from template_types import (
 )
 from user_store import get_or_create_user
 from utils.tg_html import escape_html
+from utils.ui_texts import tr
 
 logger = logging.getLogger(__name__)
 
@@ -172,7 +173,7 @@ PHASES = frozenset({PHASE_HUB, PHASE_PICK}) | _TEMPLATE_PHASES | _CREATE_PHASES
 
 _TEXT_INPUT_ERROR = "Текст не принят. Исправьте его и отправьте новой полной секцией."
 
-STALE_TEXT = "Кнопка устарела: откройте шаблон заново."
+STALE_TEXT = tr("errors.stale.templates")
 DENIED_TEXT = "Шаблон недоступен."
 
 SECTION_TITLES = {

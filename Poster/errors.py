@@ -28,21 +28,20 @@ from telegram import Update
 from telegram.error import BadRequest
 from telegram.ext import ContextTypes
 
+from utils.ui_texts import tr
+
 logger = logging.getLogger(__name__)
 
 # Минимальный интервал между уведомлениями об ошибке в одном чате
 ERROR_NOTICE_INTERVAL_SECONDS = 5.0
 
-ERROR_NOTICE_TEXT = (
-    "⚠️ Произошла внутренняя ошибка. Попробуйте повторить действие чуть позже."
-)
+# Тексты живут в каталоге config/ui_texts.yaml (U4a, дефект №10): владелец
+# правит формулировки без Python-кода. Здесь читаются в момент отправки.
+ERROR_NOTICE_KEY = "errors.internal"
 
 # Понятный текст для ожидаемых доменных ошибок: экран рассинхронизирован,
 # данные не потеряны, пользователь возвращается в меню и пробует снова.
-DOMAIN_NOTICE_TEXT = (
-    "Экран устарел: данные изменились или не сохранились. "
-    "Открываю главное меню — попробуйте ещё раз."
-)
+DOMAIN_NOTICE_KEY = "errors.domain"
 
 # chat_id -> время последнего уведомления (time.monotonic)
 _last_error_notice: dict[int, float] = {}
@@ -132,6 +131,16 @@ def expected_domain_errors() -> tuple[type[BaseException], ...]:
     return _expected_error_types
 
 
+def error_notice_text() -> str:
+    """Текст уведомления о внутренней ошибке (из каталога)."""
+    return tr(ERROR_NOTICE_KEY)
+
+
+def domain_notice_text() -> str:
+    """Текст fallback'а для ожидаемых доменных ошибок (из каталога)."""
+    return tr(DOMAIN_NOTICE_KEY)
+
+
 def is_expected_domain_error(error: BaseException | None) -> bool:
     """True — ошибка ожидаемая (данные/права), а не сбой кода."""
     if error is None:
@@ -152,7 +161,7 @@ async def _send_error_notice(message, chat_id: int) -> bool:
         return False
     _last_error_notice[chat_id] = now
     try:
-        await message.reply_text(ERROR_NOTICE_TEXT)
+        await message.reply_text(error_notice_text())
         return True
     except Exception:
         logger.exception("Не удалось отправить уведомление об ошибке")
@@ -206,7 +215,7 @@ async def _handle_expected_error(
     logger.warning("Ожидаемая доменная ошибка при обработке экрана: %s", error)
     if not isinstance(update, Update):
         return True
-    await _answer_query(update, DOMAIN_NOTICE_TEXT)
+    await _answer_query(update, domain_notice_text())
     await _render_fallback_parent(update, context)
     return True
 

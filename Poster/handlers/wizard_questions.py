@@ -42,6 +42,7 @@ from brick_types import (
 from utils import calendar_view, keyboard_layouts
 from utils.parsers import app_today
 from utils.tg_html import escape_html, utf16_len
+from utils.ui_texts import tr, tr_safe
 
 # Быстрые значения времени (S3 п.5): самые частые начала вечеринок/встреч.
 # Ручной ввод остаётся: кнопки — сокращение, а не замена.
@@ -76,12 +77,12 @@ def h(value: object) -> str:
 
 def field_status_text(field: AnnouncementFieldState) -> str:
     if field.status == FIELD_STATUS_VALID:
-        return "заполнено"
+        return tr("wizard.status.valid")
     if field.status == FIELD_STATUS_SKIPPED:
-        return "пропущено"
+        return tr("wizard.status.skipped")
     if field.status == FIELD_STATUS_MISSING:
-        return "не заполнено"
-    return "из справочника"
+        return tr("wizard.status.missing")
+    return tr("wizard.status.from_reference")
 
 
 def format_value(value: object | None, *, limit: int = DISPLAY_TEXT_LIMIT) -> str:
@@ -236,26 +237,26 @@ def stored_value_html(field: AnnouncementFieldState) -> str:
 def number_rules_hint(rules: dict[str, Any]) -> str:
     parts = []
     if rules.get("integer"):
-        parts.append("целое число")
+        parts.append(tr("wizard.number_rule.integer"))
     if rules.get("min") is not None and rules.get("max") is not None:
-        parts.append(f"от {rules['min']} до {rules['max']}")
+        parts.append(tr("wizard.number_rule.range", min=rules["min"], max=rules["max"]))
     elif rules.get("min") is not None:
-        parts.append(f"не меньше {rules['min']}")
+        parts.append(tr("wizard.number_rule.min", min=rules["min"]))
     elif rules.get("max") is not None:
-        parts.append(f"не больше {rules['max']}")
+        parts.append(tr("wizard.number_rule.max", max=rules["max"]))
     if isinstance(rules.get("suffix"), str) and rules["suffix"]:
-        parts.append(f"суффикс «{rules['suffix']}»")
+        parts.append(tr("wizard.number_rule.suffix", suffix=rules["suffix"]))
     return "; ".join(parts)
 
 
 def date_rules_hint(rules: dict[str, Any]) -> str:
     parts = []
     if rules.get("min_date"):
-        parts.append(f"не раньше {rules['min_date']}")
+        parts.append(tr("wizard.date_rule.min", min_date=rules["min_date"]))
     if rules.get("max_date"):
-        parts.append(f"не позже {rules['max_date']}")
+        parts.append(tr("wizard.date_rule.max", max_date=rules["max_date"]))
     if rules.get("horizon_months") is not None:
-        parts.append(f"горизонт {rules['horizon_months']} мес.")
+        parts.append(tr("wizard.date_rule.horizon", months=rules["horizon_months"]))
     return "; ".join(parts)
 
 
@@ -263,31 +264,30 @@ def type_hint(field: AnnouncementFieldState) -> str:
     value_type = field.value_type
     rules = dict(field.rules or {})
     if value_type == BRICK_TYPE_SHORT_TEXT:
-        return "Ожидается короткий текст одним сообщением."
+        return tr("wizard.hint.short_text")
     if value_type == BRICK_TYPE_LONG_TEXT:
-        return "Можно отправить несколько строк одним сообщением."
+        return tr("wizard.hint.long_text")
     if value_type == BRICK_TYPE_DATE:
         extra = date_rules_hint(rules)
-        base = "Выберите дату календарём или отправьте её текстом, например 31.12.2026."
-        return f"{base} Ограничения: {extra}" if extra else base
+        base = tr("wizard.hint.date")
+        return tr("wizard.hint.date_limits", base=base, rules=extra) if extra else base
     if value_type == BRICK_TYPE_TIME:
         presets = ", ".join(TIME_PRESETS)
-        return "Отправьте время, например 18:30 или 9:00. Быстрый выбор: " f"{presets}."
+        return tr("wizard.hint.time", presets=presets)
     if value_type == BRICK_TYPE_URL:
-        return (
-            "Отправьте ссылку: https://…, t.me/… или домен. Опасные схемы "
-            "не принимаются."
-        )
+        return tr("wizard.hint.url")
     if value_type == BRICK_TYPE_NUMBER:
         extra = number_rules_hint(rules)
-        base = "Отправьте число цифрами, например 12."
-        return f"{base} Ограничения: {extra}." if extra else base
+        base = tr("wizard.hint.number")
+        return (
+            tr("wizard.hint.number_limits", base=base, rules=extra) if extra else base
+        )
     if value_type == BRICK_TYPE_CHOICE:
         if rules.get("multiple"):
-            return "Отметьте один или несколько вариантов кнопками, затем «Готово»."
-        return "Выберите один вариант кнопкой."
+            return tr("wizard.hint.choice_multiple")
+        return tr("wizard.hint.choice_single")
     title = BRICK_TYPE_TITLES.get(value_type, value_type)
-    return f"Введите значение типа «{title}»."
+    return tr("wizard.hint.fallback", title=title)
 
 
 def choice_options(field: AnnouncementFieldState) -> list[str]:
@@ -341,29 +341,35 @@ def question_text(
     вызывающим слоем уже после сборки клавиатуры, чтобы текст вопроса
     оставался чистым, а `callback_data` — неизменными.
     """
-    blocks = [f"🧱 Вопрос {index + 1} из {total}: {h(field.title)}"]
+    blocks = [
+        tr("wizard.question.header", step=index + 1, total=total, title=field.title)
+    ]
     # Poster 2.0 S5: описание кирпичика — инструкция автору анонса. Текст
-    # задаёт человек, поэтому он экранируется и оборачивается в `<code>`
+    # задаёт человек, поэтому `tr` экранирует его и оставляет в `<code>`
     # (Poster 2.1 R4 №27: описание в предпросмотре — моноширинно).
-    description = description_html(field.description)
+    description = _description_text(field.description)
     if description:
-        blocks.append(f"📝 {description}")
+        blocks.append(tr("wizard.question.description_html", description=description))
     blocks.extend(
         [
             type_hint(field),
-            "Поле необязательное: его можно пропустить.",
+            tr("wizard.question.optional"),
         ]
     )
     if field.status == FIELD_STATUS_VALID:
         # U1b: сохранённое значение показываем с форматированием (allow-list
         # пройден при записи и чтении); plain-значения экранируются внутри.
-        blocks.append(f"Текущее значение: {stored_value_html(field)}")
+        # tr_safe: HTML значения уже прошёл allow-list — экранировать его
+        # повторно нельзя, иначе пользователь увидит &lt;b&gt;.
+        blocks.append(
+            tr_safe("wizard.question.current_value", value=stored_value_html(field))
+        )
     elif field.status == FIELD_STATUS_SKIPPED:
-        blocks.append("Сейчас поле пропущено. Можно заполнить его или перейти дальше.")
+        blocks.append(tr("wizard.question.skipped"))
     elif field.status == FIELD_STATUS_MISSING:
-        blocks.append("Значение пока не задано.")
+        blocks.append(tr("wizard.question.missing"))
     if error:
-        blocks.append(f"⚠️ {h(error)}")
+        blocks.append(tr("wizard.question.error", message=error))
     if notice:
         blocks.append(h(notice))
     return "\n\n".join(blocks)
@@ -474,7 +480,8 @@ def calendar_shortcut_rows(
         rows.append(
             [
                 InlineKeyboardButton(
-                    "📅 Выбрать месяц", callback_data=f"aw_calmonths:{prefix}"
+                    tr("buttons.wizard.choose_month"),
+                    callback_data=f"aw_calmonths:{prefix}",
                 )
             ]
         )

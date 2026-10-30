@@ -127,6 +127,7 @@ from utils import tg_context as ctx
 from utils.parsers import app_today
 from utils.place_labels import place_title
 from utils.tg_html import capture_message_text, escape_html
+from utils.ui_texts import tr, tr_safe
 
 # Poster 2.0 S3 п.1: вид вопроса/календаря вынесен в `wizard_questions`,
 # поведение прежнее. Имена с подчёркиванием сохранены как локальные
@@ -185,15 +186,9 @@ SCOPE_LABELS = {
     BRICK_SCOPE_PERSONAL: "личный",
 }
 
-STALE_TEXT = "Экран устарел: данные уже изменились. Показано актуальное состояние."
-EXPIRED_TEXT = (
-    "Кнопка устарела после перезапуска. Откройте «📂 Мои анонсы» и "
-    "продолжите сохранённый черновик."
-)
-PRIVATE_CHAT_ONLY = (
-    "Готовый анонс отправляется только в личный чат автора. "
-    "Откройте мастер в личном чате с ботом — черновик сохранён."
-)
+STALE_TEXT = tr("errors.stale.wizard")
+EXPIRED_TEXT = tr("errors.expired.wizard")
+PRIVATE_CHAT_ONLY = tr("errors.private_chat_only")
 
 
 def _user_id(update: Update) -> int:
@@ -571,7 +566,7 @@ def _home_content(user_id: int, page: int) -> tuple[str, InlineKeyboardMarkup, i
     shown = drafts[start : start + TEMPLATE_PAGE_SIZE]
 
     lines = [
-        "📂 Мои анонсы",
+        tr("buttons.main.announcements"),
         "",
         "Незавершённые анонсы можно продолжить с того же шага, завершённые "
         "остаются в истории и не удаляются при создании новых. Готовый анонс "
@@ -654,9 +649,21 @@ def _place_hub_content() -> tuple[str, InlineKeyboardMarkup]:
     )
     keyboard = InlineKeyboardMarkup(
         [
-            [InlineKeyboardButton("🔎 Найти место", callback_data="aw_place_search")],
-            [InlineKeyboardButton("📚 Все места", callback_data="aw_place_all:0")],
-            [InlineKeyboardButton("◀️ Назад", callback_data="aw_place_back")],
+            [
+                InlineKeyboardButton(
+                    tr("buttons.places.search"), callback_data="aw_place_search"
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    tr("buttons.places.all"), callback_data="aw_place_all:0"
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    tr("buttons.nav.back"), callback_data="aw_place_back"
+                )
+            ],
         ]
     )
     return text, keyboard
@@ -706,7 +713,9 @@ def _place_buttons(
             else None
         ),
     )
-    rows.append([InlineKeyboardButton("◀️ Назад", callback_data="aw_place_back")])
+    rows.append(
+        [InlineKeyboardButton(tr("buttons.nav.back"), callback_data="aw_place_back")]
+    )
     return rows
 
 
@@ -736,7 +745,7 @@ async def _render_all_places(
                 limit=PLACE_PAGE_SIZE,
             )
     lines = [
-        "📚 Все места",
+        tr("buttons.places.all"),
         "",
         (
             f"Всего: {total}. Страница {page + 1}."
@@ -756,7 +765,11 @@ async def _render_all_places(
     if not places:
         rows.insert(
             0,
-            [InlineKeyboardButton("🔎 Найти место", callback_data="aw_place_search")],
+            [
+                InlineKeyboardButton(
+                    tr("buttons.places.search"), callback_data="aw_place_search"
+                )
+            ],
         )
     text = "\n".join(lines)
     body = f"{notice}\n\n{text}" if notice else text
@@ -823,8 +836,12 @@ async def _render_search_results(
     rows.append(
         [InlineKeyboardButton("🔎 Изменить запрос", callback_data="aw_place_search")]
     )
-    rows.append([InlineKeyboardButton("📚 Все места", callback_data="aw_place_all:0")])
-    rows.append([InlineKeyboardButton("◀️ Назад", callback_data="aw_place_back")])
+    rows.append(
+        [InlineKeyboardButton(tr("buttons.places.all"), callback_data="aw_place_all:0")]
+    )
+    rows.append(
+        [InlineKeyboardButton(tr("buttons.nav.back"), callback_data="aw_place_back")]
+    )
     text = "\n".join(lines)
     body = f"{notice}\n\n{text}" if notice else text
     await _render(update, context, body, InlineKeyboardMarkup(rows))
@@ -850,7 +867,13 @@ async def _render_search_prompt(
         context,
         body,
         InlineKeyboardMarkup(
-            [[InlineKeyboardButton("◀️ Назад", callback_data="aw_place_back")]]
+            [
+                [
+                    InlineKeyboardButton(
+                        tr("buttons.nav.back"), callback_data="aw_place_back"
+                    )
+                ]
+            ]
         ),
     )
     return AW_PLACE
@@ -927,7 +950,9 @@ async def _render_place_card(
                 )
             ]
         )
-    rows.append([InlineKeyboardButton("◀️ Назад", callback_data="aw_place_back")])
+    rows.append(
+        [InlineKeyboardButton(tr("buttons.nav.back"), callback_data="aw_place_back")]
+    )
     await _render(update, context, body, InlineKeyboardMarkup(rows))
     return AW_PLACE
 
@@ -993,7 +1018,9 @@ async def _render_place_names(
         )
     if nav:
         rows.append(nav)
-    rows.append([InlineKeyboardButton("◀️ Назад", callback_data="aw_place_back")])
+    rows.append(
+        [InlineKeyboardButton(tr("buttons.nav.back"), callback_data="aw_place_back")]
+    )
     text = "\n".join(lines)
     body = f"{notice}\n\n{text}" if notice else text
     await _render(update, context, body, InlineKeyboardMarkup(rows))
@@ -1519,13 +1546,13 @@ async def _render_question(
             ]
         )
     skip_button = InlineKeyboardButton(
-        "⏭ Пропустить",
+        tr("buttons.wizard.skip"),
         callback_data=(
             f"aw_qskip:{details.draft_id}:{details.revision}:{field.brick_id}"
         ),
     )
     back_button = InlineKeyboardButton(
-        "◀️ Назад",
+        tr("buttons.nav.back"),
         callback_data=(
             f"aw_qback:{details.draft_id}:{details.revision}:{field.brick_id}"
         ),
@@ -1819,7 +1846,9 @@ async def _render_question_manager(
             )
         ]
     )
-    rows.append([InlineKeyboardButton("◀️ Назад", callback_data="aw_manage_back")])
+    rows.append(
+        [InlineKeyboardButton(tr("buttons.nav.back"), callback_data="aw_manage_back")]
+    )
     text = "\n".join(lines)
     body = f"{notice}\n\n{text}" if notice else text
     await _render(update, context, body, InlineKeyboardMarkup(rows))
@@ -2100,14 +2129,17 @@ async def _render_calendar_days(
     title: str,
     days: list[date],
     back_callback: str,
-    back_label: str = "◀️ Назад",
+    back_label: str | None = None,
     per_row: int = 4,
     label: Callable[[date], str] = calendar_view.format_quick_day,
 ) -> int:
     """Экран дней (раскрытый диапазон или сетка месяца) с возвратом."""
     prefix = f"{details.draft_id}:{details.revision}:{field.brick_id}"
     rows = _day_rows(days, prefix, per_row=per_row, label=label)
-    rows.append([InlineKeyboardButton(back_label, callback_data=back_callback)])
+    # Подпись читается в момент отрисовки: правка каталога видна без
+    # перезапуска процесса (импорт-time значение застыло бы навсегда).
+    label_text = back_label if back_label is not None else tr("buttons.nav.back")
+    rows.append([InlineKeyboardButton(label_text, callback_data=back_callback)])
     await _render(update, context, title, InlineKeyboardMarkup(rows))
     return AW_QUESTIONS
 
@@ -2365,7 +2397,7 @@ async def _render_extras(
             if field.status == FIELD_STATUS_MISSING:
                 value_text = "значение не задано"
             elif field.status == FIELD_STATUS_SKIPPED:
-                value_text = "пропущено"
+                value_text = tr("wizard.status.skipped")
             else:
                 value_text = value or "пусто"
             lines.append(
@@ -2409,7 +2441,7 @@ async def _render_extras(
         rows.append(
             [
                 InlineKeyboardButton(
-                    "🔄 Применить изменения",
+                    tr("buttons.finished.apply"),
                     callback_data=(f"aw_apply:{details.draft_id}:{details.revision}"),
                 )
             ]
@@ -2418,7 +2450,7 @@ async def _render_extras(
         rows.append(
             [
                 InlineKeyboardButton(
-                    "◀️ Назад",
+                    tr("buttons.nav.back"),
                     callback_data=(f"aw_panel:{details.draft_id}:{details.revision}"),
                 )
             ]
@@ -2541,7 +2573,7 @@ async def _render_available_bricks(
     rows.append(
         [
             InlineKeyboardButton(
-                "◀️ Назад",
+                tr("buttons.nav.back"),
                 callback_data=(f"aw_extras:{details.draft_id}:{details.revision}"),
             )
         ]
@@ -2604,7 +2636,7 @@ async def _render_extra_sections(
     rows.append(
         [
             InlineKeyboardButton(
-                "◀️ Назад",
+                tr("buttons.nav.back"),
                 callback_data=f"aw_exback:{details.draft_id}:{details.revision}",
             )
         ]
@@ -2660,7 +2692,7 @@ async def _render_extra_position(
         ],
         [
             InlineKeyboardButton(
-                "◀️ Назад",
+                tr("buttons.nav.back"),
                 callback_data=f"aw_exback:{details.draft_id}:{details.revision}",
             )
         ],
@@ -2684,11 +2716,16 @@ def _extra_value_text(extra, field: AnnouncementFieldState) -> str:
     lines.append(_type_hint(field))
     if field.status == FIELD_STATUS_VALID:
         # U1b: сохранённое значение — с форматированием (см. stored_value_html).
-        lines.append(f"Текущее значение: {wizard_questions.stored_value_html(field)}")
+        lines.append(
+            tr_safe(
+                "wizard.question.current_value",
+                value=wizard_questions.stored_value_html(field),
+            )
+        )
     elif field.status == FIELD_STATUS_SKIPPED:
-        lines.append("Сейчас значение пропущено.")
+        lines.append(tr("wizard.question.skipped"))
     else:
-        lines.append("Значение пока не задано.")
+        lines.append(tr("wizard.question.missing"))
     return "\n\n".join(lines)
 
 
@@ -2753,7 +2790,7 @@ async def _render_extra_value_prompt(
     rows.append(
         [
             InlineKeyboardButton(
-                "⏭ Пропустить",
+                tr("buttons.wizard.skip"),
                 callback_data=(
                     f"aw_exskip:{details.draft_id}:{details.revision}:"
                     f"{field.brick_id}"
@@ -2976,7 +3013,7 @@ def _preview_block(preview: AnnouncementPreview) -> list[str]:
     if preview.ready:
         lines = [
             "",
-            "✅ Анонс готов: он собирается и приходит в этот чат автоматически.",
+            tr("wizard.ready.collecting"),
         ]
         if preview.warnings:
             lines.append(_h(preview.warnings[0]))
@@ -3067,7 +3104,7 @@ def _preview_keyboard(
         rows.append(
             [
                 InlineKeyboardButton(
-                    "🔄 Применить изменения",
+                    tr("buttons.finished.apply"),
                     callback_data=f"aw_apply:{draft_id}:{revision}",
                 )
             ]
@@ -3434,7 +3471,7 @@ async def _render_photos(
     ui["photos_page"] = page
 
     lines = [
-        "📷 Фотографии анонса",
+        tr("wizard.photos.title"),
         "",
         f"Добавлено: {total}. Фото необязательны и не входят в шаблон: "
         "они отправляются отдельными вложениями.",
@@ -3591,7 +3628,7 @@ async def _render_photos(
         rows.append(
             [
                 InlineKeyboardButton(
-                    "🔄 Применить изменения",
+                    tr("buttons.finished.apply"),
                     callback_data=(f"aw_apply:{details.draft_id}:{details.revision}"),
                 )
             ]
@@ -3934,7 +3971,7 @@ async def _finish_and_deliver(
                 update,
                 context,
                 promoted,
-                notice=notice or "✅ Анонс готов: он уже отправлен в этот чат.",
+                notice=notice or tr("wizard.ready.sent"),
             )
     try:
         with SessionLocal() as session:
@@ -4060,18 +4097,13 @@ async def _promote_live_post(
 
 # U2b: экран завершения — ровно два действия. Текст фиксированный: никаких
 # служебных сводок, длин и списков. Единственное допустимое дополнение —
-# предупреждение о неприменённых изменениях.
-DELIVERED_TEXT = "✅ Анонс готов.\n\nСообщение выше можно скопировать или переслать"
-DELIVERED_PENDING_TEXT = (
-    "✏️ Есть изменения, ещё не отправленные в чат. " "Нажмите «Применить изменения»."
-)
+# предупреждение о неприменённых изменениях. Сами строки — в каталоге
+# config/ui_texts.yaml: владелец правит их без Python-кода.
+DELIVERED_TEXT = tr("wizard.finished.text")
+DELIVERED_PENDING_TEXT = tr("wizard.finished.pending")
 
 # U2b: компактный экран редактирования готового анонса — только категории.
-DELIVERED_EDIT_TEXT = (
-    "✏️ Редактирование анонса\n\n"
-    "Выберите, что изменить. Новая копия уходит в чат только по "
-    "«Применить изменения»."
-)
+DELIVERED_EDIT_TEXT = tr("wizard.finished.edit_text")
 
 
 def _delivered_keyboard(details) -> InlineKeyboardMarkup:
@@ -4082,10 +4114,12 @@ def _delivered_keyboard(details) -> InlineKeyboardMarkup:
         [
             [
                 InlineKeyboardButton(
-                    "✏️ Изменить",
+                    tr("buttons.finished.edit"),
                     callback_data=f"aw_edit:{draft_id}:{revision}",
                 ),
-                InlineKeyboardButton("🏠 В меню", callback_data="main_menu"),
+                InlineKeyboardButton(
+                    tr("buttons.finished.menu"), callback_data="main_menu"
+                ),
             ]
         ]
     )
@@ -4104,31 +4138,31 @@ def _delivered_edit_keyboard(details) -> InlineKeyboardMarkup:
         [
             [
                 InlineKeyboardButton(
-                    "✏️ Данные",
+                    tr("buttons.finished.data"),
                     callback_data=f"aw_qmanage:{draft_id}:{revision}",
                 )
             ],
             [
                 InlineKeyboardButton(
-                    f"📷 Фотографии ({len(details.photos)})",
+                    tr("buttons.finished.photos", count=len(details.photos)),
                     callback_data=f"aw_photos:{draft_id}:{revision}:0",
                 )
             ],
             [
                 InlineKeyboardButton(
-                    f"➕ Кирпичики ({len(details.extras)})",
+                    tr("buttons.finished.extras", count=len(details.extras)),
                     callback_data=f"aw_extras:{draft_id}:{revision}",
                 )
             ],
             [
                 InlineKeyboardButton(
-                    "🔄 Применить изменения",
+                    tr("buttons.finished.apply"),
                     callback_data=f"aw_apply:{draft_id}:{revision}",
                 )
             ],
             [
                 InlineKeyboardButton(
-                    "◀️ Назад",
+                    tr("buttons.nav.back"),
                     callback_data=f"aw_panel:{draft_id}:{revision}",
                 )
             ],
@@ -4200,9 +4234,11 @@ async def _render_delivered(
     # сообщение поста отправляется уже после служебного экрана, поэтому
     # экран пересоздаётся ниже — до отрисовки нового экрана.
     await _ensure_service_screen_below(update, context, details.delivered_message_ids)
-    lines = [DELIVERED_TEXT]
+    # Строки читаются из каталога в момент отрисовки: правка YAML + перезапуск
+    # службы меняет экран без правки кода (константы выше — те же дефолты).
+    lines = [tr("wizard.finished.text")]
     if pending:
-        lines.extend(["", DELIVERED_PENDING_TEXT])
+        lines.extend(["", tr("wizard.finished.pending")])
     # `notice` не попадает в текст экрана (он фиксирован требованием U2b):
     # результат действия сообщается коротким ответом на callback.
     if notice:
@@ -4227,7 +4263,7 @@ async def _render_delivered_edit(
     ui = _ui(context)
     _set_details(ui, details)
     _clear_active(ui)
-    text = DELIVERED_EDIT_TEXT
+    text = tr("wizard.finished.edit_text")
     if notice:
         text = f"{notice}\n\n{text}"
     await _render(

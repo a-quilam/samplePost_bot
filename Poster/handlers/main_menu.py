@@ -42,6 +42,7 @@ from place_state import clear_place_session, has_place_session
 from template_state import clear_template_session, has_template_session
 from utils import screen
 from utils import tg_context as ctx
+from utils.ui_texts import tr
 
 logger = logging.getLogger(__name__)
 
@@ -59,17 +60,21 @@ def main_menu_keyboard() -> InlineKeyboardMarkup:
         [
             [
                 InlineKeyboardButton(
-                    "📍 Создать для площадки", callback_data="pick_place"
+                    tr("buttons.main.create_place"), callback_data="pick_place"
                 )
             ],
             [
                 InlineKeyboardButton(
-                    "📝 Создать по личному шаблону", callback_data="pick_template"
+                    tr("buttons.main.create_template"), callback_data="pick_template"
                 )
             ],
-            [InlineKeyboardButton("📂 Мои анонсы", callback_data="my_announcements")],
-            [InlineKeyboardButton("⚙️ Управление", callback_data="manage")],
-            [InlineKeyboardButton("❓ Помощь", callback_data="help")],
+            [
+                InlineKeyboardButton(
+                    tr("buttons.main.announcements"), callback_data="my_announcements"
+                )
+            ],
+            [InlineKeyboardButton(tr("buttons.main.manage"), callback_data="manage")],
+            [InlineKeyboardButton(tr("buttons.main.help"), callback_data="help")],
         ]
     )
 
@@ -83,15 +88,33 @@ def manage_keyboard(*, show_admin: bool = False) -> InlineKeyboardMarkup:
     удобство, а не защита.
     """
     rows = [
-        [InlineKeyboardButton("📍 Площадки", callback_data="manage_places")],
-        [InlineKeyboardButton("📝 Шаблоны", callback_data="manage_templates")],
-        [InlineKeyboardButton("🧱 Кирпичики", callback_data="manage_bricks")],
+        [
+            InlineKeyboardButton(
+                tr("buttons.manage.places"), callback_data="manage_places"
+            )
+        ],
+        [
+            InlineKeyboardButton(
+                tr("buttons.manage.templates"), callback_data="manage_templates"
+            )
+        ],
+        [
+            InlineKeyboardButton(
+                tr("buttons.manage.bricks"), callback_data="manage_bricks"
+            )
+        ],
     ]
     if show_admin:
         rows.append(
-            [InlineKeyboardButton("🛡 Администрирование", callback_data="admin_panel")]
+            [
+                InlineKeyboardButton(
+                    tr("buttons.manage.admin"), callback_data="admin_panel"
+                )
+            ]
         )
-    rows.append([InlineKeyboardButton("◀️ Главное меню", callback_data="main_menu")])
+    rows.append(
+        [InlineKeyboardButton(tr("buttons.nav.main_menu"), callback_data="main_menu")]
+    )
     return InlineKeyboardMarkup(rows)
 
 
@@ -114,16 +137,12 @@ def _show_admin_button(telegram_user_id: int) -> bool:
 
 def main_menu_text() -> str:
     """Текст экрана главного меню."""
-    return "Здравствуйте! 👋\n\nВыберите действие:"
+    return tr("menu.main")
 
 
 def manage_text() -> str:
     """Текст экрана «Управление»."""
-    return (
-        "⚙️ Управление\n\n"
-        "Площадки, шаблоны и кирпичики — общие разделы. Администрирование "
-        "видно только тем, кому владелец Poster действительно выдал права."
-    )
+    return tr("menu.manage")
 
 
 async def render_main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -189,66 +208,20 @@ def help_text() -> str:
     Справка: кнопки, команды и правила ввода Poster 2.0.
 
     Экран рисуется с parse_mode=HTML (см. utils.screen.render_screen),
-    поэтому разметка ниже — безопасные собственные теги (<b>), без
-    пользовательских значений. Лимиты импортируются локально: справка не
-    должна тянуть сервисы домена при импорте модуля.
+    поэтому текст справки — ключ `help.text_html` с доверенной собственной
+    разметкой (<b>). Пользовательских данных в нём нет, но лимиты берутся из
+    сервисов домена: значения подставляются через `tr` и экранируются.
+    Импорт лимитов локальный: справка не должна тянуть сервисы домена при
+    импорте модуля.
     """
     from announcement_store import MAX_ANNOUNCEMENT_PHOTOS
     from delivery import ANNOUNCEMENT_CAPTION_LIMIT, ANNOUNCEMENT_TEXT_LIMIT
 
-    return (
-        "<b>Помощь</b>\n\n"
-        "Я собираю анонсы по шаблону: вопросы, живой текст сверху экрана, "
-        "фотографии и готовый пост в этот чат.\n\n"
-        "<b>Кнопки меню</b>\n"
-        "— <b>«📍 Создать для площадки»</b> — список зарегистрированных "
-        "площадок; тап по названию сразу начинает анонс по её стандартному "
-        "шаблону. Новую площадку можно добавить там же — анонс откроется "
-        "сразу после создания;\n"
-        "— <b>«📝 Создать по личному шаблону»</b> — ваши личные шаблоны. Тап "
-        "по названию сразу начинает анонс; создание и правка шаблонов — в "
-        "том же разделе;\n"
-        "— <b>«📂 Мои анонсы»</b> — незавершённые анонсы можно продолжить, "
-        "завершённые остаются в истории; новые анонсы их не удаляют;\n"
-        "— <b>«⚙️ Управление»</b> — площадки, шаблоны и кирпичики. Пункт "
-        "«🛡 Администрирование» виден только при выданных правах;\n"
-        "— <b>«❓ Помощь»</b> — эта справка.\n\n"
-        "<b>Два входа в конструктор</b>\n"
-        "«Создать для площадки» подставляет площадку и её стандартный "
-        "шаблон, готовый пост приходит с адресом места. «Создать по личному "
-        "шаблону» работает без площадки — адрес и контакты берутся из "
-        "вашего шаблона. Оба входа ведут в один и тот же конструктор.\n\n"
-        "<b>Фотографии</b>\n"
-        "Можно отправить одно фото, несколько сразу или альбомом — бот "
-        "соберёт партию и добавит её к анонсу. Лимит — "
-        f"{MAX_ANNOUNCEMENT_PHOTOS} фото на анонс; 11-е не примется, и "
-        "экран покажет, что сообщение осталось.\n\n"
-        "<b>Текст и лимиты</b>\n"
-        "Без фотографий готовый анонс может занимать до "
-        f"{ANNOUNCEMENT_TEXT_LIMIT} символов, с фотографиями подпись — до "
-        f"{ANNOUNCEMENT_CAPTION_LIMIT}. Слишком длинный анонс не режется "
-        "молча и не отправляется частями: бот покажет, что именно сократить, "
-        "и предложит правку.\n\n"
-        "<b>Ввод и очистка</b>\n"
-        "Ваши сообщения с ответами и фото удаляются после того, как данные "
-        "надёжно сохранены. Ошибочный ввод остаётся на экране, пока вы не "
-        "исправите поле. Навигация по кнопкам не плодит сообщения: экран "
-        "перерисовывается.\n\n"
-        "<b>Готовый анонс</b>\n"
-        "После отправки анонс можно открыть в «📂 Мои анонсы», изменить поля, "
-        "фото или дополнительные кирпичики и применить изменения — придёт "
-        "новая версия. Частичная отправка не дублирует уже доставленные "
-        "сообщения.\n\n"
-        "<b>Команды</b>\n"
-        "/start — главное меню\n"
-        "/new_wizard — новый анонс\n"
-        "/places — площадки\n"
-        "/templates — личные шаблоны\n"
-        "/bricks — мои кирпичики\n"
-        "/admin — кабинет, если у вас есть права администратора\n"
-        "/drafts — мои анонсы (то же, что кнопка «📂 Мои анонсы»)\n"
-        "/cancel — закрыть текущий диалог без удаления черновика\n"
-        "/help — эта справка"
+    return tr(
+        "help.text_html",
+        max_photos=MAX_ANNOUNCEMENT_PHOTOS,
+        text_limit=ANNOUNCEMENT_TEXT_LIMIT,
+        caption_limit=ANNOUNCEMENT_CAPTION_LIMIT,
     )
 
 
@@ -261,7 +234,7 @@ async def render_help(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     clear_brick_session(ctx.user(update).id)
     clear_template_session(ctx.user(update).id)
     keyboard = InlineKeyboardMarkup(
-        [[InlineKeyboardButton("◀️ Главное меню", callback_data="main_menu")]]
+        [[InlineKeyboardButton(tr("buttons.nav.main_menu"), callback_data="main_menu")]]
     )
     user_data = ctx.data(context)
     if screen.screen_ref(user_data) is None:
@@ -376,15 +349,15 @@ async def cancel_without_dialog(
     if screen.screen_ref(user_data) is None:
         screen.hydrate_screen_ref(user_data, user_id)
     if place_active:
-        text = "Сценарий выбора места отменён."
+        text = tr("menu.cancel.place")
     elif admin_active:
-        text = "Административный сценарий отменён."
+        text = tr("menu.cancel.admin")
     elif brick_active:
-        text = "Создание или изменение кирпичика отменено. Данные не изменены."
+        text = tr("menu.cancel.brick")
     elif template_active:
-        text = "Сценарий шаблонов отменён. Данные шаблонов не изменены."
+        text = tr("menu.cancel.template")
     else:
-        text = "Сейчас нет активного создания поста."
+        text = tr("menu.cancel.none")
     cancelled = place_active or admin_active or brick_active or template_active
     await screen.render_screen(
         context,
@@ -415,13 +388,9 @@ async def outside_dialog_hint(
     if screen.screen_ref(user_data) is None:
         screen.hydrate_screen_ref(user_data, ctx.user(update).id)
     if message.photo:
-        text = (
-            "Фото добавляются в анонсе на шаге «Фотографии». Начните анонс "
-            "кнопкой «📍 Создать для площадки» или «📝 Создать по личному "
-            "шаблону»."
-        )
+        text = tr("menu.outside.photo")
     else:
-        text = "Воспользуйтесь кнопками меню или наберите /help — список команд."
+        text = tr("menu.outside.text")
     await screen.render_screen(context, user_data, ctx.chat(update).id, text)
 
 

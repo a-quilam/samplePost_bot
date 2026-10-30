@@ -56,7 +56,7 @@ from unittest.mock import patch
 
 try:
     import errors as errors_module
-    from errors import DOMAIN_NOTICE_TEXT
+    from errors import domain_notice_text
     from tests.integration_harness import (
         HARNESS_IMPORT_ERROR,
         Harness,
@@ -105,7 +105,7 @@ def internal_errors(h: Harness) -> list[str]:
 
 
 def domain_fallbacks(h: Harness) -> list[str]:
-    return [text for text in user_texts(h) if DOMAIN_NOTICE_TEXT in text]
+    return [text for text in user_texts(h) if domain_notice_text() in text]
 
 
 def mark(h: Harness) -> tuple[int, int, int]:
@@ -942,7 +942,7 @@ class DomainErrorFallbackTests(BackChecks):
             await h.callback("pl_all")
 
         self.assertEqual(internal_errors(h), [], "доменная ошибка показана как сбой")
-        self.assertIn(DOMAIN_NOTICE_TEXT, h.answer_texts())
+        self.assertIn(domain_notice_text(), h.answer_texts())
         self.assertIn(MENU_FRAGMENT, h.screen_text())
         warning.assert_called()
 
@@ -973,5 +973,5 @@ class DomainErrorFallbackTests(BackChecks):
             await h.callback("pl_all")
 
         self.assertIn(INTERNAL_FRAGMENT, "\n".join(user_texts(h)))
-        self.assertNotIn(DOMAIN_NOTICE_TEXT, user_texts(h))
+        self.assertNotIn(domain_notice_text(), user_texts(h))
         error.assert_called()

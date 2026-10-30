@@ -92,10 +92,11 @@ from template_state import clear_template_session
 from user_store import get_or_create_user
 from utils import keyboard_layouts, screen
 from utils import tg_context as ctx
+from utils.ui_texts import tr
 
 logger = logging.getLogger(__name__)
 
-STALE_TEXT = "Кнопка устарела: откройте раздел заново."
+STALE_TEXT = tr("errors.stale.bricks")
 # U3a №8: предложение запускается только из строки конкретного кирпичика.
 # Так отвечает устаревшая общая кнопка `bp_start` без id из старых сообщений.
 PROPOSAL_ROW_ONLY_HINT = "Выберите кирпичик в списке: «📨» справа от его названия."
@@ -458,7 +459,16 @@ def _page_note(offset: int, count: int, total: int) -> str:
     last = offset + count
     pages = max((total + PAGE_SIZE - 1) // PAGE_SIZE, 1)
     page = offset // PAGE_SIZE + 1
-    return f"Показано {offset + 1}–{last} из {total}. Страница {page} из {pages}."
+    return tr(
+        "bricks.page_note",
+        **{
+            "from": offset + 1,
+            "to": last,
+            "total": total,
+            "page": page,
+            "pages": pages,
+        },
+    )
 
 
 def _list_keyboard(bricks, *, offset: int, total: int, archive: bool):
@@ -519,56 +529,40 @@ def _hub_content(session: Session, user: User, state: dict):
     state["page"] = offset
 
     parts = [
-        "🧱 <b>Мои кирпичики</b>",
+        tr("bricks.hub.title_html"),
         "",
-        "Кирпичик — это определение типизированного поля для будущих "
-        "шаблонов анонса. Сейчас он не вставляется в посты и шаблоны.",
+        tr("bricks.hub.intro"),
     ]
     if total:
-        parts.extend(["", f"Активных кирпичиков: {total}."])
-        parts.extend(
-            [
-                "",
-                "Чтобы предложить кирпичик месту или всей системе, нажмите "
-                "«📨» в его строке.",
-            ]
-        )
+        parts.extend(["", tr("bricks.hub.active_count", count=total)])
+        parts.extend(["", tr("bricks.hub.propose_hint")])
         if bricks:
             parts.extend(["", _page_note(offset, len(bricks), total)])
     elif archived_total:
-        parts.extend(
-            [
-                "",
-                "В активном списке пока нет кирпичиков. В архиве осталось: "
-                f"{archived_total}. Откройте «🗄 Архив», чтобы восстановить "
-                "нужный или создать новый кирпичик.",
-            ]
-        )
+        parts.extend(["", tr("bricks.hub.empty_archive", archived=archived_total)])
     else:
-        parts.extend(
-            [
-                "",
-                "У вас пока нет личных кирпичиков. Создайте первый — например, "
-                "«Ведущий мероприятия» или «Формат участия».",
-            ]
-        )
+        parts.extend(["", tr("bricks.hub.empty")])
 
     rows: list[list[InlineKeyboardButton]] = [
-        [InlineKeyboardButton("➕ Создать кирпичик", callback_data="bk_create")]
+        [InlineKeyboardButton(tr("buttons.bricks.create"), callback_data="bk_create")]
     ]
-    rows.append([InlineKeyboardButton("📤 Мои предложения", callback_data="bp_mine")])
+    rows.append(
+        [InlineKeyboardButton(tr("buttons.bricks.proposals"), callback_data="bp_mine")]
+    )
     if bricks:
         rows.extend(_list_keyboard(bricks, offset=offset, total=total, archive=False))
     if archived_total:
         rows.append(
             [
                 InlineKeyboardButton(
-                    f"🗄 Архив ({archived_total})",
+                    tr("buttons.bricks.archive", count=archived_total),
                     callback_data="bk_archlist",
                 )
             ]
         )
-    rows.append([InlineKeyboardButton("◀️ Главное меню", callback_data="main_menu")])
+    rows.append(
+        [InlineKeyboardButton(tr("buttons.nav.main_menu"), callback_data="main_menu")]
+    )
     return "\n".join(parts), InlineKeyboardMarkup(rows)
 
 
@@ -590,15 +584,14 @@ def _archive_content(session: Session, user: User, state: dict):
     if not total:
         return None
     parts = [
-        "🗄 <b>Архив кирпичиков</b>",
+        tr("bricks.archive.title_html"),
         "",
-        "Архивные кирпичики не показываются в активном списке, но остаются "
-        "вашими. Их можно восстановить; код всё это время остаётся занятым.",
+        tr("bricks.archive.intro"),
         "",
         _page_note(offset, len(bricks), total),
     ]
     rows = _list_keyboard(bricks, offset=offset, total=total, archive=True)
-    rows.append([InlineKeyboardButton("◀️ Назад", callback_data="bk_hub")])
+    rows.append([InlineKeyboardButton(tr("buttons.nav.back"), callback_data="bk_hub")])
     return "\n".join(parts), InlineKeyboardMarkup(rows)
 
 
@@ -708,7 +701,16 @@ def _proposal_page_note(offset: int, count: int, total: int) -> str:
     last = offset + count
     pages = max((total + PROPOSAL_PAGE_SIZE - 1) // PROPOSAL_PAGE_SIZE, 1)
     page = offset // PROPOSAL_PAGE_SIZE + 1
-    return f"Показано {offset + 1}–{last} из {total}. Страница {page} из {pages}."
+    return tr(
+        "bricks.page_note",
+        **{
+            "from": offset + 1,
+            "to": last,
+            "total": total,
+            "page": page,
+            "pages": pages,
+        },
+    )
 
 
 def _proposal_reset_hub(state: dict, notice: str) -> None:

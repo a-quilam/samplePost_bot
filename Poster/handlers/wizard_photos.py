@@ -44,6 +44,7 @@ from announcement_store import (
 from database import SessionLocal
 from utils import keyboard_layouts
 from utils.tg_html import escape_html
+from utils.ui_texts import tr
 
 logger = logging.getLogger(__name__)
 
@@ -156,10 +157,10 @@ def limit_notice(result: PhotoBatchResult) -> str:
     """Объяснение отказа без потери уже принятых фото (S4 §5.3)."""
     if not result.rejected:
         return ""
-    return (
-        f"⚠️ В анонсе уже {MAX_ANNOUNCEMENT_PHOTOS} фотографий — это максимум. "
-        f"Новые снимки не добавлены ({len(result.rejected)}), уже принятые "
-        "сохранены. Лишнее можно удалить на экране «📷 Фотографии»."
+    return tr(
+        "wizard.photos.limit",
+        limit=MAX_ANNOUNCEMENT_PHOTOS,
+        rejected=len(result.rejected),
     )
 
 
@@ -169,10 +170,14 @@ def batch_notice(result: PhotoBatchResult) -> str:
         return limit_notice(result)
     if result.accepted:
         count = len(result.accepted)
-        word = "фотография" if count == 1 else "фотографии"
-        return f"✅ Принято: {count} {word}."
+        key = (
+            "wizard.photos.accepted_one"
+            if count == 1
+            else "wizard.photos.accepted_many"
+        )
+        return tr(key, count=count)
     if result.duplicate:
-        return "Это фото уже есть в анонсе — дубль не создан."
+        return tr("wizard.photos.duplicate")
     return ""
 
 
@@ -191,13 +196,14 @@ def photo_step_text(
     """
     total = len(getattr(details, "photos", ()) or ())
     lines = [
-        "📷 Фотографии анонса",
+        tr("wizard.photos.title"),
         "",
-        "Пришлите фотографию или альбом. Можно добавить до "
-        f"{MAX_ANNOUNCEMENT_PHOTOS} фотографий.",
+        tr("wizard.photos.hint", limit=MAX_ANNOUNCEMENT_PHOTOS),
     ]
     if total:
-        lines.append(f"Добавлено фотографий: {total} из {MAX_ANNOUNCEMENT_PHOTOS}.")
+        lines.append(
+            tr("wizard.photos.counter", count=total, limit=MAX_ANNOUNCEMENT_PHOTOS)
+        )
     if notice:
         lines.insert(1, notice)
     if announcement_is_empty:
@@ -226,9 +232,11 @@ def photo_step_keyboard(details: Any) -> InlineKeyboardMarkup:
     revision = details.revision
     return InlineKeyboardMarkup(
         keyboard_layouts.pair(
-            keyboard_layouts.button("◀️ Назад", f"aw_photo_back:{draft_id}:{revision}"),
             keyboard_layouts.button(
-                "⏭ Пропустить", f"aw_photo_none:{draft_id}:{revision}"
+                tr("buttons.nav.back"), f"aw_photo_back:{draft_id}:{revision}"
+            ),
+            keyboard_layouts.button(
+                tr("buttons.wizard.skip"), f"aw_photo_none:{draft_id}:{revision}"
             ),
         )
     )
@@ -401,7 +409,7 @@ def schedule_album_close(application, user_data: dict[str, Any], closer) -> None
 
 def rejected_photo_notice(error: BaseException) -> str:
     """Единый текст отказа по лимиту/домену — без потери принятых фото."""
-    return f"Фото не добавлено: {str(error)[:300]}"
+    return tr("wizard.photos.rejected", reason=str(error)[:300])
 
 
 __all__ = [
