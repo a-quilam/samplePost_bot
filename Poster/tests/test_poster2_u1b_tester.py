@@ -394,9 +394,18 @@ class MutationCaptureTests(unittest.TestCase):
         posts = [
             call
             for call in h.post_records()
-            if call["type"] == "message" and "parse_mode" in call
+            if call["type"] == "message"
+            and "parse_mode" in call
+            and not is_live_record(call)
         ]
-        self.assertTrue(posts, "готовый анонс не отправлен")
+        if not posts:
+            # U5: анонс без фото доставляется промоушеном живого блока — прямой
+            # `send_message` не создаётся вовсе.
+            previews = h.delivered_link_previews()
+            self.assertTrue(previews, "готовый анонс не отправлен")
+            for options in previews:
+                self.assertIsNotNone(options)
+                self.assertTrue(options.is_disabled)
         for call in posts:
             self.assertIs(call["link_preview_options"], FINAL_LINK_PREVIEW)
             self.assertNotIn("disable_web_page_preview", call)
@@ -670,7 +679,10 @@ class EmptyStoredHtmlTests(unittest.TestCase):
         await h.callback(_callback(h, "aw_photo_none"))
         posts = [call for call in h.post_records() if call["type"] == "message"]
         self.assertTrue(posts, "готовый анонс не отправлен")
-        self.assertEqual(posts[-1].get("text"), "Текст есть")
+        # U5: живой блок доводится правкой до финального текста — итоговый
+        # текст берётся из фактического содержимого сообщения, а не из записи
+        # о его создании.
+        self.assertEqual(h.posts()[-1], "Текст есть")
         from announcement_store import get_announcement_draft
 
         with h.session_factory() as session:

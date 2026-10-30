@@ -155,15 +155,17 @@ class AnnouncementAutoDeliveryStandardTests(unittest.TestCase):
 
         # Кнопки управления — в отдельном сообщении, а не в тексте анонса.
         self.assertIn("✅ Анонс готов.", h.screen_text())
-        from tests.integration_harness import is_post_message, is_screen_record
+        from tests.integration_harness import is_screen_record
 
-        post_records = [call for call in h.calls if is_post_message(call)]
+        # U5: анонс без фото доставляется промоушеном живого блока — сообщение
+        # создано живым блоком и доведено правкой до финального текста. Оно
+        # остаётся постом без клавиатуры управления; второй копии нет.
+        post_records = h.post_records()
         screen_records = [call for call in h.calls if is_screen_record(call)]
         self.assertEqual(len(post_records), 1)
-        # Пост отправлен отдельным сообщением, без клавиатуры управления.
         self.assertIsNone(post_records[0].get("reply_markup"))
         self.assertTrue(screen_records)
-        self.assertNotEqual((post_records[0].get("text") or ""), h.screen_text())
+        self.assertEqual(h.posts()[0], stored.publication_text)
 
         # Старый callback подтверждения больше не существует и не отправляет.
         posts_after = len(h.post_records())
@@ -373,6 +375,23 @@ class AnnouncementAutoDeliveryFailureTests(unittest.TestCase):
         await h.text("Значение")
         # S3 п.6: сначала шаг фотографий; доставку запускает «Без фотографий».
         self.assertIn("Фотографии анонса", h.screen_text())
+
+        # U5: без фото готовым постом становится живой блок, и первая
+        # доставка не зовёт send_message вообще. Чтобы проверить именно сбой
+        # отправки, убираем доказанное состояние блока (адреса в БД и в
+        # сессии): промоушен станет невозможен, а пересборка блока и
+        # резервная отправка упрутся в отказ Telegram.
+        from announcement_store import set_announcement_live_message_ids
+        from handlers import wizard_live
+
+        with h.session_factory() as session:
+            set_announcement_live_message_ids(
+                session,
+                actor_telegram_user_id=DEFAULT_USER_ID,
+                draft_id=_latest_draft(h).id,
+                message_ids=[],
+            )
+        wizard_live.forget_live_state(h.user_data())
 
         # Сбой Telegram на самой первой отправке: данные и черновик целы.
         h.bot.fail_after["message"] = 0

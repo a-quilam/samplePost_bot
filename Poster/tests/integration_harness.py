@@ -18,6 +18,7 @@
 
 import asyncio
 import functools
+import json
 import tempfile
 from contextlib import contextmanager
 from datetime import datetime
@@ -25,7 +26,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, Callable, Coroutine, TypeVar
 
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, text
 from sqlalchemy.orm import sessionmaker
 
 try:
@@ -272,6 +273,18 @@ class FakeBot:
 
     async def delete_message(self, *args: Any, **kwargs: Any) -> None:
         self._record("delete_message", args, kwargs)
+
+    def content_text(self, chat_id: int, message_id: int) -> str | None:
+        """
+        Итоговое содержимое сообщения бота (после всех правок).
+
+        U5: при промоушене текст анонса без фото создаётся живым блоком и
+        доводится `editMessageText` до финального рендера. Поэтому текст
+        доставленного поста нельзя брать из записи `send_message` — там
+        версия, которая существовала на момент создания.
+        """
+        entry = self._message_content.get((int(chat_id), int(message_id)))
+        return entry[1] if entry is not None else None
 
 
 def bind_bot(update: Update, bot: FakeBot) -> None:
@@ -577,6 +590,9 @@ class Harness:
         self._user_msg_seq = 0
         # счётчик сообщений «ниже экрана» (text_from_below, Stage 16)
         self._below_seq = 0
+        # message_id -> итоговый текст доставленного сообщения (U5): живой
+        # блок может стать постом, а адреса заменённых версий в БД теряются.
+        self._delivered_history: dict[int, str | None] = {}
 
     def _next_user_msg_id(self) -> int:
         self._user_msg_seq += 1
@@ -636,7 +652,51 @@ class Harness:
     async def feed(self, update: Update) -> Update:
         bind_bot(update, self.bot)
         await self.app.process_update(update)
+        self._remember_delivered()
         return update
+
+    def _remember_delivered(self) -> None:
+        """
+        Дополняет историю доставленных сообщений после каждого update.
+
+        Доставленный пост может быть живым блоком (U5: анонс без фото), а
+        `publication_progress` описывает только ТЕКУЩУЮ версию: после замены
+        прошлые адреса уходят в `previous_ids` и в итоге теряются совсем.
+        Поэтому итоговый текст каждого доставленного сообщения фиксируется
+        в момент, когда это сообщение ещё было доставленной версией.
+        """
+        for message_id in self._progress_ids():
+            if message_id in self._delivered_history:
+                continue
+            shown = self._message_text(message_id)
+            if shown is not None:
+                self._delivered_history[message_id] = shown
+
+    def _progress_ids(self) -> list[int]:
+        """`ids` и `previous_ids` всех черновиков с начатой публикацией."""
+        out: list[int] = []
+        try:
+            with self.session_factory() as session:
+                rows = session.execute(
+                    text(
+                        "SELECT publication_progress FROM announcement_drafts "
+                        "WHERE publication_status IS NOT NULL"
+                    )
+                ).all()
+        except Exception:  # noqa: BLE001 — таблицы может ещё не быть, пустая БД
+            return out
+        for (raw,) in rows:
+            try:
+                progress = json.loads(raw) if raw else {}
+            except (TypeError, ValueError):
+                continue
+            if not isinstance(progress, dict):
+                continue
+            for key in ("ids", "previous_ids"):
+                for message_id in progress.get(key) or ():
+                    if isinstance(message_id, int) and int(message_id) not in out:
+                        out.append(int(message_id))
+        return out
 
     async def text(
         self,
@@ -853,7 +913,14 @@ class Harness:
         """
         Тексты отправленных ПОСТОВ (превью и готовые) в порядке отправки:
         сообщения, фото с подписью и первые подписи альбомов.
+
+        U5: постом может стать и живой блок конструктора — так доставляется
+        анонс без фото (живое сообщение доводится до финального текста и
+        признаётся доставленным, второй копии нет). Такое сообщение
+        возвращается с ИТОГОВЫМ текстом (после всех правок), а не с версией
+        на момент создания.
         """
+        delivered = self.delivered_posts()
         out: list[str | None] = []
         for c in self.calls:
             if is_post_message(c):
@@ -863,20 +930,129 @@ class Harness:
             elif c["type"] == "media_group":
                 first = c["media"][0]
                 out.append(getattr(first, "caption", None))
+            elif c["type"] == "message":
+                out.extend(self._promoted_post_texts(c, delivered))
         return out
+
+    def _promoted_post_texts(
+        self, record: dict, delivered: dict[int, str | None]
+    ) -> list[str | None]:
+        """Тексты живых блоков, ставших доставленным постом (U5), или []."""
+        if not is_live_record(record):
+            return []
+        message_ids = self.bot.call_message_ids.get(id(record), ())
+        return [
+            delivered[int(message_id)]
+            for message_id in message_ids
+            if int(message_id) in delivered
+        ]
+
+    def delivered_posts(self) -> dict[int, str | None]:
+        """
+        История доставленных сообщений: `message_id` → итоговый текст в чате.
+
+        В историю входят текущие `ids` и заменённые `previous_ids` всех
+        черновиков: доставленный пост может быть живым блоком (U5), и тогда
+        `send_message` хранит только промежуточную версию, а финальный текст
+        пришёл правкой. Берётся фактическое содержимое FakeBot.
+        """
+        out: dict[int, str | None] = dict(self._delivered_history)
+        for message_id in self._progress_ids():
+            out.setdefault(int(message_id), None)
+        for message_id in list(out):
+            shown = self._message_text(message_id)
+            if shown is not None:
+                out[message_id] = shown
+        return out
+
+    def current_post_ids(self) -> dict[int, str | None]:
+        """`message_id` → текст ТЕКУЩИХ доставленных версий (без заменённых)."""
+        out: dict[int, str | None] = {}
+        try:
+            with self.session_factory() as session:
+                rows = session.execute(
+                    text(
+                        "SELECT publication_progress FROM announcement_drafts "
+                        "WHERE publication_status = 'sent'"
+                    )
+                ).all()
+        except Exception:  # noqa: BLE001 — таблицы может ещё не быть, пустая БД
+            return out
+        for (raw,) in rows:
+            try:
+                progress = json.loads(raw) if raw else {}
+            except (TypeError, ValueError):
+                continue
+            for message_id in (progress if isinstance(progress, dict) else {}).get(
+                "ids"
+            ) or ():
+                if isinstance(message_id, int):
+                    out.setdefault(int(message_id), None)
+        for message_id in list(out):
+            shown = self._message_text(message_id)
+            if shown is not None:
+                out[message_id] = shown
+        return out
+
+    def delivered_link_previews(self) -> list[Any]:
+        """
+        Все `link_preview_options` вызовов, создавших/менявших доставленный пост.
+
+        U1b: у доставленного анонса предпросмотр ссылок выключен. Для анонса
+        без фото постом становится живой блок (U5), поэтому проверять одну
+        запись `send_message` нельзя: финальный текст пришёл правкой, и в
+        истории доставленного сообщения несколько вызовов.
+        """
+        delivered = self.delivered_posts()
+        out: list[Any] = []
+        for call in self.calls:
+            if call["type"] not in {"message", "photo", "media_group", "edit_message"}:
+                continue
+            ids = self.bot.call_message_ids.get(id(call), ())
+            if call["type"] == "edit_message":
+                message_id = call.get("message_id")
+                pos_args = tuple(call.get("args") or ())
+                if message_id is None and len(pos_args) > 1:
+                    message_id = pos_args[1]
+                ids = (int(message_id),) if message_id is not None else ()
+            if not any(int(mid) in delivered for mid in ids):
+                continue
+            out.append(call.get("link_preview_options"))
+        return out
+
+    def _message_text(self, message_id: int) -> str | None:
+        """Итоговый текст сообщения бота по его message_id (None — не нашли)."""
+        for call in self.calls:
+            if call["type"] not in {"message", "photo", "media_group"}:
+                continue
+            if message_id not in self.bot.call_message_ids.get(id(call), ()):
+                continue
+            chat_id = call.get("chat_id")
+            if chat_id is None:
+                pos_args = tuple(call.get("args") or ())
+                chat_id = pos_args[0] if pos_args else self.chat_id
+            text = self.bot.content_text(int(chat_id), message_id)
+            if text is not None:
+                return text
+        return None
 
     def post_records(self) -> list[dict]:
         """
         Сырые записи ПОСТОВ (превью/готовый) в порядке отправки: send_photo,
-        send_media_group и прямые send_message из send_post. Экран управления
-        и ответы бота сюда не попадают — после превью экран перерисовывается,
-        и tests[-1] по всем calls был бы экраном, а не превью.
+        send_media_group и прямые send_message из send_post, а также живые
+        блоки, признанные доставленными постами (U5: анонс без фото, в т.ч.
+        уже заменённые версии). Экран управления и ответы бота сюда не
+        попадают — после превью экран перерисовывается, и tests[-1] по всем
+        calls был бы экраном.
         """
-        return [
-            c
-            for c in self.calls
-            if c["type"] in ("photo", "media_group") or is_post_message(c)
-        ]
+        delivered = self.delivered_posts()
+        out: list[dict] = []
+        for c in self.calls:
+            if c["type"] in ("photo", "media_group") or is_post_message(c):
+                out.append(c)
+            elif c["type"] == "message" and self._promoted_post_texts(c, delivered):
+                out.append(c)
+        return out
 
     def answers(self) -> list[dict]:
         """Все answer_callback_query (защита от «висящего» спиннера)."""

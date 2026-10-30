@@ -127,6 +127,10 @@ class ChatHygieneSecondAnnouncementTests(unittest.TestCase):
         self.assertTrue(first_result_ids)
         screen_after_first = h.screen_message_id()
         self.assertIsNotNone(screen_after_first)
+        # U5: текстовый анонс без фото доставляется промоушеном живого блока —
+        # правки до этого момента относятся к самой доставке, а не к чужому
+        # анонсу. Дальше готовый результат редактироваться не должен.
+        edits_after_first = _edited_message_ids(h)
 
         # — выход в меню и второй анонс —
         await h.callback("main_menu")
@@ -162,7 +166,7 @@ class ChatHygieneSecondAnnouncementTests(unittest.TestCase):
         for mid in first_result_ids:
             self.assertIn(mid, _live_ids(h))
         self.assertFalse(
-            set(first_result_ids) & _edited_message_ids(h),
+            set(first_result_ids) & (_edited_message_ids(h) - edits_after_first),
             "готовый анонс отредактирован",
         )
 

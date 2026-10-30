@@ -311,6 +311,70 @@ def _stored(h, draft_id: int):
         )
 
 
+def _chat_texts(h) -> dict[int, str]:
+    """
+    Итоговые тексты сообщений бота, которые РЕАЛЬНО остались в чате.
+
+    U5: живой блок анонса без фото становится готовым постом, поэтому одну и
+    ту же копию текста нельзя искать по записям `send_message` — сообщение
+    создаётся живым блоком, а окончательный вид получает правкой. Фактическое
+    содержимое хранит FakeBot; удалённые сообщения исключаются.
+    """
+    deleted = set(h.deleted_ids())
+    store = getattr(h.bot, "_message_content", {}) or {}
+    return {
+        int(message_id): str(content[1])
+        for (_chat_id, message_id), content in store.items()
+        if int(message_id) not in deleted and content[1] is not None
+    }
+
+
+def _copies(h, text: str | None) -> list[int]:
+    """`message_id` сообщений в чате, чей итоговый текст равен `text`."""
+    if text is None:
+        return []
+    return [
+        message_id for message_id, shown in _chat_texts(h).items() if shown == str(text)
+    ]
+
+
+async def _to_photo_step(h, *, body: str | None = None, value: str | None = "Значение"):
+    """
+    Доводит мастер до шага фото: анонс ещё НЕ доставлен.
+
+    `value=None` — кирпичик пропускается (пустой видимый текст анонса).
+    """
+    from tests.test_stage27b_announcement_ui import (
+        _choose_personal,
+        _latest_draft,
+        _seed_personal_template,
+        _seed_place,
+        _start_to_template,
+    )
+
+    place_id, _alias = _seed_place(h)
+    template_id, _revision, _bricks = _seed_personal_template(h, body=body)
+    await _start_to_template(h, place_id)
+    await _choose_personal(h, template_id)
+    if value is None:
+        skip = next(
+            (
+                data
+                for _label, data in h.screen_buttons()
+                if data and data.startswith("aw_qskip")
+            ),
+            None,
+        )
+        if skip is None:
+            raise AssertionError(f"Нет кнопки пропуска: {h.screen_buttons()}")
+        await h.callback(skip)
+    else:
+        await h.text(value)
+    if "Фотографии анонса" not in h.screen_text():
+        raise AssertionError(f"Не шаг фото: {h.screen_text()}")
+    return _latest_draft(h)
+
+
 @unittest.skipIf(
     INTEGRATION_IMPORT_ERROR is not None,
     f"интеграционное окружение недоступно: {INTEGRATION_IMPORT_ERROR}",
@@ -318,50 +382,12 @@ def _stored(h, draft_id: int):
 class AnnouncementDeliveryScenarioTests(unittest.TestCase):
     """Живой блок, финализация по fingerprint, сбои и проблемный экран."""
 
-    async def _to_photo_step(
-        self, h, *, body: str | None = None, value: str | None = "Значение"
-    ):
-        """
-        Доводит мастер до шага фото: анонс ещё НЕ доставлен.
-
-        `value=None` — кирпичик пропускается (пустой видимый текст анонса).
-        """
-        from tests.test_stage27b_announcement_ui import (
-            _choose_personal,
-            _latest_draft,
-            _seed_personal_template,
-            _seed_place,
-            _start_to_template,
-        )
-
-        place_id, _alias = _seed_place(h)
-        template_id, _revision, _bricks = _seed_personal_template(h, body=body)
-        await _start_to_template(h, place_id)
-        await _choose_personal(h, template_id)
-        if value is None:
-            skip = next(
-                (
-                    data
-                    for _label, data in h.screen_buttons()
-                    if data and data.startswith("aw_qskip")
-                ),
-                None,
-            )
-            if skip is None:
-                raise AssertionError(f"Нет кнопки пропуска: {h.screen_buttons()}")
-            await h.callback(skip)
-        else:
-            await h.text(value)
-        if "Фотографии анонса" not in h.screen_text():
-            raise AssertionError(f"Не шаг фото: {h.screen_text()}")
-        return _latest_draft(h)
-
     @scenario_test
     async def test_live_block_becomes_the_ready_post_without_resending(self, h) -> None:
         from tests.test_stage27c_announcement_ui import _post_types
 
         await h.text("/start")
-        draft = await self._to_photo_step(h)
+        draft = await _to_photo_step(h)
         live_ids = set(_stored(h, draft.id).live_message_ids)
         self.assertTrue(live_ids, "живой блок текстового анонса сохранён")
         self.assertEqual(h.posts(), [], "живой блок не считается готовым постом")
@@ -392,7 +418,7 @@ class AnnouncementDeliveryScenarioTests(unittest.TestCase):
         from tests.test_stage27c_announcement_ui import _post_types
 
         await h.text("/start")
-        draft = await self._to_photo_step(h, body="[main]", value=None)
+        draft = await _to_photo_step(h, body="[main]", value=None)
         live_ids = set(_stored(h, draft.id).live_message_ids)
         self.assertTrue(live_ids, "текстовый блок «.» показан до фото")
         self.assertEqual(h.posts(), [], "до фото готового поста нет")
@@ -426,7 +452,7 @@ class AnnouncementDeliveryScenarioTests(unittest.TestCase):
         from tests.test_stage27c_announcement_ui import _callback
 
         await h.text("/start")
-        draft = await self._to_photo_step(h)
+        draft = await _to_photo_step(h)
         await h.photo("restart-photo")
         posts_before = len(h.posts())
         self.assertEqual(posts_before, 1)
@@ -444,7 +470,7 @@ class AnnouncementDeliveryScenarioTests(unittest.TestCase):
         from tests.test_stage27c_announcement_ui import _callback, _callbacks
 
         await h.text("/start")
-        draft = await self._to_photo_step(h)
+        draft = await _to_photo_step(h)
         h.bot.errors_by_type["photo"] = Forbidden("Forbidden: bot was blocked")
         await h.photo("blocked-photo")
 
@@ -467,7 +493,7 @@ class AnnouncementDeliveryScenarioTests(unittest.TestCase):
     @scenario_test
     async def test_failed_deletion_does_not_break_delivery(self, h) -> None:
         await h.text("/start")
-        draft = await self._to_photo_step(h)
+        draft = await _to_photo_step(h)
         old_ids = set(_stored(h, draft.id).live_message_ids)
         self.assertTrue(old_ids)
         h.bot.errors_by_type["delete_message"] = BadRequest(
@@ -490,7 +516,7 @@ class AnnouncementDeliveryScenarioTests(unittest.TestCase):
         await h.text("/start")
         # Длинный кирпичик (не литерал шаблона): сокращать нужно именно его.
         long_value = "Длинный текст анонса " * 150
-        draft = await self._to_photo_step(h, body="[main]", value=long_value)
+        draft = await _to_photo_step(h, body="[main]", value=long_value)
         photo_update = await h.photo("over-limit-photo")
 
         screen = h.screen_text()
@@ -521,7 +547,7 @@ class AnnouncementDeliveryScenarioTests(unittest.TestCase):
 
         await h.text("/start")
         long_value = "Длинный текст анонса " * 150
-        draft = await self._to_photo_step(h, body="[main]", value=long_value)
+        draft = await _to_photo_step(h, body="[main]", value=long_value)
         await h.photo("dropped-photo")
         self.assertIn("из 1024", h.screen_text())
 
@@ -533,3 +559,329 @@ class AnnouncementDeliveryScenarioTests(unittest.TestCase):
         self.assertEqual(_post_types(h, {"photo", "media_group"}), [])
         self.assertGreater(len((h.posts()[-1] or "")), 1024)
         self.assertEqual(h.posts()[-1], sent.publication_text)
+
+
+@unittest.skipIf(
+    INTEGRATION_IMPORT_ERROR is not None,
+    f"интеграционное окружение недоступно: {INTEGRATION_IMPORT_ERROR}",
+)
+class TextAnnouncementSingleCopyTests(unittest.TestCase):
+    """
+    U5: текстовый анонс без фото — ровно одна копия текста над экраном.
+
+    Раньше живой блок оставался в истории, а готовый пост уходил вторым
+    сообщением с тем же текстом. Теперь живой блок доводится до финального
+    рендера и становится доставленной версией.
+    """
+
+    def _assert_single_copy(self, h, draft_id: int, text: str = "Значение") -> int:
+        """Инвариант: одна копия текста, её id выше служебного экрана."""
+        stored = _stored(h, draft_id)
+        self.assertEqual(stored.publication_status, "sent")
+        self.assertTrue(stored.delivered_message_ids)
+        copies = _copies(h, text)
+        self.assertEqual(len(copies), 1, f"копий текста: {copies}")
+        message_id = copies[0]
+        self.assertIn(message_id, set(stored.delivered_message_ids))
+        screen_id = h.screen_message_id()
+        self.assertIsNotNone(screen_id, "экран завершения не показан")
+        assert screen_id is not None
+        self.assertLess(message_id, screen_id, "анонс должен быть выше экрана")
+        # Доставленной версией признан именно текст, который лежит в чате.
+        self.assertEqual(_chat_texts(h)[message_id], stored.publication_text)
+        return message_id
+
+    @scenario_test
+    async def test_text_announcement_delivered_as_the_live_block(self, h) -> None:
+        from tests.test_stage27b_announcement_ui import _no_photos
+
+        await h.text("/start")
+        draft = await _to_photo_step(h)
+        live_ids = set(_stored(h, draft.id).live_message_ids)
+        self.assertTrue(live_ids, "живой блок текстового анонса сохранён")
+
+        await _no_photos(h)
+
+        message_id = self._assert_single_copy(h, draft.id)
+        # Постом стал сам живой блок: второй отправки не было.
+        self.assertEqual(set(_stored(h, draft.id).delivered_message_ids), live_ids)
+        self.assertIn(message_id, live_ids)
+        self.assertNotIn(message_id, h.deleted_ids())
+        self.assertEqual(len(h.posts()), 1)
+        self.assertEqual(h.posts(), [_stored(h, draft.id).publication_text])
+
+    @scenario_test
+    async def test_preview_send_promotes_the_same_live_block(self, h) -> None:
+        """Явное «Отправить» из обзора не создаёт вторую копию."""
+        from tests.test_stage27b_announcement_ui import _callback
+
+        await h.text("/start")
+        draft = await _to_photo_step(h)
+        live_ids = set(_stored(h, draft.id).live_message_ids)
+        await h.callback("main_menu")
+        await h.callback("aw_start")
+        await h.callback(_callback(h, "aw_open", f":{draft.id}"))
+        self.assertIn("Обзор анонса", h.screen_text())
+
+        await h.callback(_callback(h, "aw_send"))
+
+        message_id = self._assert_single_copy(h, draft.id)
+        self.assertEqual(set(_stored(h, draft.id).delivered_message_ids), live_ids)
+        self.assertEqual(message_id, max(live_ids))
+        self.assertEqual(len(h.posts()), 1)
+
+    @scenario_test
+    async def test_restart_before_finish_keeps_single_copy(self, h) -> None:
+        """После рестарта `user_data` пуст: доставка доказывает блок заново."""
+        from tests.test_stage27b_announcement_ui import _callback
+
+        await h.text("/start")
+        draft = await _to_photo_step(h)
+        live_ids = set(_stored(h, draft.id).live_message_ids)
+
+        await h.restart()
+        await h.text("/start")
+        await h.callback("aw_start")
+        await h.callback(_callback(h, "aw_open", f":{draft.id}"))
+        await h.callback(_callback(h, "aw_send"))
+
+        self._assert_single_copy(h, draft.id)
+        stored = _stored(h, draft.id)
+        # Прежний блок переиспользован (правка), а не продублирован.
+        self.assertEqual(set(stored.delivered_message_ids), live_ids)
+        self.assertEqual(len(h.posts()), 1)
+
+    @scenario_test
+    async def test_repeated_finish_does_not_send_another_copy(self, h) -> None:
+        from tests.test_stage27b_announcement_ui import _callback, _no_photos
+
+        await h.text("/start")
+        draft = await _to_photo_step(h)
+        await _no_photos(h)
+        first = self._assert_single_copy(h, draft.id)
+        calls_before = len(h.calls)
+
+        await h.callback("main_menu")
+        await h.callback("aw_start")
+        await h.callback(_callback(h, "aw_open", f":{draft.id}"))
+        # Кнопки «Отправить» у уже доставленного анонса нет: повторный
+        # callback отклоняется как устаревший и ничего не отправляет.
+        self.assertFalse(
+            [
+                data
+                for _label, data in h.screen_buttons()
+                if data and data.startswith("aw_send")
+            ],
+            "у доставленного анонса не должно быть кнопки отправки",
+        )
+        await h.callback(f"aw_send:{draft.id}:{draft.revision}")
+
+        self.assertEqual(self._assert_single_copy(h, draft.id), first)
+        self.assertEqual(set(_stored(h, draft.id).delivered_message_ids), {first})
+        # Новые сообщения не появились — только правки экрана.
+        self.assertEqual(
+            [c["type"] for c in h.calls[calls_before:] if c["type"] == "message"],
+            [],
+            "повторное завершение отправило сообщение",
+        )
+
+    @scenario_test
+    async def test_edit_and_apply_replaces_the_copy_instead_of_promoting(
+        self, h
+    ) -> None:
+        """
+        «Изменить» → «Применить изменения» — обычная замена: контент другой,
+        промоушен запрещён, прошлая копия удаляется после новой доставки.
+        """
+        from tests.test_stage27b_announcement_ui import (
+            _callback,
+            _no_photos,
+            _open_edit,
+        )
+
+        await h.text("/start")
+        draft = await _to_photo_step(h)
+        await _no_photos(h)
+        first = self._assert_single_copy(h, draft.id)
+
+        await _open_edit(h)
+        await h.callback(_callback(h, "aw_qmanage"))
+        await h.callback(_callback(h, "aw_qgoto"))
+        await h.callback(_callback(h, "aw_qedit"))
+        await h.text("Обновлено")
+        await _open_edit(h)
+        await h.callback(_callback(h, "aw_apply"))
+
+        updated = self._assert_single_copy(h, draft.id, text="Обновлено")
+        stored = _stored(h, draft.id)
+        self.assertNotEqual(updated, first)
+        self.assertEqual(tuple(stored.delivered_message_ids), (updated,))
+        self.assertEqual(tuple(stored.previous_message_ids), (first,))
+        # Прошлая копия удалена только после подтверждённой новой версии.
+        self.assertIn(first, h.deleted_ids())
+        self.assertEqual(_copies(h, "Значение"), [])
+
+    @scenario_test
+    async def test_failed_promotion_cleans_the_stale_live_block(self, h) -> None:
+        """
+        Живой блок не удалось признать доставленным (нет доказанной
+        синхронизации): пост уходит отдельным сообщением, а прежний блок не
+        остаётся второй копией — он удаляется после подтверждённой доставки.
+        """
+        from unittest.mock import AsyncMock, patch
+
+        from tests.test_stage27b_announcement_ui import _no_photos
+
+        await h.text("/start")
+        draft = await _to_photo_step(h)
+        live_ids = set(_stored(h, draft.id).live_message_ids)
+        self.assertTrue(live_ids)
+
+        # Промоушен невозможен: доказательств «в чате лежит именно эта
+        # версия» нет, хотя живой блок физически присутствует.
+        with patch(
+            "handlers.announcement_wizard._promote_live_post",
+            new=AsyncMock(return_value=None),
+        ):
+            await _no_photos(h)
+
+        message_id = self._assert_single_copy(h, draft.id)
+        stored = _stored(h, draft.id)
+        self.assertNotIn(message_id, live_ids, "пост отправлен отдельно")
+        self.assertTrue(live_ids <= set(h.deleted_ids()), "старый блок убран")
+        self.assertEqual(set(stored.delivered_message_ids), {message_id})
+        self.assertEqual(stored.live_message_ids, ())
+        self.assertEqual(len(h.posts()), 1)
+
+    @scenario_test
+    async def test_resume_cleans_the_stale_live_block(self, h) -> None:
+        """
+        U5-D1: «Повторить отправку» после сбоя — тоже одна копия.
+
+        Промоушен невозможен, первая отправка падает, затем Telegram
+        отвечает: пост уходит отдельно, а устаревший живой блок удаляется
+        после подтверждённой доставки (раньше он оставался второй копией).
+        """
+        from unittest.mock import AsyncMock, patch
+
+        from tests.test_stage27b_announcement_ui import _no_photos
+        from tests.test_stage27c_announcement_ui import _callback
+
+        await h.text("/start")
+        draft = await _to_photo_step(h)
+        stale_live = set(_stored(h, draft.id).live_message_ids)
+        self.assertTrue(stale_live)
+
+        h.bot.errors_by_type["message"] = Forbidden("Forbidden: bot was blocked")
+        with patch(
+            "handlers.announcement_wizard._promote_live_post",
+            new=AsyncMock(return_value=None),
+        ):
+            await _no_photos(h)
+        self.assertEqual(_stored(h, draft.id).publication_status, "failed")
+        # Сбой доставки не удаляет блок: это единственная копия текста.
+        self.assertFalse(stale_live <= set(h.deleted_ids()))
+
+        h.bot.errors_by_type.clear()
+        await h.callback(_callback(h, "aw_pub_resume"))
+
+        stored = _stored(h, draft.id)
+        self.assertEqual(stored.publication_status, "sent")
+        self.assertTrue(stale_live <= set(h.deleted_ids()), "старый блок убран")
+        self.assertEqual(stored.live_message_ids, ())
+        self.assertEqual(len(_copies(h, "Значение")), 1)
+        self.assertEqual(len(h.posts()), 1)
+        # Удалена именно старая копия, а не доставленный пост.
+        self.assertFalse(
+            set(stored.delivered_message_ids) & stale_live,
+            "доставленный пост не должен быть удалён",
+        )
+
+    @scenario_test
+    async def test_resume_tolerates_refused_deletion(self, h) -> None:
+        """U5-D1 §4.2: отказ Telegram в удалении — не ошибка доставки."""
+        from unittest.mock import AsyncMock, patch
+
+        from tests.test_stage27b_announcement_ui import _no_photos
+        from tests.test_stage27c_announcement_ui import _callback
+
+        await h.text("/start")
+        draft = await _to_photo_step(h)
+        h.bot.errors_by_type["message"] = Forbidden("Forbidden: bot was blocked")
+        with patch(
+            "handlers.announcement_wizard._promote_live_post",
+            new=AsyncMock(return_value=None),
+        ):
+            await _no_photos(h)
+        self.assertEqual(_stored(h, draft.id).publication_status, "failed")
+
+        h.bot.errors_by_type.clear()
+        h.bot.errors_by_type["delete_message"] = BadRequest(
+            "Bad Request: message can't be deleted"
+        )
+        await h.callback(_callback(h, "aw_pub_resume"))
+
+        stored = _stored(h, draft.id)
+        self.assertEqual(stored.publication_status, "sent")
+        self.assertIn("✅ Анонс готов.", h.screen_text())
+        self.assertTrue(stored.delivered_message_ids)
+        self.assertEqual(len(h.posts()), 1)
+
+    @scenario_test
+    async def test_resume_does_not_touch_another_announcements_live_block(
+        self, h
+    ) -> None:
+        """U5-D1: очистка при повторе не задевает живой блок другого анонса."""
+        from unittest.mock import AsyncMock, patch
+
+        from tests.test_stage27b_announcement_ui import (
+            _choose_personal,
+            _latest_draft,
+            _no_photos,
+            _seed_personal_template,
+            _seed_place,
+            _start_to_template,
+        )
+        from tests.test_stage27c_announcement_ui import _callback
+
+        await h.text("/start")
+        place_id, _alias = _seed_place(h)
+        template_id, _revision, _bricks = _seed_personal_template(h)
+        await _start_to_template(h, place_id)
+        await _choose_personal(h, template_id)
+        await h.text("Значение")
+        first = _latest_draft(h)
+        self.assertIn("Фотографии анонса", h.screen_text())
+
+        # Сбой доставки первого анонса.
+        h.bot.errors_by_type["message"] = Forbidden("Forbidden: bot was blocked")
+        with patch(
+            "handlers.announcement_wizard._promote_live_post",
+            new=AsyncMock(return_value=None),
+        ):
+            await _no_photos(h)
+        self.assertEqual(_stored(h, first.id).publication_status, "failed")
+        h.bot.errors_by_type.clear()
+
+        # Второй анонс с собственным живым блоком, до отправки не доведён.
+        await h.callback("main_menu")
+        await _start_to_template(h, place_id)
+        await _choose_personal(h, template_id)
+        await h.text("Второй")
+        second = _latest_draft(h)
+        self.assertNotEqual(first.id, second.id)
+        other_live = set(_stored(h, second.id).live_message_ids)
+        self.assertTrue(other_live)
+        self.assertFalse(other_live & set(_stored(h, first.id).live_message_ids))
+
+        # Возврат к экрану незавершённой отправки первого анонса и повтор.
+        await h.callback("main_menu")
+        await h.callback("aw_start")
+        await h.callback(_callback(h, "aw_open", f":{first.id}"))
+        await h.callback(_callback(h, "aw_pub_resume"))
+
+        self.assertEqual(_stored(h, first.id).publication_status, "sent")
+        self.assertEqual(_stored(h, second.id).publication_status, None)
+        # Живой блок второго анонса цел и в БД, и в чате.
+        self.assertEqual(set(_stored(h, second.id).live_message_ids), other_live)
+        self.assertFalse(other_live & set(h.deleted_ids()))

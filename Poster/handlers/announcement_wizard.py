@@ -78,6 +78,7 @@ from announcement_store import (
     reset_failed_announcement_publication,
     resume_announcement_publication,
     save_announcement_value,
+    set_announcement_live_message_ids,
     set_announcement_stage,
     start_announcement_wizard,
 )
@@ -333,6 +334,8 @@ async def _sync_live(
     update: Update,
     context: ContextTypes.DEFAULT_TYPE,
     details,
+    *,
+    text: str | None = None,
 ) -> None:
     """
     Обновляет живой верхний блок ПЕРЕД отрисовкой нижнего экрана (S3 п.2).
@@ -341,6 +344,10 @@ async def _sync_live(
     фото, обзор): иначе при шаблоне без кирпичиков верхний блок не появился
     бы вовсе, а после последнего ответа остался бы устаревшим. Уже
     доставленный анонс не трогаем: там верхний блок — сама доставка.
+
+    `text` — точный финальный рендер (U5): при завершении живой блок
+    доводится ровно до того текста, который будет зафиксирован как
+    доставленный, чтобы `publication_text` совпадал с сообщением в чате.
     """
     if details is None or details.publication_status is not None:
         return
@@ -353,6 +360,7 @@ async def _sync_live(
             draft_id=details.draft_id,
             revision=details.revision,
             known_ids=wizard_live.current_live_ids(details),
+            text=text,
             has_photos=bool(details.photos),
             # S4: живой блок — медиаблок. Фото и прогресс частичной отправки
             # передаются явно: без них состав блока не совпал бы с payload
@@ -4043,17 +4051,31 @@ async def _finish_and_deliver(
                 details,
                 notice=notice or "✅ Эта версия анонса уже отправлена.",
             )
-    # S4 п.5: верхний медиаблок уже стоит в чате. Если его payload совпадает
-    # с текущим и прошлую версию заменять не нужно, он и есть готовый пост:
-    # повторная отправка создала бы второй альбом. Текстовый анонс без фото
-    # доставляется отдельным сообщением (контракт S3: превью остаётся в
-    # истории выше), поэтому промоушен к нему не применяется.
-    if preview.draft.photos and not details.previous_message_ids:
+    # S4 п.5 / U5: верхний блок (медиа или текст) уже стоит в чате. Если его
+    # payload совпадает с текущим и прошлую версию заменять не нужно, он и есть
+    # готовый пост: повторная отправка создала бы второй альбом или вторую
+    # копию текста. Текстовый блок для этого доводится до финального HTML
+    # (`editMessageText`), и только подтверждённая правка доказывает, что в
+    # чате лежит именно текущая версия.
+    #
+    # Снимок адресов живого блока нужен для крайнего fallback: если Telegram
+    # отказал и в правке, и в пересборке блока, промоушен невозможен и пост
+    # уходит отдельным сообщением — тогда прежний живой блок (временный
+    # интерфейсный мусор первого прохода) убирается после подтверждённой
+    # доставки, иначе в чате остались бы две копии.
+    stale_live_ids: tuple[int, ...] = (
+        tuple(details.live_message_ids) if details.publication_status is None else ()
+    )
+    # Промоушен — только первая доставка. Уже отправленный анонс правится
+    # штатно: новая версия уходит отдельным сообщением и лишь затем удаляется
+    # прошлая (иначе предыдущую копию нельзя было бы заменить).
+    if details.publication_status is None and not details.previous_message_ids:
         promoted = await _promote_live_post(
             update,
             context,
             details,
             html=preview.html,
+            text=preview.html,
             photos=tuple(preview.draft.photos),
         )
         if promoted is not None:
@@ -4080,7 +4102,9 @@ async def _finish_and_deliver(
     ) as exc:
         return await _render_preview_error(update, context, details, str(exc))
     _set_details(_ui(context), publication.draft)
-    return await _run_announcement_publication(update, context, publication)
+    return await _run_announcement_publication(
+        update, context, publication, stale_live_ids=stale_live_ids
+    )
 
 
 async def _promote_live_post(
@@ -4090,6 +4114,7 @@ async def _promote_live_post(
     *,
     html: str,
     photos: tuple[str, ...],
+    text: str | None = None,
 ):
     """
     Признаёт подтверждённый верхний блок готовым постом без новой отправки.
@@ -4098,10 +4123,20 @@ async def _promote_live_post(
     состав и текст совпадают с текущим payload, отправлять второй такой же
     пост нельзя: Telegram-история показала бы две копии.
 
+    U5: то же правило действует и для текстового анонса без фото. Раньше
+    текст всегда доставлялся отдельным сообщением, и в чате оставались две
+    одинаковые копии — живой блок и доставленный пост. Теперь живой блок
+    доводится до финального рендера (`editMessageText`, `text`) и, если
+    правка подтверждена, сам становится доставленной версией.
+
     Совпадение проверяется по отпечатку, который `_sync_live` записывает
     после подтверждённой отправки/правки блока. Перед сверкой блок
     синхронизируется: после рестарта `user_data` пуст, и только фактическая
     правка/создание блока доказывает, что в чате лежит именно текущая версия.
+
+    `text` — точный финальный рендер для живого блока (`None` — собрать из
+    черновика как обычно). Передаётся вызывающим слоем, чтобы в чате лежал
+    именно тот текст, который будет зафиксирован как `publication_text`.
 
     Возвращает обновлённый черновик, если блок стал `sent`, иначе None —
     тогда вызывающий собирает и отправляет новую версию обычным путём.
@@ -4109,7 +4144,7 @@ async def _promote_live_post(
     previous_ids = tuple(details.previous_message_ids)
     user_data = ctx.data(context)
     try:
-        await _sync_live(update, context, details)
+        await _sync_live(update, context, details, text=text)
     except Exception as exc:  # noqa: BLE001 — без доказанной синхронизации нет финала
         logger.info("Живой блок #%s не синхронизирован: %s", details.draft_id, exc)
         return None
@@ -4434,10 +4469,18 @@ async def _run_announcement_publication(
     update: Update,
     context: ContextTypes.DEFAULT_TYPE,
     publication,
+    *,
+    stale_live_ids: Sequence[int] = (),
 ) -> int:
     """
     Отправляет только замороженный payload и сохраняет прогресс после каждой
     подтверждённой операции. Успех фиксируется лишь после ответа Telegram.
+
+    `stale_live_ids` — адреса живого блока первой попытки (U5). Если его не
+    удалось признать доставленным и пост ушёл отдельным сообщением, прежний
+    живой блок — временный интерфейсный мусор конструктора, а не результат:
+    после подтверждённой доставки он убирается, иначе в чате остались бы две
+    копии одного текста. Ошибка удаления не считается ошибкой доставки.
     """
     user_id = _user_id(update)
     draft_id = publication.draft.draft_id
@@ -4566,6 +4609,27 @@ async def _run_announcement_publication(
         ]
         if replaced:
             await screen.cleanup_messages(context.bot, chat_id, replaced)
+    # U5: живой блок, который не удалось признать доставленным (нет
+    # доказанной синхронизации, отказ правки/пересборки), остался в чате
+    # второй копией текста. Это временный интерфейсный мусор конструктора,
+    # и убирается он только сейчас — после подтверждённой доставки.
+    stale = [
+        int(message_id)
+        for message_id in stale_live_ids
+        if int(message_id) not in sent_ids
+    ]
+    if stale:
+        await screen.cleanup_messages(context.bot, chat_id, stale)
+        try:
+            with SessionLocal() as session:
+                details = set_announcement_live_message_ids(
+                    session,
+                    actor_telegram_user_id=user_id,
+                    draft_id=draft_id,
+                    message_ids=[],
+                )
+        except Exception as exc:  # noqa: BLE001 — адреса лишь UI-состояние
+            logger.info("Адреса живого блока #%s не очищены: %s", draft_id, exc)
     return await _render_delivered(
         update,
         context,
@@ -6085,6 +6149,13 @@ async def handle_preview_callback(
         if not _is_private_chat(update):
             await _answer(update, PRIVATE_CHAT_ONLY, alert=True)
             return await _render_private_chat_refusal(update, context, details)
+        # U5-D1: повтор идёт мимо `_finish_and_deliver`, поэтому снимок
+        # адресов живого блока снимается здесь — из черновика в БД. Если блок
+        # так и не удалось признать доставленным (сбой правки/пересборки, нет
+        # доказанной синхронизации), после подтверждённого повтора он —
+        # временный интерфейсный мусор конструктора и остался бы второй
+        # копией текста. Снимок берётся ДО отправки: новый пост может получить
+        # другие message_id, а совпавший id отфильтрует сама публикация.
         try:
             with SessionLocal() as session:
                 publication = resume_announcement_publication(
@@ -6096,9 +6167,12 @@ async def handle_preview_callback(
         except AnnouncementError as exc:
             await _answer(update, str(exc), alert=True)
             return await _resume_current(update, context, notice=str(exc))
+        stale_live_ids = tuple(publication.draft.live_message_ids)
         _set_details(_ui(context), publication.draft)
         await _answer(update, "Продолжаю отправку…")
-        return await _run_announcement_publication(update, context, publication)
+        return await _run_announcement_publication(
+            update, context, publication, stale_live_ids=stale_live_ids
+        )
     if action == "aw_pub_reset" and len(parts) == 3:
         guarded = _guided()
         if guarded is None:

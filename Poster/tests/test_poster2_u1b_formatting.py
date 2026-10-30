@@ -316,8 +316,14 @@ class FormattingPersistenceTests(unittest.TestCase):
 
         delivered = h.posts()[-1] or ""
         self.assertEqual(delivered, "Анонс: <b>Сегодня</b>")
-        record = h.post_records()[-1]
-        self.assertIs(record.get("link_preview_options"), FINAL_LINK_PREVIEW)
+        # U5: пост без фото — это живой блок, доведённый правкой до финального
+        # HTML, поэтому у доставленного сообщения несколько вызовов. Превью
+        # ссылок выключено в каждом из них (а не только в `send_message`).
+        previews = h.delivered_link_previews()
+        self.assertTrue(previews, "доставленный анонс не найден")
+        for options in previews:
+            self.assertIsNotNone(options)
+            self.assertTrue(options.is_disabled)
 
     @scenario_test
     async def test_single_photo_caption_keeps_formatting(self, h):
@@ -443,8 +449,15 @@ class FormattingSafetyTests(unittest.TestCase):
                 LIVE_LINK_PREVIEW,
                 "живой блок обязан отключать превью ссылок",
             )
+        # U5: готовый пост без фото — доведённый живой блок, поэтому проверяется
+        # всё содержимое доставленного сообщения, а не одна запись отправки.
+        delivered_previews = h.delivered_link_previews()
+        self.assertTrue(delivered_previews, "готовый анонс не отправлен")
+        for options in delivered_previews:
+            self.assertIsNotNone(options)
+            self.assertTrue(options.is_disabled)
         for record in h.post_records():
-            if record["type"] != "message":
+            if record["type"] != "message" or is_live_record(record):
                 continue
             self.assertIs(
                 record.get("link_preview_options"),
