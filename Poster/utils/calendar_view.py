@@ -1,27 +1,32 @@
 # utils/calendar_view.py
 """
-Кнопочный календарь даты мероприятия (Stage 17): чистая календарная логика.
+Компактный календарь даты мероприятия (Poster 2.2 U2a): чистая логика.
 
 Модуль НЕ знает про Telegram и экран: он только раскладывает разрешённый
-интервал дат на уровни меню, которые затем рисует handlers.post_creation.
-Это позволяет перебрать весь горизонт в тестах и доказать, что множество
-доступных дат не имеет пропусков и повторов.
+интервал дат на уровни календаря, которые затем рисует
+`handlers.wizard_questions` / `handlers.announcement_wizard`. Это позволяет
+перебрать весь горизонт в тестах и доказать, что множество доступных дат не
+имеет пропусков и повторов.
 
-Правила Stage 17:
+Правила U2a (замена календарных недель Stage 17):
 - «сегодня» берётся из согласованной зоны приложения (utils.parsers.APP_TZ);
-- текущая неделя — с СЕГОДНЯ до воскресенья (прошедшие дни не показываются);
-- следующая неделя — понедельник–воскресенье следующей календарной недели;
-- «Другая» — два двухнедельных диапазона, начиная с понедельника после
-  следующей недели; далее — пары календарных месяцев;
+- быстрые даты — СКОЛЬЗЯЩЕЕ окно из 8 дней: сегодня + следующие 7 дней
+  (не привязано к календарной неделе, в воскресенье их тоже восемь);
+- дальше два диапазона по 7 дней, которые начинаются сразу после восьмого
+  дня быстрого окна и не пересекаются ни с ним, ни между собой;
+- выбор месяца — сетка месяцев от первой ещё не охваченной даты, но не
+  больше 12 кнопок; месяц горизонта, не поместившийся в сетку (13-й),
+  открывается стрелкой «▶️» из последнего месяца (`month_sequence`);
+  внутри месяца дни показываются сеткой, границы — [allowed];
 - горизонт — 12 календарных месяцев от сегодняшней даты включительно
   (календарное прибавление, а не фиксированные 365 дней);
-- первая пара месяцев начинается с месяца, содержащего первую ещё не
-  охваченную дату, поэтому стык «два диапазона → месяцы» не теряет дней;
-- недели и месяцы обрезаются по горизонту; пустые интервалы не создаются.
+- пустые интервалы не создаются: всё обрезается по допустимым датам.
 
-Формат кнопок дня — строго «дд.мм (дв)» с русскими двухбуквенными днями
-недели. Диапазоны показываются как «дд.мм–дд.мм», при переходе через год
-годы добавляются («29.12.2026–11.01.2027»); одиночный день — «дд.мм».
+Формат кнопок: быстрая дата — «дд.мм дв» (компактно для четырёх кнопок в
+строке), день месяца — просто число, диапазон — «дд.мм–дд.мм». Год в
+подписи диапазона появляется, только если без него диапазон неоднозначен:
+при переходе через год у конечной даты («28.12–03.01.2027») и для любого
+диапазона не текущего года («04.01–10.01.2027» при «сегодня» в 2026).
 """
 
 import calendar
@@ -31,6 +36,17 @@ from utils.parsers import APP_TZ, app_today
 
 # Горизонт выбора: календарных месяцев от текущей даты включительно
 HORIZON_MONTHS = 12
+
+# Сетка «Выбрать месяц»: не больше 12 кнопок-месяцев. Месяц горизонта, не
+# поместившийся в сетку (13-й, когда первая неохваченная дата попадает в
+# первый месяц горизонта), открывается стрелкой «▶️» из последнего месяца.
+MONTH_GRID_MAX = HORIZON_MONTHS
+
+# Быстрое окно: сегодня + 7 следующих дней (ровно 8 кнопок)
+QUICK_DAYS = 8
+
+# Диапазон продолжения: 7 дней (как «неделя», но без привязки к пн/вс)
+FOLLOWUP_RANGE_DAYS = 7
 
 # Дни недели: 0 — понедельник (как date.weekday())
 WEEKDAYS_SHORT = ("пн", "вт", "ср", "чт", "пт", "сб", "вс")
@@ -56,14 +72,39 @@ DateRange = tuple[date, date]
 # Тип месяца: (год, номер месяца 1..12)
 MonthKey = tuple[int, int]
 
+# Границы, которые принимает datetime.date: ими ограничены подделанные
+# callback'и `aw_calmonth` (год 0, 10000 или 99999 ронял обработчик).
+MIN_YEAR = 1
+MAX_YEAR = 9999
+
 
 def days_in_month(year: int, month: int) -> int:
     """Число дней в календарном месяце (с учётом високосности)."""
     return calendar.monthrange(year, month)[1]
 
 
+def is_valid_month_key(key: MonthKey) -> bool:
+    """
+    Год и месяц в границах, которые принимает `datetime.date`.
+
+    Callback'и приходят от пользователя, поэтому `aw_calmonth` с годом 0,
+    -1 или 99999 нельзя пропускать в `month_bounds`: `date(...)` бросил бы
+    ValueError уже внутри отрисовки, и пользователь увидел бы внутреннюю
+    ошибку вместо «экран устарел».
+    """
+    year, month = key
+    return MIN_YEAR <= year <= MAX_YEAR and 1 <= month <= 12
+
+
 def month_bounds(key: MonthKey) -> DateRange:
-    """Первый и последний день календарного месяца."""
+    """
+    Первый и последний день календарного месяца.
+
+    Недопустимый месяц (год вне 1..9999 или номер вне 1..12) отвергается
+    здесь же: подделанный callback не должен доходить до `date(...)`.
+    """
+    if not is_valid_month_key(key):
+        raise ValueError(f"month out of range: {key!r}")
     year, month = key
     return date(year, month, 1), date(year, month, days_in_month(year, month))
 
@@ -101,142 +142,165 @@ def days_between(start: date, end: date) -> list[date]:
     return [start + timedelta(days=offset) for offset in range((end - start).days + 1)]
 
 
-def current_week(today: date) -> DateRange:
+def quick_days(today: date, allowed: DateRange | None = None) -> list[date]:
     """
-    Оставшиеся дни текущей календарной недели: сегодня — воскресенье.
+    Быстрое окно: ровно восемь дат — сегодня и следующие семь дней.
 
-    Прошедшие дни не показываются: в понедельник интервал — вся неделя,
-    в воскресенье — только сегодняшний день.
+    Окно скользящее: оно не зависит от дня недели, поэтому в воскресенье
+    в нём те же восемь дат, а не один сегодняшний день. Если правила
+    кирпичика сдвигают начало допустимого интервала вперёд (`min_date`),
+    окно привязывается к первой доступной дате: дат по-прежнему восемь.
     """
-    return today, today + timedelta(days=6 - today.weekday())
+    first = selection_anchor(today, allowed)
+    last = first + timedelta(days=QUICK_DAYS - 1)
+    if allowed is not None:
+        last = min(last, allowed[1])
+    return days_between(first, last)
 
 
-def next_week(today: date) -> DateRange:
-    """Следующая календарная неделя: понедельник–воскресенье."""
-    monday = today - timedelta(days=today.weekday())
-    start = monday + timedelta(days=7)
-    return start, start + timedelta(days=6)
-
-
-def other_ranges(today: date) -> list[DateRange]:
+def followup_ranges(today: date, allowed: DateRange | None = None) -> list[DateRange]:
     """
-    Два двухнедельных диапазона кнопки «Другая».
+    Два диапазона по семь дней сразу после быстрого окна.
 
-    Первый начинается с понедельника после следующей календарной недели
-    и длится 14 дней; второй — следующие 14 дней. Для 22.10.2026:
-    02.11–15.11 и 16.11–29.11.
+    Для 29.10.2026 быстрые даты — 29.10…05.11, поэтому диапазоны
+    06.11–12.11 и 13.11–19.11: они не пересекаются ни с окном, ни между
+    собой, и между ними нет пропуска. Окно и диапазоны считаются от одного
+    якоря (`today` или первого допустимого дня), поэтому не пересекаются и
+    при ограничении `min_date`. Пустые диапазоны отбрасываются.
     """
-    monday = today - timedelta(days=today.weekday())
-    first_start = monday + timedelta(days=14)
-    second_start = monday + timedelta(days=28)
-    return [
-        (first_start, first_start + timedelta(days=13)),
-        (second_start, second_start + timedelta(days=13)),
-    ]
+    first = selection_anchor(today, allowed) + timedelta(days=QUICK_DAYS)
+    second = first + timedelta(days=FOLLOWUP_RANGE_DAYS)
+    last = timedelta(days=FOLLOWUP_RANGE_DAYS - 1)
+    ranges: list[DateRange] = []
+    for start, end in ((first, first + last), (second, second + last)):
+        if allowed is not None:
+            start = max(start, allowed[0])
+            end = min(end, allowed[1])
+            if start > end:
+                continue
+        ranges.append((start, end))
+    return ranges
+
+
+def selection_anchor(today: date, allowed: DateRange | None = None) -> date:
+    """
+    Первый день быстрого окна: сегодня, но не раньше `allowed[0]`.
+
+    Если правила кирпичика сдвигают начало (`min_date`), всё календарное
+    меню строится от первого доступного дня — иначе окно и диапазоны
+    пересекались бы с запрещёнными датами.
+    """
+    return today if allowed is None else max(today, allowed[0])
+
+
+def selection_seam(today: date, allowed: DateRange | None = None) -> date:
+    """
+    Первая дата, не покрытая быстрым окном и двумя диапазонами.
+
+    21 день покрыт кнопками быстрого выбора (8 + 7 + 7), значит выбор
+    месяца начинается со следующего дня, и стык «диапазоны → месяцы»
+    непрерывен.
+    """
+    return selection_anchor(today, allowed) + timedelta(
+        days=QUICK_DAYS + 2 * FOLLOWUP_RANGE_DAYS
+    )
 
 
 def first_uncovered(today: date) -> date:
     """
-    Первая дата, не покрытая текущей/следующей неделей и двумя диапазонами.
+    Первая дата после быстрого окна и двух диапазонов (без учёта правил).
 
-    Стык «диапазоны → месяцы» обязан быть непрерывным: для 22.10.2026
-    диапазоны заканчиваются 29.11.2026, значит первая неохваченная дата —
-    30.11.2026 (с неё и начинается первая пара месяцев).
+    Обёртка над `selection_seam` для чистых тестов и подписей: 21 день
+    покрыт кнопками быстрого выбора.
     """
-    monday = today - timedelta(days=today.weekday())
-    return monday + timedelta(days=42)
+    return selection_seam(today)
 
 
-def weeks_covering(start: date, end: date) -> list[DateRange]:
+def month_sequence(seam: date, end: date) -> list[MonthKey]:
     """
-    Календарные недели (пн–вс), покрывающие интервал [start, end].
+    Все месяцы от месяца первой неохваченной даты до месяца горизонта.
 
-    Каждая неделя обрезается по границам интервала: неполная первая или
-    последняя неделя не выходит за разрешённые даты. Пустых недель нет.
+    Это полная последовательность для стрелок «◀️»/«▶️» и проверки
+    достижимости: горизонт длится 12 календарных месяцев, но начинается он
+    не с 1-го числа, поэтому при `seam` в начале месяца в последовательности
+    оказывается 13 месяцев.
     """
-    if start > end:
+    if seam > end:
         return []
-    cursor = start - timedelta(days=start.weekday())
-    weeks: list[DateRange] = []
-    while cursor <= end:
-        week_start = max(cursor, start)
-        week_end = min(cursor + timedelta(days=6), end)
-        if week_start <= week_end:
-            weeks.append((week_start, week_end))
-        cursor += timedelta(days=7)
-    return weeks
+    current = (seam.year, seam.month)
+    last = (end.year, end.month)
+    months: list[MonthKey] = []
+    while current <= last:
+        months.append(current)
+        current = add_months_key(current, 1)
+    return months
 
 
-def month_weeks(key: MonthKey, allowed: DateRange) -> list[DateRange]:
+def month_grid(seam: date, end: date) -> list[MonthKey]:
     """
-    Недели выбранного месяца в разрешённом интервале.
+    Сетка месячного выбора: не больше 12 кнопок-месяцев.
+
+    Кнопок не больше `MONTH_GRID_MAX`: если первая неохваченная дата попадает
+    в первый месяц горизонта (окно и диапазоны не переходят в следующий
+    месяц), месяцев в последовательности 13. Месяц горизонта при этом не
+    теряется: он открывается стрелкой «▶️» из последнего месяца сетки
+    (`month_sequence`), а не отдельной кнопкой.
+    """
+    return month_sequence(seam, end)[:MONTH_GRID_MAX]
+
+
+def month_days(key: MonthKey, allowed: DateRange) -> list[date]:
+    """
+    Дни выбранного месяца в допустимом интервале.
 
     Обрезаются и по границам месяца, и по [allowed]: при выборе месяца
     нельзя уйти в соседний месяц или за горизонт 12 месяцев.
+
+    Недопустимый ключ месяца даёт пустой список, а не исключение: экран
+    показывает «устарел», а не внутреннюю ошибку.
     """
+    if not is_valid_month_key(key):
+        return []
     month_start, month_end = month_bounds(key)
-    start = max(month_start, allowed[0])
-    end = min(month_end, allowed[1])
-    return weeks_covering(start, end)
+    return days_between(max(month_start, allowed[0]), min(month_end, allowed[1]))
 
 
-def month_pairs(today: date, horizon: date) -> list[list[MonthKey]]:
+def format_quick_day(value: date) -> str:
     """
-    Пары календарных месяцев для кнопки «Дальше».
+    Быстрая дата: «29.10 чт».
 
-    Первая пара начинается с месяца, содержащего первую неохваченную дату
-    (для 22.10.2026 — ноябрь и декабрь 2026). Последняя пара содержит месяц
-    горизонта; если второй месяц пары уже за горизонтом, он не показывается
-    (пустых месяцев и интервалов не бывает).
+    День недели дан двумя буквами без скобок — подпись остаётся короткой,
+    и в строке гарантированно помещаются четыре кнопки.
     """
-    first = (first_uncovered(today).year, first_uncovered(today).month)
-    last = (horizon.year, horizon.month)
-    pairs: list[list[MonthKey]] = []
-    current = first
-    while current <= last:
-        pair = [current]
-        second = add_months_key(current, 1)
-        if second <= last:
-            pair.append(second)
-        pairs.append(pair)
-        current = add_months_key(current, 2)
-    return pairs
+    return f"{value.day:02d}.{value.month:02d} {WEEKDAYS_SHORT[value.weekday()]}"
 
 
-def pair_index(today: date, key: MonthKey) -> int | None:
+def format_month_day(value: date) -> str:
+    """День месяца в сетке месяца: только число («1», «29»)."""
+    return str(value.day)
+
+
+def format_range(start: date, end: date, today: date | None = None) -> str:
     """
-    Индекс пары месяцев, содержащей месяц key (None — месяц до первой пары).
+    Подпись диапазона: «06.11–12.11», одиночный день — «30.11».
 
-    Нужен для кнопки «Назад» с уровня недель месяца: возвращает к той паре,
-    из которой пользователь пришёл (а не всегда к первой).
+    Год добавляется только там, где без него подпись стала бы неоднозначной:
+    - диапазон пересекает границу года — год у конечной даты
+      («28.12–03.01.2027»);
+    - диапазон целиком (или одиночный день) не в текущем году — год у
+      конечной даты («04.01–10.01.2027» при «сегодня» в 2026).
+    Так в обычном случае подпись остаётся короткой («06.11–12.11»).
+    Год конечной даты достаточен: диапазон не длиннее семи дней и не может
+    растянуться больше чем на два года.
     """
-    first = (first_uncovered(today).year, first_uncovered(today).month)
-    delta = (key[0] - first[0]) * 12 + (key[1] - first[1])
-    if delta < 0:
-        return None
-    return delta // 2
-
-
-def format_day(value: date) -> str:
-    """Кнопка конкретной даты: строго «дд.мм (дв)», например «17.11 (вт)»."""
-    return f"{value.day:02d}.{value.month:02d} ({WEEKDAYS_SHORT[value.weekday()]})"
-
-
-def format_range(start: date, end: date) -> str:
-    """
-    Подпись диапазона: «02.11–15.11», одиночный день — «30.11».
-
-    При переходе через границу года годы добавляются, иначе диапазон
-    «29.12–11.01» был бы неоднозначным.
-    """
+    if today is None:
+        today = app_today_value()
+    same_year = start.year == end.year
+    needs_year = not same_year or start.year != today.year
+    tail = f".{end.year}" if needs_year else ""
     if start == end:
-        return f"{start.day:02d}.{start.month:02d}"
-    if start.year != end.year:
-        return (
-            f"{start.day:02d}.{start.month:02d}.{start.year}–"
-            f"{end.day:02d}.{end.month:02d}.{end.year}"
-        )
-    return f"{start.day:02d}.{start.month:02d}–{end.day:02d}.{end.month:02d}"
+        return f"{start.day:02d}.{start.month:02d}{tail}"
+    return f"{start.day:02d}.{start.month:02d}–{end.day:02d}.{end.month:02d}{tail}"
 
 
 def format_month(key: MonthKey) -> str:
@@ -257,25 +321,32 @@ def app_today_value() -> date:
 
 __all__ = [
     "APP_TZ",
+    "FOLLOWUP_RANGE_DAYS",
     "HORIZON_MONTHS",
+    "MAX_YEAR",
+    "MIN_YEAR",
+    "MONTH_GRID_MAX",
     "MONTH_NAMES",
+    "QUICK_DAYS",
     "WEEKDAYS_SHORT",
     "add_months",
     "add_months_key",
     "app_today_value",
-    "current_week",
     "days_between",
     "days_in_month",
     "first_uncovered",
-    "format_day",
+    "followup_ranges",
     "format_month",
+    "format_month_day",
+    "format_quick_day",
     "format_range",
     "horizon_end",
+    "is_valid_month_key",
     "month_bounds",
-    "month_pairs",
-    "month_weeks",
-    "next_week",
-    "other_ranges",
-    "pair_index",
-    "weeks_covering",
+    "month_days",
+    "month_grid",
+    "month_sequence",
+    "quick_days",
+    "selection_anchor",
+    "selection_seam",
 ]

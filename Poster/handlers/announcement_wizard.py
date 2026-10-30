@@ -31,7 +31,7 @@ import logging
 import uuid
 from collections.abc import Sequence
 from datetime import date
-from typing import Any
+from typing import Any, Callable
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.constants import ChatType
@@ -142,8 +142,6 @@ _field_status_text = wizard_questions.field_status_text
 _field_value_text = wizard_questions.field_value_text
 _parse_rule_date = wizard_questions.parse_rule_date
 _calendar_bounds = wizard_questions.calendar_bounds
-_clip_range = wizard_questions.clip_range
-_calendar_title = wizard_questions.calendar_title
 _day_rows = wizard_questions.day_rows
 
 logger = logging.getLogger(__name__)
@@ -1518,28 +1516,24 @@ async def _render_question(
                 )
             ]
         )
-    rows.append(
-        [
-            InlineKeyboardButton(
-                "⏭ Пропустить",
-                callback_data=(
-                    f"aw_qskip:{details.draft_id}:"
-                    f"{details.revision}:{field.brick_id}"
-                ),
-            )
-        ]
+    skip_button = InlineKeyboardButton(
+        "⏭ Пропустить",
+        callback_data=(
+            f"aw_qskip:{details.draft_id}:{details.revision}:{field.brick_id}"
+        ),
     )
-    rows.append(
-        [
-            InlineKeyboardButton(
-                "◀️ Назад",
-                callback_data=(
-                    f"aw_qback:{details.draft_id}:"
-                    f"{details.revision}:{field.brick_id}"
-                ),
-            )
-        ]
+    back_button = InlineKeyboardButton(
+        "◀️ Назад",
+        callback_data=(
+            f"aw_qback:{details.draft_id}:{details.revision}:{field.brick_id}"
+        ),
     )
+    if field.value_type == BRICK_TYPE_DATE:
+        # U2a: внизу первого экрана даты — ровно одна строка навигации.
+        rows.append([back_button, skip_button])
+    else:
+        rows.append([skip_button])
+        rows.append([back_button])
     keyboard = InlineKeyboardMarkup(rows)
     # S5 §5.7: шутка подставляется в текст ТОЛЬКО после того, как собраны
     # `callback_data` и клавиатура, — повлиять на действия она не может.
@@ -2073,88 +2067,6 @@ async def _render_calendar_value(
     )
 
 
-async def _render_calendar_root(
-    update: Update,
-    context: ContextTypes.DEFAULT_TYPE,
-    details,
-    field: AnnouncementFieldState,
-    index: int,
-    source: str,
-) -> int:
-    start, end = _calendar_bounds(dict(field.rules))
-    if start > end:
-        return await _render_calendar_value(
-            update,
-            context,
-            details,
-            field,
-            index,
-            source,
-            error=("Календарь недоступен для этих правил. Введите дату текстом."),
-        )
-    today = app_today()
-    allowed = (start, end)
-    rows: list[list[InlineKeyboardButton]] = []
-    prefix = f"{details.draft_id}:{details.revision}:{field.brick_id}"
-
-    current = _clip_range(calendar_view.current_week(today), allowed)
-    if current is not None:
-        rows.append(
-            [
-                InlineKeyboardButton(
-                    f"Текущая неделя: {calendar_view.format_range(*current)}",
-                    callback_data=f"aw_calweek:{prefix}:cur",
-                )
-            ]
-        )
-    following = _clip_range(calendar_view.next_week(today), allowed)
-    if following is not None:
-        rows.append(
-            [
-                InlineKeyboardButton(
-                    f"Следующая неделя: {calendar_view.format_range(*following)}",
-                    callback_data=f"aw_calweek:{prefix}:next",
-                )
-            ]
-        )
-    other = [
-        clipped
-        for clipped in (
-            _clip_range(item, allowed) for item in calendar_view.other_ranges(today)
-        )
-        if clipped is not None
-    ]
-    if other:
-        labels = " / ".join(calendar_view.format_range(*item) for item in other)
-        rows.append(
-            [
-                InlineKeyboardButton(
-                    _short(f"Другая дата: {labels}", 60),
-                    callback_data=f"aw_calother:{prefix}",
-                )
-            ]
-        )
-    pairs = calendar_view.month_pairs(today, end)
-    available = [
-        pair
-        for pair in pairs
-        if any(calendar_view.month_weeks(key, allowed) for key in pair)
-    ]
-    if available:
-        rows.append(
-            [
-                InlineKeyboardButton(
-                    "📆 Выбрать месяц", callback_data=f"aw_calmonths:{prefix}"
-                )
-            ]
-        )
-    rows.append(
-        [InlineKeyboardButton("◀️ Назад", callback_data=f"aw_calback:{prefix}")]
-    )
-    await _render(update, context, _calendar_title(field), InlineKeyboardMarkup(rows))
-    return AW_QUESTIONS
-
-
 async def _render_calendar_days(
     update: Update,
     context: ContextTypes.DEFAULT_TYPE,
@@ -2164,54 +2076,48 @@ async def _render_calendar_days(
     source: str,
     *,
     title: str,
-    value_range: calendar_view.DateRange,
+    days: list[date],
     back_callback: str,
+    back_label: str = "◀️ Назад",
+    per_row: int = 4,
+    label: Callable[[date], str] = calendar_view.format_quick_day,
 ) -> int:
+    """Экран дней (раскрытый диапазон или сетка месяца) с возвратом."""
     prefix = f"{details.draft_id}:{details.revision}:{field.brick_id}"
-    days = calendar_view.days_between(*value_range)
-    rows = _day_rows(days, prefix)
-    rows.append([InlineKeyboardButton("◀️ Назад", callback_data=back_callback)])
+    rows = _day_rows(days, prefix, per_row=per_row, label=label)
+    rows.append([InlineKeyboardButton(back_label, callback_data=back_callback)])
     await _render(update, context, title, InlineKeyboardMarkup(rows))
     return AW_QUESTIONS
 
 
-async def _render_calendar_other(
+async def _render_calendar_range_days(
     update: Update,
     context: ContextTypes.DEFAULT_TYPE,
     details,
     field: AnnouncementFieldState,
     index: int,
     source: str,
+    value_range: calendar_view.DateRange,
 ) -> int:
-    start, end = _calendar_bounds(dict(field.rules))
+    """
+    Раскрытие семидневного диапазона на том же служебном экране.
+
+    Внизу — «◀️ К быстрым датам»: возврат к первому набору из восьми дат
+    без перезахода в конструктор.
+    """
     prefix = f"{details.draft_id}:{details.revision}:{field.brick_id}"
-    rows: list[list[InlineKeyboardButton]] = []
-    for item_index, item in enumerate(calendar_view.other_ranges(app_today())):
-        clipped = _clip_range(item, (start, end))
-        if clipped is None:
-            continue
-        rows.append(
-            [
-                InlineKeyboardButton(
-                    calendar_view.format_range(*clipped),
-                    callback_data=f"aw_calrange:{prefix}:{item_index}",
-                )
-            ]
-        )
-    if not rows:
-        return await _render_calendar_root(
-            update, context, details, field, index, source
-        )
-    rows.append(
-        [InlineKeyboardButton("◀️ Назад", callback_data=f"aw_calroot:{prefix}")]
-    )
-    await _render(
+    return await _render_calendar_days(
         update,
         context,
-        "📆 Другая дата\n\nВыберите двухнедельный диапазон:",
-        InlineKeyboardMarkup(rows),
+        details,
+        field,
+        index,
+        source,
+        title=(f"📅 {calendar_view.format_range(*value_range)}\n\nВыберите дату:"),
+        days=calendar_view.days_between(*value_range),
+        back_callback=f"aw_calquick:{prefix}",
+        back_label="◀️ К быстрым датам",
     )
-    return AW_QUESTIONS
 
 
 async def _render_calendar_months(
@@ -2222,36 +2128,52 @@ async def _render_calendar_months(
     index: int,
     source: str,
 ) -> int:
+    """Сетка месяцев горизонта: не больше 12 кнопок (месяц горизонта — стрелкой)."""
     start, end = _calendar_bounds(dict(field.rules))
     allowed = (start, end)
     prefix = f"{details.draft_id}:{details.revision}:{field.brick_id}"
-    rows: list[list[InlineKeyboardButton]] = []
-    for pair in calendar_view.month_pairs(app_today(), end):
-        row = []
-        for key in pair:
-            if not calendar_view.month_weeks(key, allowed):
-                continue
-            row.append(
-                InlineKeyboardButton(
-                    f"{calendar_view.MONTH_NAMES[key[1]]} {key[0]}",
-                    callback_data=f"aw_calmonth:{prefix}:{key[0]}:{key[1]}",
-                )
+    seam = calendar_view.selection_seam(app_today(), allowed)
+    months = calendar_view.month_sequence(seam, end)
+    months = [key for key in months if calendar_view.month_days(key, allowed)][
+        : calendar_view.MONTH_GRID_MAX
+    ]
+    if not months:
+        return await _render_calendar_value(
+            update,
+            context,
+            details,
+            field,
+            index,
+            source,
+            error="Для выбора месяца нет доступных дат. Введите дату текстом.",
+        )
+    rows = [
+        [
+            InlineKeyboardButton(
+                calendar_view.format_month(key),
+                callback_data=f"aw_calmonth:{prefix}:{key[0]}:{key[1]}",
             )
-        if row:
-            rows.append(row)
+            for key in months[position : position + 3]
+        ]
+        for position in range(0, len(months), 3)
+    ]
     rows.append(
-        [InlineKeyboardButton("◀️ Назад", callback_data=f"aw_calroot:{prefix}")]
+        [
+            InlineKeyboardButton(
+                "◀️ К быстрым датам", callback_data=f"aw_calquick:{prefix}"
+            )
+        ]
     )
     await _render(
         update,
         context,
-        "📆 Выберите месяц:",
+        "📅 Выберите месяц:",
         InlineKeyboardMarkup(rows),
     )
     return AW_QUESTIONS
 
 
-async def _render_calendar_month_weeks(
+async def _render_calendar_month(
     update: Update,
     context: ContextTypes.DEFAULT_TYPE,
     details,
@@ -2260,28 +2182,63 @@ async def _render_calendar_month_weeks(
     source: str,
     key: calendar_view.MonthKey,
 ) -> int:
+    """
+    Календарь месяца: дни сеткой по семь, стрелки соседних месяцев.
+
+    Стрелки показываются только внутри горизонта (`calendar_bounds`),
+    поэтому уйти за допустимые даты нельзя.
+    """
     start, end = _calendar_bounds(dict(field.rules))
     allowed = (start, end)
     prefix = f"{details.draft_id}:{details.revision}:{field.brick_id}"
-    weeks = calendar_view.month_weeks(key, allowed)
-    rows: list[list[InlineKeyboardButton]] = [
+    seam = calendar_view.selection_seam(app_today(), allowed)
+    # Полная последовательность месяцев горизонта: последний месяц может не
+    # попасть в сетку (кнопок не больше 12) и открывается стрелкой «▶️».
+    months = [
+        item
+        for item in calendar_view.month_sequence(seam, end)
+        if calendar_view.month_days(item, allowed)
+    ]
+    if key not in months:
+        return await _stale(update, context)
+    days = calendar_view.month_days(key, allowed)
+    if not days:
+        return await _stale(update, context)
+    rows = _day_rows(days, prefix, per_row=7, label=calendar_view.format_month_day)
+    position = months.index(key)
+    nav: list[InlineKeyboardButton] = []
+    if position > 0:
+        previous = months[position - 1]
+        nav.append(
+            InlineKeyboardButton(
+                "◀️",
+                callback_data=f"aw_calmonth:{prefix}:{previous[0]}:{previous[1]}",
+            )
+        )
+    if position + 1 < len(months):
+        following = months[position + 1]
+        nav.append(
+            InlineKeyboardButton(
+                "▶️",
+                callback_data=f"aw_calmonth:{prefix}:{following[0]}:{following[1]}",
+            )
+        )
+    if nav:
+        rows.append(nav)
+    rows.append(
+        [InlineKeyboardButton("📅 Месяцы", callback_data=f"aw_calmonths:{prefix}")]
+    )
+    rows.append(
         [
             InlineKeyboardButton(
-                calendar_view.format_range(*week),
-                callback_data=(
-                    f"aw_calweekdays:{prefix}:{key[0]}:{key[1]}:{week_index}"
-                ),
+                "◀️ К быстрым датам", callback_data=f"aw_calquick:{prefix}"
             )
         ]
-        for week_index, week in enumerate(weeks)
-    ]
-    rows.append(
-        [InlineKeyboardButton("◀️ Назад", callback_data=f"aw_calmonths:{prefix}")]
     )
     await _render(
         update,
         context,
-        f"📆 {calendar_view.MONTH_NAMES[key[1]]} {key[0]}\n\n" "Выберите неделю:",
+        f"📅 {calendar_view.format_month(key)}\n\nВыберите день:",
         InlineKeyboardMarkup(rows),
     )
     return AW_QUESTIONS
@@ -2752,16 +2709,12 @@ async def _render_extra_value_prompt(
                 ]
             )
     elif field.value_type == BRICK_TYPE_DATE:
-        rows.append(
-            [
-                InlineKeyboardButton(
-                    "📅 Календарь",
-                    callback_data=(
-                        f"aw_calroot:{details.draft_id}:"
-                        f"{details.revision}:{field.brick_id}"
-                    ),
-                )
-            ]
+        # U2a: компактный календарь показывается прямо на экране значения
+        # дополнительного кирпичика — отдельного входа «📅 Календарь» нет.
+        rows.extend(
+            wizard_questions.calendar_shortcut_rows(
+                field, f"{details.draft_id}:{details.revision}:{field.brick_id}"
+            )
         )
     rows.append(
         [
@@ -5075,6 +5028,16 @@ async def handle_template_callback(
 async def _handle_calendar_callback(
     update: Update, context: ContextTypes.DEFAULT_TYPE
 ) -> int:
+    """
+    Callback'и компактного календаря (U2a).
+
+    Новые действия: `aw_calquick` (первый экран), `aw_calrange` (раскрытие
+    семидневного диапазона), `aw_calmonths` (сетка 12 месяцев),
+    `aw_calmonth` (дни месяца), `aw_calday` (выбор даты без подтверждения).
+    Старые `aw_calroot` / `aw_calweek` / `aw_calother` / `aw_calweekdays`
+    остались в чатах с прежними сообщениями: они не падают, а отвечают и
+    перенаправляют на новый первый экран.
+    """
     parts = _callback_parts(update)
     action = parts[0]
     if len(parts) < 4:
@@ -5092,45 +5055,17 @@ async def _handle_calendar_callback(
     start, end = bounds
     allowed = (start, end)
     today = app_today()
-    prefix = f"{draft_id}:{revision}:{brick_id}"
 
-    if action == "aw_calroot":
+    if action == "aw_calquick":
         await _answer(update)
-        return await _render_calendar_root(
+        return await _render_calendar_value(
             update, context, details, field, index, source
         )
-    if action == "aw_calweek" and len(parts) == 5:
-        kind = parts[4]
-        if kind == "cur":
-            value_range = _clip_range(calendar_view.current_week(today), allowed)
-            title = "📅 Текущая неделя"
-        elif kind == "next":
-            value_range = _clip_range(calendar_view.next_week(today), allowed)
-            title = "📅 Следующая неделя"
-        else:
-            return await _stale(update, context)
-        if value_range is None:
-            return await _render_calendar_root(
-                update, context, details, field, index, source
-            )
-        await _answer(update)
-        return await _render_calendar_days(
-            update,
-            context,
-            details,
-            field,
-            index,
-            source,
-            title=(
-                f"{title}: {calendar_view.format_range(*value_range)}. "
-                "Выберите дату:"
-            ),
-            value_range=value_range,
-            back_callback=f"aw_calroot:{prefix}",
-        )
-    if action == "aw_calother":
-        await _answer(update)
-        return await _render_calendar_other(
+    if action in {"aw_calroot", "aw_calweek", "aw_calother", "aw_calweekdays"}:
+        # Совместимость со старыми сообщениями: экраны недель и «другой
+        # даты» удалены, поэтому кнопка безопасно возвращает к новому
+        # первому экрану с быстрыми датами.
+        return await _legacy_calendar_redirect(
             update, context, details, field, index, source
         )
     if action == "aw_calrange" and len(parts) == 5:
@@ -5138,25 +5073,13 @@ async def _handle_calendar_callback(
             range_index = int(parts[4])
         except ValueError:
             return await _stale(update, context)
-        ranges = calendar_view.other_ranges(today)
+        ranges = calendar_view.followup_ranges(today, allowed)
         if range_index < 0 or range_index >= len(ranges):
             return await _stale(update, context)
-        value_range = _clip_range(ranges[range_index], allowed)
-        if value_range is None:
-            return await _render_calendar_other(
-                update, context, details, field, index, source
-            )
+        value_range = ranges[range_index]
         await _answer(update)
-        return await _render_calendar_days(
-            update,
-            context,
-            details,
-            field,
-            index,
-            source,
-            title=(f"📅 {calendar_view.format_range(*value_range)}. " "Выберите дату:"),
-            value_range=value_range,
-            back_callback=f"aw_calother:{prefix}",
+        return await _render_calendar_range_days(
+            update, context, details, field, index, source, value_range
         )
     if action == "aw_calmonths":
         await _answer(update)
@@ -5168,33 +5091,16 @@ async def _handle_calendar_callback(
             key = (int(parts[4]), int(parts[5]))
         except ValueError:
             return await _stale(update, context)
-        if not calendar_view.month_weeks(key, allowed):
+        # Год и месяц проверяются ДО month_days: подделанный callback
+        # (`:0:5`, `:-1:5`, `:99999:12`) раньше доходил до date(...) и
+        # отдавал пользователю «Произошла внутренняя ошибка».
+        if not calendar_view.is_valid_month_key(key):
+            return await _stale(update, context)
+        if not calendar_view.month_days(key, allowed):
             return await _stale(update, context)
         await _answer(update)
-        return await _render_calendar_month_weeks(
+        return await _render_calendar_month(
             update, context, details, field, index, source, key
-        )
-    if action == "aw_calweekdays" and len(parts) == 7:
-        try:
-            key = (int(parts[4]), int(parts[5]))
-            week_index = int(parts[6])
-        except ValueError:
-            return await _stale(update, context)
-        weeks = calendar_view.month_weeks(key, allowed)
-        if week_index < 0 or week_index >= len(weeks):
-            return await _stale(update, context)
-        value_range = weeks[week_index]
-        await _answer(update)
-        return await _render_calendar_days(
-            update,
-            context,
-            details,
-            field,
-            index,
-            source,
-            title=(f"📅 {calendar_view.format_range(*value_range)}. " "Выберите дату:"),
-            value_range=value_range,
-            back_callback=f"aw_calmonth:{prefix}:{key[0]}:{key[1]}",
         )
     if action == "aw_calday" and len(parts) == 5:
         try:
@@ -5211,6 +5117,19 @@ async def _handle_calendar_callback(
             update, context, details, field, index, source
         )
     return await _stale(update, context)
+
+
+async def _legacy_calendar_redirect(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+    details,
+    field: AnnouncementFieldState,
+    index: int,
+    source: str,
+) -> int:
+    """Мягкий переход со старого экрана календаря на актуальный первый."""
+    await _answer(update, "Календарь обновлён.")
+    return await _render_calendar_value(update, context, details, field, index, source)
 
 
 async def handle_question_callback(

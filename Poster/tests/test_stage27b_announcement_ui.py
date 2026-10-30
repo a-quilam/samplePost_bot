@@ -482,11 +482,9 @@ class AnnouncementWizardQuestionTests(unittest.TestCase):
 
         self.assertIn("Вопрос 3 из 8", h.screen_text())
         self.assertIn("Выберите дату календарём", h.screen_text())
-        await h.callback(_callback(h, "aw_calroot"))
-        self.assertTrue(
-            any("Текущая неделя" in label for label, _data in h.screen_buttons())
-        )
-        await h.callback(_callback(h, "aw_calweek", ":cur"))
+        # U2a: компактный календарь уже на вопросе — быстрые даты и месяцы.
+        self.assertTrue(_callback(h, "aw_calday"))
+        self.assertTrue(_callback(h, "aw_calmonths"))
         day_callback = _callback(h, "aw_calday")
         chosen_day = date.fromisoformat(day_callback.rsplit(":", 1)[-1])
         await h.callback(day_callback)

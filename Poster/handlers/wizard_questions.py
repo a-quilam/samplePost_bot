@@ -19,7 +19,7 @@ from __future__ import annotations
 import re
 from datetime import date
 from html import unescape as _unescape
-from typing import Any
+from typing import Any, Callable
 
 from telegram import InlineKeyboardButton
 
@@ -398,44 +398,26 @@ def calendar_bounds(rules: dict[str, Any]) -> tuple[date, date]:
     return start, end
 
 
-def clip_range(
-    value: calendar_view.DateRange, allowed: calendar_view.DateRange
-) -> calendar_view.DateRange | None:
-    start = max(value[0], allowed[0])
-    end = min(value[1], allowed[1])
-    if start > end:
-        return None
-    return start, end
-
-
-def calendar_title(field: AnnouncementFieldState) -> str:
-    value = field_value_text(field)
-    lines = [
-        # Заголовок кирпичика задаёт человек (автор/админ места) и попадает
-        # в экран с parse_mode=HTML — экранируем, как в вопросах.
-        f"📅 {h(field.title)}",
-        "Выберите дату кнопками. Дату также можно отправить текстом.",
-    ]
-    if value:
-        lines.append(f"Текущее значение: {h(value)}")
-    hint = date_rules_hint(dict(field.rules))
-    if hint:
-        lines.append(f"Ограничения: {hint}.")
-    return "\n\n".join(lines)
-
-
 def day_rows(
     days: list[date],
     prefix: str,
     *,
     per_row: int = CALENDAR_DAYS_PER_ROW,
+    label: Callable[[date], str] = calendar_view.format_quick_day,
 ) -> list[list[InlineKeyboardButton]]:
+    """
+    Кнопки-дни строками по `per_row`.
+
+    `label` выбирает формат подписи: быстрые даты — «29.10 чт», дни
+    сетки месяца — просто число. Callback один и тот же (`aw_calday`),
+    поэтому выбор даты на любом уровне сохраняет её без подтверждения.
+    """
     rows: list[list[InlineKeyboardButton]] = []
     for start in range(0, len(days), per_row):
         rows.append(
             [
                 InlineKeyboardButton(
-                    calendar_view.format_day(day),
+                    label(day),
                     callback_data=(f"aw_calday:{prefix}:{day.strftime('%Y-%m-%d')}"),
                 )
                 for day in days[start : start + per_row]
@@ -451,12 +433,17 @@ def calendar_shortcut_rows(
     today: date | None = None,
 ) -> list[list[InlineKeyboardButton]]:
     """
-    Компактная сетка календаря прямо на вопросе даты (S3 п.4).
+    Компактный первый экран календаря прямо на вопросе даты (U2a).
 
-    Сверху — дни текущей недели кнопками (`aw_calday`), затем недели,
-    «другая дата» и месяцы. Callback'и прежние, поэтому ручная навигация и
-    экран `aw_calroot` работают как раньше; отдельного нажатия «открыть
-    календарь» больше не требуется.
+    Состав ровно такой (сверху вниз):
+    - восемь быстрых дат (сегодня + 7 дней), 2 строки × 4 кнопки;
+    - два семидневных диапазона в ОДНОЙ строке: следующий день после
+      восьмого и ещё семь дней — без пересечений и пропусков;
+    - одна кнопка «📅 Выбрать месяц» (сетка месяцев горизонта).
+
+    Дублирующих входов («Текущая неделя», «Другая дата», отдельный экран
+    календаря) больше нет: ниже вопрос сам добавляет «⏭ Пропустить» и
+    «◀️ Назад». Всё обрезается по допустимым датам (calendar_bounds).
     """
     start, end = calendar_bounds(dict(field.rules))
     if start > end:
@@ -465,70 +452,31 @@ def calendar_shortcut_rows(
     allowed = (start, end)
     rows: list[list[InlineKeyboardButton]] = []
 
-    current = clip_range(calendar_view.current_week(current_day), allowed)
-    if current is not None:
-        rows.extend(day_rows(calendar_view.days_between(*current), prefix))
-        rows.append(
-            [
-                InlineKeyboardButton(
-                    f"Текущая неделя: {calendar_view.format_range(*current)}",
-                    callback_data=f"aw_calweek:{prefix}:cur",
-                )
-            ]
-        )
-    following = clip_range(calendar_view.next_week(current_day), allowed)
-    if following is not None:
-        rows.append(
-            [
-                InlineKeyboardButton(
-                    f"Следующая неделя: {calendar_view.format_range(*following)}",
-                    callback_data=f"aw_calweek:{prefix}:next",
-                )
-            ]
-        )
-    other = [
-        clipped
-        for clipped in (
-            clip_range(item, allowed)
-            for item in calendar_view.other_ranges(current_day)
-        )
-        if clipped is not None
-    ]
-    if other:
-        labels = " / ".join(calendar_view.format_range(*item) for item in other)
-        rows.append(
-            [
-                InlineKeyboardButton(
-                    _short(f"Другая дата: {labels}", 60),
-                    callback_data=f"aw_calother:{prefix}",
-                )
-            ]
-        )
-    pairs = calendar_view.month_pairs(current_day, end)
-    available = [
-        pair
-        for pair in pairs
-        if any(calendar_view.month_weeks(key, allowed) for key in pair)
-    ]
-    if available:
-        rows.append(
-            [
-                InlineKeyboardButton(
-                    "📆 Выбрать месяц", callback_data=f"aw_calmonths:{prefix}"
-                )
-            ]
-        )
-    # Полный экран календаря остаётся доступным (месяцы/диапазоны) — но уже
-    # как дополнительная навигация, а не единственный вход: дни текущей
-    # недели видны сразу выше.
-    rows.append(
-        [
+    quick = calendar_view.quick_days(current_day, allowed)
+    if quick:
+        rows.extend(day_rows(quick, prefix))
+    range_buttons: list[InlineKeyboardButton] = []
+    for index, item in enumerate(calendar_view.followup_ranges(current_day, allowed)):
+        # Индекс диапазона, а не даты: подписи короткие, а раскрытие ищет
+        # интервал в calendar_view.followup_ranges и обрезает по правилам.
+        range_buttons.append(
             InlineKeyboardButton(
-                "📅 Календарь: месяцы и диапазоны",
-                callback_data=f"aw_calroot:{prefix}",
+                calendar_view.format_range(*item),
+                callback_data=f"aw_calrange:{prefix}:{index}",
             )
-        ]
-    )
+        )
+    if range_buttons:
+        rows.append(range_buttons)
+    if calendar_view.month_grid(
+        calendar_view.selection_seam(current_day, allowed), end
+    ):
+        rows.append(
+            [
+                InlineKeyboardButton(
+                    "📅 Выбрать месяц", callback_data=f"aw_calmonths:{prefix}"
+                )
+            ]
+        )
     return rows
 
 
@@ -542,10 +490,3 @@ def time_preset_rows(
             for value in presets
         ]
     ]
-
-
-def _short(value: object, limit: int = 60) -> str:
-    text = " ".join(str(value or "").split())
-    if len(text) <= limit:
-        return text
-    return text[: limit - 1].rstrip() + "…"
