@@ -24,7 +24,14 @@ LinkPreviewOptions(is_disabled=True) во всех точках отправки
 игнорируется), компактный экран завершения (2 кнопки, инвариант порядка
 message_id через _ensure_service_screen_below), компактный экран
 редактирования готового анонса, пересборка живого блока при смене состава
-фото (дефект потери фото закрыт). Тестов: 1633 OK. U3–U5 — впереди.
+фото (дефект потери фото закрыт). Тестов: 1633 OK.
+**U3 принят** (09c33d4 + 063c4a6): исправления №8/№9/№13 — дубль кнопки
+предложения кирпичиков удалён (только 📨 в строке), utils/keyboard_layouts
+(переиспользуемые раскладки), общий доменный fallback в errors.py (доменные
+ошибки → понятный alert + главное меню вместо «внутренней ошибки»), фазы
+в allow-listах возвратов (await_new_name, конфликты), alias_warning fallback.
+Тестов: 1727 OK (краулер тестировщика: 502+ back-кликов, 0 внутренних
+ошибок). U4–U5 — впереди.
 
 Единый документ состояния, который ведёт `poster-manager` после каждого
 завершённого этапа. Владелец читает его, чтобы понять, где остановилась
@@ -49,6 +56,55 @@ Push: <нет | выполнено по разрешению>
 ---
 
 ## Журнал
+
+## Этап U3 — Кирпичики, возвраты, раскладки (U3a + U3b)
+Дата: 2026-10-30
+Статус: done
+Задание: исправления №8 (дубль кнопки предложения), №9 (все кнопки
+возврата), №13 (компоновка inline-кнопок).
+Изменено:
+- `Poster/handlers/bricks.py` — общая «📨 Предложить кирпичик» удалена;
+  предложение только из строки кирпичика (📨 справа); bp_start без id →
+  безопасный alert (PROPOSAL_CREATE_HINT на пустом хабе); мастер 3 шага;
+  подсказки пустых состояний не ссылаются на несуществующие кнопки.
+- `Poster/utils/keyboard_layouts.py` (новый) — button/rows_of/pair/
+  list_rows/nav_row/danger_row; применены в bricks, wizard_photos,
+  wizard_questions (дни календаря), announcement_wizard (пара даты,
+  месяц-сетка, nav, _place_buttons).
+- `Poster/errors.py` — общий механизм: is_expected_domain_error →
+  DOMAIN_NOTICE_TEXT + fallback в главное меню вместо «⚠️ Произошла
+  внутренняя ошибка» (программные исключения падают громко как раньше,
+  права-отказы не превращаются в fallback).
+- `Poster/handlers/places.py` — _pending_alias_text (валидация до
+  find_name_conflicts), alias_warning без названия → карточка + notice.
+- `Poster/handlers/templates.py` — await_new_name в allow-list
+  handle_back/handle_hub.
+- `Poster/handlers/admin.py` — allow-list: handle_open_place
+  (+conflicts_list), handle_conflicts_open (+conflict_card),
+  handle_conflict_open (+rename/switch).
+- Тесты: новые u3a_bricks (10+2), u3a_bricks_tester (7), u3a_layouts (22),
+  u3a_layouts_tester (12), u3a_acceptance_tester (16), u3b_back (25);
+  актуализированы stage26, r4_ux.
+Проверки:
+- `make check PYTHON=.venv/bin/python` → `Ran 1727 tests ... OK`,
+  ruff/black/mypy чисто.
+- Мутационная проверка: общая кнопка вернута → 5 красных; хелперы
+  сломаны → до 11 красных; await_new_name убран из allow-list → 3
+  красных; alias_warning исключение → 7 красных; admin allow-list →
+  красные цепочки конфликтов.
+- poster-tester (независимо, U3a): хаб/предложения/раскладки/негативы;
+  найдены и закрыты 2 текстовых дефекта-подсказки (пустой хаб, пустые
+  предложения).
+- poster-tester (независимо, U3b): живой BFS 573 экрана / 502 back-клика
+  + рестарт 154 клика + фаззинг 132 кейса — 0 внутренних ошибок.
+Замечания ревизора: approve. Неблокирующие: permission-ошибки дают
+wording «экран устарел» вместо «нет доступа» (доступ не открывают);
+handle_hub из AWAIT_NAME без notice (асимметрия, потери нет);
+_pending_alias_text не проверяет длину (уходит в общий fallback);
+тест (г) fallback классов — только PlaceNameError прямой.
+Открытые вопросы: нет блокирующих.
+Коммиты: 09c33d4 (U3a), 063c4a6 (U3b). Push: выполнен. CI: success
+(оба).
 
 ## Этап U2 — Календарь, фото-шаг, завершение (U2a + U2b)
 Дата: 2026-10-30
