@@ -32,6 +32,12 @@ message_id через _ensure_service_screen_below), компактный экр
 в allow-listах возвратов (await_new_name, конфликты), alias_warning fallback.
 Тестов: 1727 OK (краулер тестировщика: 502+ back-кликов, 0 внутренних
 ошибок). U4–U5 — впереди.
+**U4 принят** (b75e673 + 604462b): исправление №10 — единый каталог
+текстов config/ui_texts.yaml (140 ключей, defaults+валидация, tr с
+экранированием, README docs/ui_texts.md); №12 — deep links площадок
+(миграция 23 place_invite_links, случайный токен ~128 бит, resume
+черновика, права/отзыв/перевыпуск, доменный fallback). Тестов: 1853 OK.
+U5 — впереди.
 
 Единый документ состояния, который ведёт `poster-manager` после каждого
 завершённого этапа. Владелец читает его, чтобы понять, где остановилась
@@ -56,6 +62,53 @@ Push: <нет | выполнено по разрешению>
 ---
 
 ## Журнал
+
+## Этап U4 — Каталог текстов и deep links (U4a + U4b)
+Дата: 2026-10-30
+Статус: done
+Задание: исправления №10 (единый каталог текстов интерфейса), №12
+(ссылка быстрого создания анонса площадки).
+Изменено:
+- `Poster/config/ui_texts.yaml` (новый, 140 ключей, 9 секций,
+  комментарии) + `Poster/utils/ui_texts.py` (новый): DEFAULTS,
+  загрузка с валидацией (битый YAML/cp1251/обрезанный UTF-8 → дефолты +
+  CRITICAL, импорт не падает), tr()/tr_safe() (экранирование значений,
+  обязательные переменные, однопроходная подстановка), reload_texts(),
+  CLI-валидация (exit 0/1 без traceback).
+- Перенос литералов в handlers/{main_menu,wizard_questions,
+  wizard_photos,announcement_wizard,bricks,places,admin,templates}.py,
+  errors.py, utils/screen.py (~147 мест); мёртвые ключи подключены
+  (nav.prev/next/retry_search, places.card.canonical); дубли литералов
+  сняты (buttons.finished.apply и др.).
+- `Poster/docs/ui_texts.md` (новый) — инструкция владельцу.
+- №12: `Poster/migrations.py` (миграция 23 place_invite_links), models.py
+  (PlaceInviteLink), place_invite_store.py (новый; secrets.token_urlsafe,
+  отзыв/перевыпуск, гонки через частичный UNIQUE-индекс), utils/deep_links.py,
+  handlers/place_invite.py (новый; InviteStartHandler, open_invite_payload,
+  resume незавершённого черновика той же площадки), карточка места
+  (кнопка/показ/перевыпуск), errors.py (PlaceInviteError в доменные).
+- Тесты: новые u4a_texts (30+), u4a_texts_tester (24), u4a_verify_tester
+  (~20), u4b_deeplink, u4b_deeplink_tester, u4b_defects_tester,
+  u4b_acceptance_tester; актуализированы stage22a/b, stage26, r3.
+Проверки:
+- `make check PYTHON=.venv/bin/python` → `Ran 1853 tests ... OK`,
+  ruff/black/mypy чисто.
+- Мутационная проверка: tr→литерал в меню (2 красных), UnicodeDecodeError-
+  ветка (5 красных), возврат литералов D2/D3 (красные), revoked_at
+  (красный), существование площадки (красный), resume (2 красных).
+- poster-tester (независимо): сценарий 10 владельца (правка YAML →
+  экраны, битый YAML → дефолты, инъекции экранированы, CLI, README);
+  сценарий 9 (ссылка → другой пользователь → конструктор сразу; новый/
+  существующий/WIP/отказы/права/идемпотентность). Найдены и закрыты:
+  D1 не-UTF-8 ронял импорт; D2 мёртвые ключи; D3 дубли литералов;
+  дубль черновика при повторном /start; гонка прав → внутренняя ошибка.
+Замечания ревизора: approve (U4a: экранирование/устойчивость/README;
+U4b: токен/права/resume/миграция/регресс /start). Неблокирующие:
+импорт-тексты фиксированы на старте (рестарт — задокументировано);
+permission-wording «экран устарел» вместо «нет доступа»; часть навигации
+admin/bricks/templates ещё литералы (зафиксировано в docs).
+Открытые вопросы: нет блокирующих.
+Коммиты: b75e673 (U4a), 604462b (U4b). Push: выполнен. CI: success (оба).
 
 ## Этап U3 — Кирпичики, возвраты, раскладки (U3a + U3b)
 Дата: 2026-10-30
