@@ -41,8 +41,11 @@ message_id через _ensure_service_screen_below), компактный экр
 подтверждены независимой интеграционной приёмкой (пробники FakeBot);
 устранён визуальный дубль текстового анонса без фото (промоушен живого
 блока: одна копия выше служебного экрана; повтор после сбоя чистит
-stale-блок). Тестов: 1871 OK. CI success. Дальше: очистка тестовой БД
-и развёртывание.
+stale-блок). Тестов: 1871 OK. CI success. U5b выполнен: тестовая БД
+забэкапирована/архивирована (backups/, SHA-256 подтверждены), создана
+чистая штатными миграциями (schema_migrations=23), бот развёрнут
+(active, лог чист).
+**Poster 2.2 завершён полностью.**
 
 Единый документ состояния, который ведёт `poster-manager` после каждого
 завершённого этапа. Владелец читает его, чтобы понять, где остановилась
@@ -115,6 +118,40 @@ html/text в _promote_live_post; stale_live_ids вычисляется при у
 Коммиты: 9de9684 (U5). Push: выполнен. CI: success.
 Дальше: очистка тестовой БД (WAL-бэкап → архив → чистая БД штатными
 миграциями → bootstrap-проверка) и развёртывание.
+
+## U5b — Очистка тестовой БД и развёртывание
+Дата: 2026-10-30 22:07–22:42
+Статус: done
+Порядок (выполнил poster-developer, менеджер верифицировал):
+1. Останов бота: `systemctl --user stop poster-bot.service` → inactive.
+2. WAL-бэкап: sqlite3 backup API →
+   `backups/poster_preclean_20261030_220737.db` (434 176 B,
+   SHA-256 816b7df2…142b29, integrity ok, FK-check 0 строк).
+3. Архив тестовой БД (mv, не rm):
+   `backups/archive/post_bot_20261030_220737.db`
+   (SHA-256 1cd3bef9…4ccd3e) + легаси-копия
+   `post_bot.db.backup-20261030T185949513960Z-p468027` (+wal/shm).
+4. Чистая БД штатным путём `database.init_db()` → `run_migrations()`:
+   25 таблиц, schema_migrations max=23, integrity ok, FK 0.
+   user_version=0 — проект ведёт версию в журнале schema_migrations
+   (PRAGMA не используется, механику не меняли).
+5. Bootstrap: системные кирпичики 11 (включая «город»), шаблон v4
+   проверен (builtin_version=4, 8 привязок); users/places/drafts/
+   proposals/invite_links = 0; суперадмин/токен/контакт — вне БД
+   (EnvironmentFile юнита), подхватываются при старте.
+6. Запуск: active (running), NRestarts=0, лог «Запуск бота» →
+   «Application started», 0 traceback/ERROR, 0 токенов в логах.
+Прокси tg-connect-proxy.service — active, не трогался.
+Примечание о пути бэкапа: /home/mush смонтирован read-only (rw только
+poster-dev, opencode-каталоги, /var/tmp), требуемый
+/home/mush/backups/poster/ недоступен; по решению владельца бэкапы
+размещены в /home/mush/workspaces/poster-dev/backups/ (700, вне git —
+backups/ в .gitignore:176). SHA-256 подтверждены после переноса.
+Открытые пункты (не блокирующие): PRAGMA user_version не выставляется
+механизмом миграций (задокументировано); периодические
+telegram.error.TimedOut через CONNECT-прокси — известная сетевая
+особенность, не критично.
+
 
 ## Этап U4 — Каталог текстов и deep links (U4a + U4b)
 Дата: 2026-10-30
