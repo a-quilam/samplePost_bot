@@ -392,7 +392,7 @@ class RetryAfterMidGroupTests(unittest.TestCase):
             live_ids <= set(h.deleted_ids()),
             "прошлый блок заменён только после успеха новой версии",
         )
-        self.assertIn("Готовый анонс отправлен", h.screen_text())
+        self.assertIn("✅ Анонс готов", h.screen_text())
 
 
 @unittest.skipIf(

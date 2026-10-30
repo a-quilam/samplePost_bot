@@ -169,6 +169,25 @@ def _cb(h, prefix):
     return found[0]
 
 
+async def _open_preview(h):
+    """
+    Открывает обзор анонса с экрана завершения (U2b).
+
+    На экране завершения ровно две кнопки, кнопки обзора там нет; обзор
+    запрашивается тем же callback'ом, что и «К обзору» с экрана фото.
+    """
+    found = [d for _l, d in _btns(h) if d and d.startswith("aw_preview")]
+    if found:
+        await h.callback(found[0])
+        return
+    ui = h.user_data().get("announcement_ui") or {}
+    draft_id = ui.get("draft_id")
+    revision = ui.get("revision")
+    if draft_id is None or revision is None:
+        raise AssertionError(f"нет callback aw_preview: {_btns(h)}")
+    await h.callback(f"aw_preview:{int(draft_id)}:{int(revision)}")
+
+
 def _alert(h):
     answers = h.answers()
     if not answers:
@@ -524,9 +543,9 @@ class PersonalPlaceholderTests(unittest.TestCase):
         # S3 п.6: сначала шаг фото, доставка — по «Без фотографий».
         await h.callback(_cb(h, "aw_photo_none"))
         delivered = h.screen_text()
-        self.assertIn("Готовый анонс отправлен", delivered)
+        self.assertIn("✅ Анонс готов", delivered)
 
-        await h.callback(_cb(h, "aw_preview"))
+        await _open_preview(h)
         preview = h.screen_text()
         self.assertIn("Обзор анонса", preview)
 
@@ -638,9 +657,13 @@ class PersonalNoPlaceAllScreensTests(unittest.TestCase):
         await h.callback(f"pl_pick:{place_id}")
         await _skip_all_questions(h)
         delivered = h.screen_text()
-        self.assertIn("Место: Дом культуры", delivered)
+        # U2b: экран завершения фиксирован; строка места живёт в посте.
+        self.assertIn("✅ Анонс готов", delivered)
+        self.assertNotIn("Место:", delivered)
+        # В самом посте место — часть шаблона площадки, без префикса «Место:».
+        self.assertIn("Дом культуры", h.posts()[-1] or "")
 
-        await h.callback(_cb(h, "aw_preview"))
+        await _open_preview(h)
         self.assertIn("Место: Дом культуры", h.screen_text())
 
 

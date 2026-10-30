@@ -1673,6 +1673,25 @@ async def _after_questions(
     )
 
 
+async def _back_from_photo_step(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+    details,
+) -> int:
+    """
+    «◀️ Назад» с шага фото: возврат к предыдущему шагу мастера.
+
+    Обычный путь — последний кирпичик (шаг фото идёт сразу после вопросов).
+    Если кирпичиков нет или все они необязательные и уже пропущены,
+    показывается менеджер полей: это тот же шаг вопросов, просто списком.
+    Черновик и фотографии не меняются.
+    """
+    fields = await _question_fields_for(update, context, details)
+    if not fields:
+        return await _render_question_manager(update, context, details)
+    return await _render_question(update, context, details, fields, len(fields) - 1)
+
+
 async def _save_question_value(
     update: Update,
     context: ContextTypes.DEFAULT_TYPE,
@@ -2390,6 +2409,15 @@ async def _render_extras(
                 )
             ]
         )
+        # U2b: возврат из правки ведёт на экран завершения, а не в конструктор.
+        rows.append(
+            [
+                InlineKeyboardButton(
+                    "◀️ Назад",
+                    callback_data=(f"aw_panel:{details.draft_id}:{details.revision}"),
+                )
+            ]
+        )
     else:
         rows.append(
             [
@@ -2399,14 +2427,15 @@ async def _render_extras(
                 )
             ]
         )
-    rows.append(
-        [
-            InlineKeyboardButton(
-                "🧱 К вопросам",
-                callback_data=(f"aw_qmanage:{details.draft_id}:{details.revision}"),
-            )
-        ]
-    )
+    if not details.publication_sent:
+        rows.append(
+            [
+                InlineKeyboardButton(
+                    "🧱 К вопросам",
+                    callback_data=(f"aw_qmanage:{details.draft_id}:{details.revision}"),
+                )
+            ]
+        )
     rows.append([InlineKeyboardButton("🏠 Главное меню", callback_data="main_menu")])
     text = "\n".join(lines)
     body = f"{notice}\n\n{text}" if notice else text
@@ -3959,11 +3988,18 @@ async def _promote_live_post(
     # у пустого текста один и тот же с фото и без них (подпись пустая), поэтому
     # дополнительно сверяется фактический состав показанного блока.
     shown_photos = int(state.get("photo_count") or 0)
+    # Дефект U2b: счётчика фото мало — при том же числе сегментов набор
+    # `file_id` мог измениться (добавили второе фото при одном сегменте).
+    # Тогда в чате лежит ДРУГОЙ пост, и признавать его доставленным нельзя.
+    shown_files = wizard_live.shown_file_ids(
+        user_data, draft_id=details.draft_id, message_ids=ids
+    )
     if (
         not ids
         or int(state.get("draft_id") or 0) != int(details.draft_id)
         or state.get("fingerprint") != current
         or shown_photos != len(photos)
+        or (shown_files is not None and shown_files != photos)
     ):
         return None
     total = len(delivery.media_batches(len(photos))) or 1
@@ -4017,6 +4053,124 @@ async def _promote_live_post(
     return promoted
 
 
+# U2b: экран завершения — ровно два действия. Текст фиксированный: никаких
+# служебных сводок, длин и списков. Единственное допустимое дополнение —
+# предупреждение о неприменённых изменениях.
+DELIVERED_TEXT = "✅ Анонс готов.\n\nСообщение выше можно скопировать или переслать"
+DELIVERED_PENDING_TEXT = (
+    "✏️ Есть изменения, ещё не отправленные в чат. " "Нажмите «Применить изменения»."
+)
+
+# U2b: компактный экран редактирования готового анонса — только категории.
+DELIVERED_EDIT_TEXT = (
+    "✏️ Редактирование анонса\n\n"
+    "Выберите, что изменить. Новая копия уходит в чат только по "
+    "«Применить изменения»."
+)
+
+
+def _delivered_keyboard(details) -> InlineKeyboardMarkup:
+    """Ровно две кнопки в одной строке: «Изменить» и «В меню»."""
+    draft_id = details.draft_id
+    revision = details.revision
+    return InlineKeyboardMarkup(
+        [
+            [
+                InlineKeyboardButton(
+                    "✏️ Изменить",
+                    callback_data=f"aw_edit:{draft_id}:{revision}",
+                ),
+                InlineKeyboardButton("🏠 В меню", callback_data="main_menu"),
+            ]
+        ]
+    )
+
+
+def _delivered_edit_keyboard(details) -> InlineKeyboardMarkup:
+    """
+    Категории правки готового анонса без дублей и служебных текстов.
+
+    «Применить изменения» — единственное действие, отправляющее новую
+    версию; «Назад» возвращает на экран завершения, а не в конструктор.
+    """
+    draft_id = details.draft_id
+    revision = details.revision
+    return InlineKeyboardMarkup(
+        [
+            [
+                InlineKeyboardButton(
+                    "✏️ Данные",
+                    callback_data=f"aw_qmanage:{draft_id}:{revision}",
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    f"📷 Фотографии ({len(details.photos)})",
+                    callback_data=f"aw_photos:{draft_id}:{revision}:0",
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    f"➕ Кирпичики ({len(details.extras)})",
+                    callback_data=f"aw_extras:{draft_id}:{revision}",
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    "🔄 Применить изменения",
+                    callback_data=f"aw_apply:{draft_id}:{revision}",
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    "◀️ Назад",
+                    callback_data=f"aw_panel:{draft_id}:{revision}",
+                )
+            ],
+        ]
+    )
+
+
+async def _ensure_service_screen_below(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+    message_ids,
+) -> None:
+    """
+    Гарантирует порядок «готовый анонс выше, служебный экран ниже» (U2b).
+
+    Инвариант проверяется по фактическим `message_id`: при замене версии
+    пост отправляется ПОСЛЕ того, как экран уже существует, и порядок в
+    чате нарушается. Telegram не переставляет сообщения, поэтому служебный
+    экран удаляется и пересоздаётся следующим `_render` уже под постом.
+    Удаляется только собственный экран из `screen_ref` и только в этом чате;
+    отказ Telegram не ломает сценарий (экран остаётся, анонс доступен).
+    """
+    ids = [int(item) for item in message_ids or () if item is not None]
+    if not ids:
+        return
+    user_data = ctx.data(context)
+    ref = screen.screen_ref(user_data)
+    if ref is None:
+        ref = screen.hydrate_screen_ref(user_data, _user_id(update))
+    if ref is None or int(ref.get("message_id") or 0) > max(ids):
+        return
+    chat_id = ctx.chat(update).id
+    if int(ref.get("chat_id") or 0) != int(chat_id):
+        return
+    try:
+        await context.bot.delete_message(chat_id, ref["message_id"])
+    except Exception as exc:  # noqa: BLE001 — удаление best-effort
+        logger.info(
+            "Служебный экран %s не удалён (%s): анонс останется ниже.",
+            ref["message_id"],
+            exc,
+        )
+        return
+    user_data.pop("screen", None)
+    screen.save_screen_ref(_user_id(update), user_data, chat_id)
+
+
 async def _render_delivered(
     update: Update,
     context: ContextTypes.DEFAULT_TYPE,
@@ -4026,112 +4180,56 @@ async def _render_delivered(
     pending: bool = False,
 ) -> int:
     """
-    Экран после доставки: готовый анонс уже отдельным сообщением выше.
+    Экран завершения: готовый анонс уже отдельным сообщением выше.
 
-    Здесь только управление: правка данных/фото/extras. Кнопки отделены от
-    поста, чтобы готовый текст можно было скопировать, не задев служебное.
+    Владелец требует короткий экран и ровно две кнопки — «Изменить» и
+    «В меню». Служебные сводки (место, число фото, время, планы замены)
+    убраны: они дублировали пост и растягивали экран. `notice` намеренно
+    не выводится — результат действия сообщается ответом на callback, а
+    текст экрана остаётся предсказуемым.
     """
     ui = _ui(context)
     _set_details(ui, details)
     _clear_active(ui)
-    delivered_photos = len(details.publication_photos)
-    current_photos = len(details.photos)
-    moment = ""
-    if details.published_at is not None:
-        moment = details.published_at.strftime("%d.%m.%Y %H:%M UTC")
-    lines = [
-        "✅ Готовый анонс отправлен в этот чат",
-        "",
-        *_place_lines(details),
-        # В доставленной версии столько фото; текущая коллекция может уже
-        # отличаться — тогда об этом честно сказано ниже.
-        f"В отправленной версии фотографий: {delivered_photos}.",
-    ]
-    if pending and current_photos != delivered_photos:
-        lines.append(f"Сейчас в черновике фотографий: {current_photos}.")
-    if moment:
-        lines.append(f"Доставлено: {moment}.")
-    if notice:
-        lines.insert(1, notice)
-    lines.extend(
-        [
-            "",
-            "Анонс выше — отдельное сообщение: его можно скопировать или "
-            "переслать. Кнопки ниже управляют только черновиком и не входят "
-            "в текст анонса.",
-        ]
-    )
+    # U2b: обязательный инвариант «пост выше экрана». При замене версии
+    # сообщение поста отправляется уже после служебного экрана, поэтому
+    # экран пересоздаётся ниже — до отрисовки нового экрана.
+    await _ensure_service_screen_below(update, context, details.delivered_message_ids)
+    lines = [DELIVERED_TEXT]
     if pending:
-        lines.extend(
-            [
-                "",
-                "✏️ Есть изменения, ещё не отправленные в чат. Нажмите "
-                "«Применить изменения»: новая версия придёт в чат, а прошлая "
-                "будет заменена (удаление — best-effort: Telegram не удаляет "
-                "сообщения старше 48 часов).",
-            ]
-        )
-    else:
-        lines.append(
-            "Правка данных, фото или дополнительных кирпичиков не отправляет "
-            "копию сразу: когда всё готово, нажмите «🔄 Применить изменения» — "
-            "новая версия придёт в чат и заменит прошлую."
-        )
-    draft_id = details.draft_id
-    revision = details.revision
+        lines.extend(["", DELIVERED_PENDING_TEXT])
+    # `notice` не попадает в текст экрана (он фиксирован требованием U2b):
+    # результат действия сообщается коротким ответом на callback.
+    if notice:
+        await _answer(update, notice[:200])
     await _render(
         update,
         context,
         "\n".join(lines),
-        InlineKeyboardMarkup(
-            [
-                [
-                    InlineKeyboardButton(
-                        "✏️ Изменить данные",
-                        callback_data=f"aw_qmanage:{draft_id}:{revision}",
-                    )
-                ],
-                [
-                    InlineKeyboardButton(
-                        "👁 Обзор анонса",
-                        callback_data=f"aw_preview:{draft_id}:{revision}",
-                    )
-                ],
-                [
-                    InlineKeyboardButton(
-                        "📷 Изменить фотографии",
-                        callback_data=f"aw_photos:{draft_id}:{revision}:0",
-                    )
-                ],
-                [
-                    InlineKeyboardButton(
-                        "➕ Дополнительные кирпичики",
-                        callback_data=f"aw_extras:{draft_id}:{revision}",
-                    )
-                ],
-                *(
-                    [
-                        [
-                            InlineKeyboardButton(
-                                "🔄 Применить изменения",
-                                callback_data=f"aw_apply:{draft_id}:{revision}",
-                            )
-                        ]
-                    ]
-                    if pending
-                    else []
-                ),
-                [
-                    InlineKeyboardButton(
-                        "💾 Сохранить и выйти",
-                        callback_data=f"aw_save:{draft_id}:{revision}",
-                    )
-                ],
-                [InlineKeyboardButton("➕ Новый анонс", callback_data="aw_new")],
-                [InlineKeyboardButton("📝 Мои анонсы", callback_data="aw_start")],
-                [InlineKeyboardButton("🏠 Главное меню", callback_data="main_menu")],
-            ]
-        ),
+        _delivered_keyboard(details),
+    )
+    return AW_PREVIEW
+
+
+async def _render_delivered_edit(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+    details,
+    *,
+    notice: str | None = None,
+) -> int:
+    """Компактный экран редактирования готового анонса."""
+    ui = _ui(context)
+    _set_details(ui, details)
+    _clear_active(ui)
+    text = DELIVERED_EDIT_TEXT
+    if notice:
+        text = f"{notice}\n\n{text}"
+    await _render(
+        update,
+        context,
+        text,
+        _delivered_edit_keyboard(details),
     )
     return AW_PREVIEW
 
@@ -5597,6 +5695,18 @@ async def handle_preview_callback(
         _ui_data, details = guarded
         await _answer(update)
         return await _render_preview(update, context, details, preview_only=True)
+    if action == "aw_edit" and len(parts) == 3:
+        # U2b: «✏️ Изменить» на экране завершения открывает компактный экран
+        # категорий правки, а не конструктор и не длинный служебный список.
+        guarded = _guided()
+        if guarded is None:
+            return await _stale(update, context)
+        _ui_data, details = guarded
+        if _edit_blocked(details):
+            await _answer(update, "Отправка уже начата.", alert=True)
+            return await _render_publish_status(update, context, details)
+        await _answer(update)
+        return await _render_delivered_edit(update, context, details)
     if action == "aw_panel" and len(parts) == 3:
         guarded = _guided()
         if guarded is None:
@@ -5639,6 +5749,21 @@ async def handle_preview_callback(
         _ui_data, details = guarded
         await _answer(update)
         return await _render_photos(update, context, details, page=int(parts[3]))
+    if action == "aw_photo_back" and len(parts) == 3:
+        # U2b: «Назад» с шага фото — к предыдущему шагу (последний кирпичик),
+        # без потери уже сохранённых фото и значений. Механизм тот же, что у
+        # навигации по вопросам: `_render_question` с последним кирпичиком.
+        if not all(item.isdigit() for item in parts[1:]):
+            return await _stale(update, context)
+        guarded = _guard_details(update, context, int(parts[1]), int(parts[2]))
+        if guarded is None:
+            return await _stale(update, context)
+        _ui_data, details = guarded
+        if _edit_blocked(details):
+            await _answer(update, "Отправка уже начата.", alert=True)
+            return await _render_publish_status(update, context, details)
+        await _answer(update)
+        return await _back_from_photo_step(update, context, details)
     if action == "aw_photo_none" and len(parts) == 3:
         # S4 п.2: «Без фотографий» на шаге фото — это финал: шаг собран в
         # `wizard_photos`, доставка идёт общим путём без кнопки «Готово».

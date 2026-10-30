@@ -39,6 +39,7 @@ try:
         _draft_by_id,
         _latest_draft,
         _no_photos,
+        _open_edit,
         _seed_personal_template,
         _seed_place,
         _start_to_template,
@@ -68,7 +69,7 @@ async def _personal_delivered(
     # Poster 2.0 S3 п.6: последний кирпичик ведёт на шаг фото; доставка —
     # по «Без фотографий» (доставка как функция не менялась).
     await _no_photos(h)
-    if "Готовый анонс отправлен в этот чат" not in h.screen_text():
+    if "✅ Анонс готов." not in h.screen_text():
         raise AssertionError(f"Анонс не доставлен: {h.screen_text()}")
     draft = _latest_draft(h)
     return draft, bricks
@@ -89,12 +90,20 @@ async def _standard_delivered(h):
             break
         await h.callback(skips[0])
     await _no_photos(h)
-    if "Готовый анонс отправлен в этот чат" not in h.screen_text():
+    if "✅ Анонс готов." not in h.screen_text():
         raise AssertionError(f"Анонс не доставлен: {h.screen_text()}")
     return _latest_draft(h)
 
 
 async def _open_photos(h) -> None:
+    """
+    Открывает коллекцию фото доставленного анонса.
+
+    U2b: с экрана завершения сначала открывается компактный экран правки,
+    и уже на нём есть категория «Фотографии».
+    """
+    if not _callbacks(h, "aw_photos"):
+        await _open_edit(h)
     await h.callback(_callback(h, "aw_photos"))
     if "Фотографии анонса" not in h.screen_text():
         raise AssertionError(f"Не экран фотографий: {h.screen_text()}")
@@ -145,7 +154,7 @@ class AnnouncementAutoDeliveryStandardTests(unittest.TestCase):
         self.assertTrue(stored.delivery_fingerprint)
 
         # Кнопки управления — в отдельном сообщении, а не в тексте анонса.
-        self.assertIn("Готовый анонс отправлен в этот чат", h.screen_text())
+        self.assertIn("✅ Анонс готов.", h.screen_text())
         from tests.integration_harness import is_post_message, is_screen_record
 
         post_records = [call for call in h.calls if is_post_message(call)]
@@ -203,8 +212,10 @@ class AnnouncementAutoDeliveryPhotoTests(unittest.TestCase):
         await h.text("/start")
         await h.callback("aw_start")
         await h.callback(_callback(h, "aw_open", f":{draft.id}"))
-        self.assertIn("Готовый анонс отправлен в этот чат", h.screen_text())
-        self.assertIn("Сейчас в черновике фотографий: 2", h.screen_text())
+        self.assertIn("✅ Анонс готов.", h.screen_text())
+        # U2b: экран завершения не перечисляет счётчики; о расхождении с
+        # отправленной версией говорит только строка о неприменённых правках.
+        self.assertIn("Есть изменения", h.screen_text())
         self.assertEqual(h.dialog_state(name=CONVERSATION_NAME), AW_PREVIEW)
         self.assertEqual(len(h.posts()), 1)
 
@@ -247,9 +258,12 @@ class AnnouncementAutoDeliveryPhotoTests(unittest.TestCase):
         # применения нет, экран прямо сообщает, что версия уже отправлена.
         posts_before = len(h.posts())
         self.assertEqual(_callbacks(h, "aw_apply"), [])
-        await h.callback(_callback(h, "aw_preview"))
+        # U2b: заход в правку и возврат не отправляют новую копию.
+        await h.callback(_callback(h, "aw_edit"))
+        self.assertEqual(len(h.posts()), posts_before)
         await h.callback(_callback(h, "aw_panel"))
         self.assertEqual(len(h.posts()), posts_before)
+        self.assertIn("✅ Анонс готов.", h.screen_text())
 
     @scenario_test
     async def test_single_photo_caption_failure_is_failed_and_resumes(self, h) -> None:
@@ -388,7 +402,7 @@ class AnnouncementAutoDeliveryFailureTests(unittest.TestCase):
         await h.callback(_callback(h, "aw_send"))
         sent = _stored(h, draft.id)
         self.assertEqual(sent.publication_status, "sent")
-        self.assertIn("Готовый анонс отправлен в этот чат", h.screen_text())
+        self.assertIn("✅ Анонс готов.", h.screen_text())
         self.assertEqual(len(h.post_records()), 1)
 
     @scenario_test
@@ -420,16 +434,18 @@ class AnnouncementAutoDeliveryFailureTests(unittest.TestCase):
         await h.callback(_callback(h, "aw_pub_resume"))
         sent = _stored(h, draft.id)
         self.assertEqual(sent.publication_status, "sent")
-        self.assertIn("Готовый анонс отправлен в этот чат", h.screen_text())
+        self.assertIn("✅ Анонс готов.", h.screen_text())
 
     @scenario_test
     async def test_foreign_callback_cannot_deliver(self, h) -> None:
         await h.text("/start")
         draft, _bricks = await _personal_delivered(h)
+        await _open_edit(h)
         await h.callback(_callback(h, "aw_qmanage"))
         await h.callback(_callback(h, "aw_qgoto"))
         await h.callback(_callback(h, "aw_qedit"))
         await h.text("Чужое изменение")
+        await _open_edit(h)
         send_data = _callback(h, "aw_apply")
 
         with h.session_factory() as session:
@@ -517,13 +533,17 @@ class AnnouncementRedeliveryTests(unittest.TestCase):
         self.assertEqual(len(h.posts()), 1)
 
         # Меняем значение через управление полями.
+        await _open_edit(h)
         await h.callback(_callback(h, "aw_qmanage"))
         await h.callback(_callback(h, "aw_qgoto"))
         await h.callback(_callback(h, "aw_qedit"))
         await h.text("Обновлённое")
 
-        # Ответ на правку не отправляет сам: нужна явная кнопка применения.
+        # Ответ на правку не отправляет сам: экран завершения сообщает о
+        # неприменённых изменениях, а применение — на экране правки.
         self.assertEqual(len(h.posts()), 1)
+        self.assertIn("Есть изменения", h.screen_text())
+        await _open_edit(h)
         self.assertIn("Применить изменения", str(h.screen_buttons()))
 
         # Пересборка доставленной версии — не «возобновление изменившегося
@@ -549,10 +569,12 @@ class AnnouncementRedeliveryTests(unittest.TestCase):
         self.assertTrue(set(first_ids) <= set(h.deleted_ids()))
 
         # Ещё одна правка заменяет уже вторую версию, а не первую.
+        await _open_edit(h)
         await h.callback(_callback(h, "aw_qmanage"))
         await h.callback(_callback(h, "aw_qgoto"))
         await h.callback(_callback(h, "aw_qedit"))
         await h.text("Третье")
+        await _open_edit(h)
         await h.callback(_callback(h, "aw_apply"))
         third = _stored(h, draft.id)
         self.assertEqual(tuple(third.previous_message_ids), second_ids)
@@ -573,15 +595,17 @@ class AnnouncementRedeliveryTests(unittest.TestCase):
         h.bot.errors_by_type["delete_message"] = BadRequest(
             "Message can't be deleted for everyone"
         )
+        await _open_edit(h)
         await h.callback(_callback(h, "aw_qmanage"))
         await h.callback(_callback(h, "aw_qgoto"))
         await h.callback(_callback(h, "aw_qedit"))
         await h.text("Новая версия")
+        await _open_edit(h)
         await h.callback(_callback(h, "aw_apply"))
 
         # Неудача удаления не откатывает успешную доставку: новая версия есть,
         # статус остаётся sent, прошлая копия просто осталась в чате.
-        self.assertIn("Готовый анонс отправлен в этот чат", h.screen_text())
+        self.assertIn("✅ Анонс готов.", h.screen_text())
         self.assertIn("Новая версия", h.posts()[-1] or "")
         sent = _stored(h, draft.id)
         self.assertEqual(sent.publication_status, "sent")
@@ -600,6 +624,7 @@ class AnnouncementRedeliveryTests(unittest.TestCase):
         ]
         draft, bricks = await _personal_delivered(h, specs=specs, body="[main]")
         first_ids = tuple(_stored(h, draft.id).delivered_message_ids)
+        await _open_edit(h)
         await h.callback(_callback(h, "aw_extras"))
         self.assertEqual(h.dialog_state(name=CONVERSATION_NAME), AW_EXTRAS)
 
@@ -626,6 +651,7 @@ class AnnouncementRedeliveryTests(unittest.TestCase):
         self.assertTrue(set(first_ids) <= set(h.deleted_ids()))
 
         # Удаление доп. кирпичика тоже приводит к новой версии.
+        await _open_edit(h)
         await h.callback(_callback(h, "aw_extras"))
         await h.callback(_callback(h, "aw_exdel"))
         self.assertIn("Дополнительных кирпичиков пока нет", h.screen_text())

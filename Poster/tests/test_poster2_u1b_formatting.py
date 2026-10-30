@@ -47,6 +47,8 @@ try:
         _choose_personal,
         _latest_draft,
         _no_photos,
+        _open_edit,
+        _reopen_question,
         _seed_personal_template,
         _seed_place,
         _start_to_template,
@@ -217,6 +219,8 @@ class FormattingScreenTests(unittest.TestCase):
         await _choose_personal(h, template_id)
         await h.text("Старое", entities=[ent(MessageEntity.UNDERLINE, 0, 6)])
         await _no_photos(h)
+        # U2b: категории правки живут на экране «Изменить».
+        await _open_edit(h)
 
         await h.callback(_callback(h, "aw_qmanage"))
         await h.callback(_callback(h, "aw_qgoto"))
@@ -228,7 +232,9 @@ class FormattingScreenTests(unittest.TestCase):
         payload = _stored_payload(h, draft.id, bricks["main"])
         self.assertEqual(payload["text"], "Новое")
         self.assertEqual(payload["html"], "<s>Новое</s>")
-        # Доставленный анонс меняется явной кнопкой — с той же разметкой.
+        # Доставленный анонс меняется явной кнопкой (U2b: она на экране
+        # «Изменить») — с той же разметкой.
+        await _open_edit(h)
         await h.callback(_callback(h, "aw_apply"))
         self.assertEqual(h.posts()[-1], "<s>Новое</s>")
 
@@ -246,6 +252,7 @@ class FormattingScreenTests(unittest.TestCase):
         await _choose_personal(h, template_id)
         await h.text("Главное")
         await _no_photos(h)
+        await _open_edit(h)
 
         await h.callback(_callback(h, "aw_extras"))
         await h.callback(_callback(h, "aw_exadd"))
@@ -285,6 +292,9 @@ class FormattingPersistenceTests(unittest.TestCase):
         await h.callback(f"aw_open:{draft.id}")
 
         self.assertIn("<b>До</b> рестарта", _live_text(h))
+        # U2b: после рестарта анонс доставлен, категории правки — на экране
+        # «Изменить».
+        await _open_edit(h)
         await h.callback(_callback(h, "aw_qmanage"))
         await h.callback(_callback(h, "aw_qgoto"))
         self.assertIn("Текущее значение: <b>До</b> рестарта", h.screen()["text"])
@@ -491,8 +501,7 @@ class FormattingSafetyTests(unittest.TestCase):
         self.assertNotIn("onclick", field.raw_html)
         self.assertIn("<b>Норм</b>", field.raw_html)
 
-        await h.callback(_callback(h, "aw_qmanage"))
-        await h.callback(_callback(h, "aw_qgoto"))
+        await _reopen_question(h)
         screen = h.screen()["text"]
         self.assertNotIn("<script>", screen)
         self.assertNotIn("onclick", screen)
@@ -517,8 +526,7 @@ class FormattingSafetyTests(unittest.TestCase):
         await h.text("<b>ответ</b>")
         # Значение без entities экранируется ровно один раз.
         self.assertEqual(_live_text(h), "&lt;b&gt;ответ&lt;/b&gt;")
-        await h.callback(_callback(h, "aw_qmanage"))
-        await h.callback(_callback(h, "aw_qgoto"))
+        await _reopen_question(h)
         screen = h.screen()["text"]
         self.assertIn("Текущее значение: &lt;b&gt;ответ&lt;/b&gt;", screen)
         self.assertEqual(escape_html("<b>ответ</b>"), "&lt;b&gt;ответ&lt;/b&gt;")

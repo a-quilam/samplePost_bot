@@ -278,8 +278,10 @@ class ScreenHtmlEscapingTests(unittest.TestCase):
     async def test_extra_brick_title_is_escaped_in_section_and_prompt(self, h):
         """Экраны выбора секции и ввода значения показывают тег как текст."""
         brick_id = await self._add_html_titled_extra(h)
-        from tests.test_stage27b_announcement_ui import _callback
+        from tests.test_stage27b_announcement_ui import _callback, _open_edit
 
+        # U2b: после доставки доп. кирпичики открываются с экрана «Изменить».
+        await _open_edit(h)
         await h.callback(_callback(h, "aw_extras"))
         await h.callback(_callback(h, "aw_exadd"))
         data = [d for d in _callbacks(h, "aw_exbrick") if d.endswith(f":{brick_id}")]
@@ -359,8 +361,9 @@ class ScreenHtmlEscapingTests(unittest.TestCase):
         self.assertNotIn("<b>ответ</b>", stored.publication_text)
         # И в списке полей: заголовок в кнопке — простой текст кнопки
         # (без HTML-парсинга), вопрос показывает значение как текст.
-        from tests.test_stage27b_announcement_ui import _callback
+        from tests.test_stage27b_announcement_ui import _callback, _open_edit
 
+        await _open_edit(h)
         await h.callback(_callback(h, "aw_qmanage"))
         button_labels = [label for label, _data in h.screen_buttons()]
         self.assertTrue(

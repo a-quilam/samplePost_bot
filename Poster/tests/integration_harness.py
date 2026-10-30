@@ -115,6 +115,10 @@ class FakeBot:
         # что настоящий Bot API не даёт править подпись у текстового
         # сообщения и текст у сообщения с подписью.
         self._message_content: dict[tuple[int, int], tuple[str, Any, Any]] = {}
+        # id(запись вызова) -> фактические message_id созданных сообщений.
+        # Нужно тестам, которые проверяют порядок сообщений (U2b): сами
+        # записи `calls` не содержат id, а он важен как инвариант чата.
+        self.call_message_ids: dict[int, tuple[int, ...]] = {}
 
     def _markup_signature(self, markup: Any) -> Any:
         """Сравнимая подпись клавиатуры (для детекции идентичного edit'а)."""
@@ -139,7 +143,7 @@ class FakeBot:
             self._markup_signature(kwargs.get("reply_markup")),
         )
 
-    def _record(self, kind: str, args: tuple, kwargs: dict) -> None:
+    def _record(self, kind: str, args: tuple, kwargs: dict) -> dict:
         if kind in self.fail_types:
             raise RuntimeError(f"имитация сбоя Telegram API: {kind}")
         if kind in self.errors_by_type:
@@ -151,7 +155,9 @@ class FakeBot:
                     f"имитация сбоя Telegram API: {kind} (после успешных вызовов)"
                 )
             self.fail_after[kind] = remaining - 1
-        self.calls.append({"type": kind, "args": args, **kwargs})
+        record = {"type": kind, "args": args, **kwargs}
+        self.calls.append(record)
+        return record
 
     def _make_message(self, kwargs: dict) -> Any:
         """Фиктивное сообщение бота (для возврата send_message/send_photo)."""
@@ -190,20 +196,26 @@ class FakeBot:
 
     # —— методы, которые реально зовут обработчики ——
     async def send_message(self, *args: Any, **kwargs: Any) -> Any:
-        self._record("message", args, kwargs)
+        record = self._record("message", args, kwargs)
         message = self._make_message({**kwargs, "args": args})
+        self.call_message_ids[id(record)] = (message.message_id,)
         self._remember_content(kwargs, message)
         return message
 
     async def send_photo(self, *args: Any, **kwargs: Any) -> Any:
-        self._record("photo", args, kwargs)
+        record = self._record("photo", args, kwargs)
         message = self._make_message({**kwargs, "args": args})
+        self.call_message_ids[id(record)] = (message.message_id,)
         self._remember_content(kwargs, message)
         return message
 
     async def send_media_group(self, *args: Any, **kwargs: Any) -> list:
-        self._record("media_group", args, kwargs)
-        return [self._make_message({"chat_id": kwargs.get("chat_id")})]
+        record = self._record("media_group", args, kwargs)
+        messages = [self._make_message({"chat_id": kwargs.get("chat_id")})]
+        self.call_message_ids[id(record)] = tuple(
+            message.message_id for message in messages
+        )
+        return messages
 
     async def answer_callback_query(self, *args: Any, **kwargs: Any) -> None:
         self._record("callback_answer", args, kwargs)
@@ -354,13 +366,20 @@ def make_photo_update(
     file_id: str,
     *,
     media_group_id: str | None = None,
+    caption: str | None = None,
     chat_id: int = DEFAULT_CHAT_ID,
     user_id: int = DEFAULT_USER_ID,
     update_id: int = 3,
     message_id: int = 3,
     chat_type: str = "private",
 ) -> Update:
-    """Фото-сообщение (опционально — часть альбома)."""
+    """
+    Фото-сообщение (опционально — часть альбома).
+
+    `caption` — подпись, которую Telegram даёт пользователю приложить к
+    снимку. Продукт её не использует (U2b), поэтому тестам нужен способ
+    отправить фото с подписью и проверить, что она никуда не попала.
+    """
     message = Message(
         message_id=message_id,
         date=FIXTURE_DATE,
@@ -372,6 +391,7 @@ def make_photo_update(
             )
         ],
         media_group_id=media_group_id,
+        caption=caption,
     )
     return Update(update_id=update_id, message=message)
 
@@ -665,6 +685,7 @@ class Harness:
         file_id: str,
         *,
         media_group_id: str | None = None,
+        caption: str | None = None,
         chat_id: int | None = None,
         user_id: int | None = None,
     ) -> Update:
@@ -673,6 +694,7 @@ class Harness:
             make_photo_update(
                 file_id,
                 media_group_id=media_group_id,
+                caption=caption,
                 chat_id=chat_id if chat_id is not None else self.chat_id,
                 user_id=user_id if user_id is not None else self.user_id,
                 update_id=self._update_seq,
@@ -855,6 +877,24 @@ class Harness:
     def answers(self) -> list[dict]:
         """Все answer_callback_query (защита от «висящего» спиннера)."""
         return [c for c in self.calls if c["type"] == "callback_answer"]
+
+    def answer_texts(self) -> list[str]:
+        """
+        Тексты ответов на callback в порядке вызовов.
+
+        U2b: экран завершения имеет фиксированный текст, поэтому короткие
+        сообщения («Черновик сохранён») уходят ответом на callback, а не в
+        тело экрана. Тестам нужен способ их проверить.
+        """
+        out: list[str] = []
+        for call in self.answers():
+            text = call.get("text")
+            if text is None:
+                args = tuple(call.get("args") or ())
+                text = args[0] if args and isinstance(args[0], str) else None
+            if text:
+                out.append(text)
+        return out
 
     # —— БД (временная) ——
 

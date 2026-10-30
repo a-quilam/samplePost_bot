@@ -186,6 +186,26 @@ def _callback(h, prefix: str) -> str:
     return found[0]
 
 
+async def _open_preview(h) -> None:
+    """
+    Открывает обзор анонса с экрана завершения (U2b).
+
+    На экране завершения ровно две кнопки, кнопки обзора там нет; обзор
+    запрашивается тем же callback'ом, что и «К обзору» с экрана фото, —
+    текст показывается, версия не пересобирается.
+    """
+    data = _callbacks(h, "aw_preview")
+    if data:
+        await h.callback(data[0])
+        return
+    ui = h.user_data().get("announcement_ui") or {}
+    draft_id = ui.get("draft_id")
+    revision = ui.get("revision")
+    if draft_id is None or revision is None:
+        raise AssertionError(f"нет callback aw_preview: {h.screen_buttons()}")
+    await h.callback(f"aw_preview:{int(draft_id)}:{int(revision)}")
+
+
 def _last_alert(h) -> str | None:
     answers = h.answers()
     if not answers:
@@ -586,10 +606,10 @@ class PersonalPlaceLineTests(unittest.TestCase):
 
         await h.callback(_callback(h, "aw_photo_none"))
         delivered = h.screen_text()
-        self.assertIn("Готовый анонс отправлен", delivered)
+        self.assertIn("✅ Анонс готов", delivered)
         self._assert_no_empty_place(self, "доставлено", delivered)
 
-        await h.callback(_callback(h, "aw_preview"))
+        await _open_preview(h)
         preview = h.screen_text()
         self.assertIn("Обзор анонса", preview)
         self._assert_no_empty_place(self, "обзор", preview)
@@ -668,8 +688,14 @@ class PersonalPlaceLineTests(unittest.TestCase):
         self.assertIn("Фотографии анонса", h.screen_text())
         await h.callback(_callback(h, "aw_photo_none"))
         delivered = h.screen_text()
-        self.assertIn("Готовый анонс отправлен", delivered)
-        self.assertIn("Место: Дом культуры", delivered)
+        self.assertIn("✅ Анонс готов", delivered)
+        # U2b: экран завершения фиксирован и не повторяет пост. Строка
+        # «Место: …» остаётся там, где живёт сам анонс — в посте и обзоре.
+        # В самом посте место — часть шаблона площадки, без префикса «Место:».
+        self.assertIn("Дом культуры", h.posts()[-1] or "")
+        self.assertNotIn("Место:", delivered)
+        await _open_preview(h)
+        self.assertIn("Место: Дом культуры", h.screen_text())
 
 
 @unittest.skipIf(

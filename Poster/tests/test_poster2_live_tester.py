@@ -404,8 +404,10 @@ class EmptyAnnouncementDeliveryTests(unittest.TestCase):
         self.assertEqual(_live_text(h).strip(), ".")
 
         # Правка кирпичика убирает точку и не оставляет её в значениях.
-        await h.callback(_callback(h, "aw_qmanage"))
-        await h.callback(_callback(h, "aw_qgoto"))
+        # U2b: шаг фото показывает ровно две кнопки, поэтому к тому же
+        # вопросу возвращает «◀️ Назад» — дальше обычный ввод значения.
+        await h.callback(_callback(h, "aw_photo_back"))
+        self.assertIn("Вопрос 1", h.screen_text())
         await h.text("Настоящий анонс")
         self.assertIn("Настоящий анонс", _live_text(h))
         self.assertNotEqual(_live_text(h).strip(), ".")

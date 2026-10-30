@@ -49,6 +49,8 @@ try:
         _choose_personal,
         _latest_draft,
         _no_photos,
+        _open_edit,
+        _reopen_question,
         _seed_personal_template,
         _seed_place,
         _start_to_template,
@@ -100,8 +102,7 @@ async def _reopen_first_question(h) -> None:
     Последний ответ ведёт на шаг фотографий, поэтому к заполненному
     кирпичику возвращаются через управление полями.
     """
-    await h.callback(_callback(h, "aw_qmanage"))
-    await h.callback(_callback(h, "aw_qgoto"))
+    await _reopen_question(h)
 
 
 # —— юнит-уровень: сам шов, без приложения и БД ————————————————————————
@@ -450,8 +451,7 @@ class MutationCaptureTests(unittest.TestCase):
         self.assertEqual(field.raw_value, "Исходно", "plain остаётся источником истины")
 
         # Служебный экран тоже не содержит опасной разметки.
-        await h.callback(_callback(h, "aw_qmanage"))
-        await h.callback(_callback(h, "aw_qgoto"))
+        await _reopen_question(h)
         self.assertNotIn("<img", h.screen()["text"])
         self.assertIn("<b>ok</b>", h.screen()["text"])
 
@@ -587,6 +587,7 @@ class LongValueScreenTests(unittest.TestCase):
         await _choose_personal(h, template_id)
         await h.text("Главное")
         await _no_photos(h)
+        await _open_edit(h)
 
         await h.callback(_callback(h, "aw_extras"))
         await h.callback(_callback(h, "aw_exadd"))
@@ -659,14 +660,14 @@ class EmptyStoredHtmlTests(unittest.TestCase):
 
         # Перечитывание черновика: экран вопроса синхронизирует живой блок
         # из БД (значение с пустым `html`).
-        await h.callback(_callback(h, "aw_qmanage"))
-        await h.callback(_callback(h, "aw_qgoto"))
+        await _reopen_question(h)
         self.assertEqual(_live_text(h), "Текст есть", "анонс обнулился в живом блоке")
 
-        # Готовый пост тоже не пустой.
+        # Готовый пост тоже не пустой. U2b: после последнего вопроса идёт
+        # шаг фото, доставку запускает «⏭ Пропустить».
         await h.callback(_callback(h, "aw_qnext"))
-        await h.callback(_callback(h, "aw_preview"))
-        await h.callback(_callback(h, "aw_send"))
+        self.assertIn("Фотографии анонса", h.screen_text())
+        await h.callback(_callback(h, "aw_photo_none"))
         posts = [call for call in h.post_records() if call["type"] == "message"]
         self.assertTrue(posts, "готовый анонс не отправлен")
         self.assertEqual(posts[-1].get("text"), "Текст есть")

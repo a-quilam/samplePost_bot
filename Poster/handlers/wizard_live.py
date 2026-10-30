@@ -55,9 +55,10 @@ if TYPE_CHECKING:  # pragma: no cover — только для типов, без
 logger = logging.getLogger(__name__)
 
 # Где в `user_data` лежит служебное состояние живого блока: отпечаток уже
-# показанной версии и прогресс частичной отправки. В БД этого нет (схема
-# не меняется): после рестарта блок считается актуальным, если количество
-# его сообщений совпадает с ожидаемым числом сегментов.
+# показанной версии, фактический состав его фото и прогресс частичной
+# отправки. В БД этого нет (схема не меняется): после рестарта блок считается
+# актуальным, если количество его сообщений совпадает с ожидаемым числом
+# сегментов (состав фото тогда неизвестен — см. `shown_file_ids`).
 LIVE_STATE_KEY = "announcement_live_state"
 LIVE_PROGRESS_KEY = "announcement_live_progress"
 
@@ -74,6 +75,11 @@ class LiveBlock:
     photo_count: int = 0
     # Отпечаток показанного содержимого: по нему финал узнаёт свою версию.
     fingerprint: str = ""
+    # Фактический состав фото показанного блока (порядок отправки). Счётчика
+    # недостаточно: подпись правится у того же сообщения, поэтому при том же
+    # числе сегментов набор `file_id` мог измениться. `None` — состав
+    # неизвестен (например, блок восстановлен из БД после рестарта).
+    file_ids: tuple[str, ...] | None = None
 
     @property
     def has_media(self) -> bool:
@@ -132,6 +138,10 @@ def remember_live_state(user_data: dict, *, draft_id: int, block: LiveBlock) -> 
         "fingerprint": block.fingerprint,
         "ids": list(block.message_ids),
         "photo_count": block.photo_count,
+        # Состав фото нужен отдельно от счётчика: правка подписи не меняет
+        # число сообщений, и по одному `photo_count` финал не отличил бы
+        # «F-1» от «F-1 + F-2». None — состав показанного блока неизвестен.
+        "file_ids": (None if block.file_ids is None else list(block.file_ids)),
     }
 
 
@@ -148,6 +158,36 @@ def live_matches(user_data: dict, *, draft_id: int, fingerprint: str) -> bool:
         and bool(fingerprint)
         and state.get("fingerprint") == fingerprint
     )
+
+
+def shown_file_ids(
+    user_data: dict | None, *, draft_id: int, message_ids: tuple[int, ...]
+) -> tuple[str, ...] | None:
+    """
+    Состав фото, который РЕАЛЬНО показан в блоке (None — неизвестен).
+
+    Счётчика сообщений недостаточно: `editMessageCaption` правит подпись того
+    же сообщения, поэтому при том же числе сегментов набор `file_id` мог
+    измениться (1 фото «F-1» → 1 фото «F-1 + F-2»). Поэтому фактический
+    состав запоминается в `user_data` при каждой подтверждённой отправке.
+
+    None возвращается, когда доказательств нет: состояние относится к другому
+    черновику, адреса блока уже другие (например, после рестарта процесса
+    `user_data` пуст и блок известен только по `live_message_ids_json`). Тогда
+    остаётся прежняя проверка по числу сегментов — это известное ограничение
+    восстановления из БД, схема ради него не меняется.
+    """
+    if user_data is None:
+        return None
+    state = live_state(user_data)
+    if int(state.get("draft_id") or 0) != int(draft_id):
+        return None
+    if tuple(int(item) for item in state.get("ids") or ()) != tuple(message_ids):
+        return None
+    stored = state.get("file_ids")
+    if not isinstance(stored, (list, tuple)):
+        return None
+    return tuple(str(item) for item in stored)
 
 
 def _persist_ids(
@@ -260,9 +300,12 @@ async def sync_live_block(
     Правила замены:
 
     - текст без фото: `editMessageText` (неизменённый текст — успех);
-    - медиаблок: `editMessageCaption` последнего сегмента, если число
-      сегментов совпадает с ожидаемым. Состав фото неизменен — новых
-      сообщений нет;
+    - медиаблок: `editMessageCaption` последнего сегмента, но ТОЛЬКО когда
+      фактический состав показанных фото совпадает с текущим payload.
+      Счётчика сегментов недостаточно: подпись правится у того же сообщения,
+      поэтому при том же числе сегментов набор `file_id` мог измениться
+      (дефект U2b: из «F-1» получался «F-1 + F-2» на бумаге, а в чате
+      оставался один «F-1»);
     - состав изменился (фото добавились/удалились) или править нечего —
       отправляется новая версия, и только после её успеха прошлые адреса
       удаляются. До успеха старая версия остаётся в чате.
@@ -279,8 +322,25 @@ async def sync_live_block(
     fingerprint = delivery_fingerprint(text, file_ids)
     segments = expected_segments(len(file_ids))
     ids = tuple(known_ids)
+    can_edit = bool(ids) and not force_recreate and len(ids) == segments
+    # Состав, который реально показан в блоке (None — неизвестен, например
+    # после рестарта: состояние в `user_data` потеряно).
+    shown = (
+        shown_file_ids(user_data, draft_id=draft_id, message_ids=ids)
+        if can_edit
+        else None
+    )
 
-    if ids and not force_recreate and len(ids) == segments:
+    if can_edit and shown is not None and shown != file_ids:
+        # Тот же счётчик сегментов, но другой набор фото: правка подписи
+        # оставила бы старые снимки в чате. Пересобираем блок.
+        logger.info(
+            "Состав фото живого блока #%s изменился (%s → %s) — пересобираю.",
+            draft_id,
+            len(shown),
+            len(file_ids),
+        )
+    elif can_edit:
         if not file_ids:
             if await _edit_text_block(bot, chat_id, ids, text):
                 return LiveBlock(
@@ -288,6 +348,7 @@ async def sync_live_block(
                     text=text,
                     fingerprint=fingerprint,
                     photo_count=0,
+                    file_ids=(),
                 )
         elif await _edit_caption(bot, chat_id, ids[-1], text):
             # Подпись правится и пустой: у сообщения с фото это «уже
@@ -300,6 +361,13 @@ async def sync_live_block(
                 text=text,
                 fingerprint=fingerprint,
                 photo_count=len(file_ids),
+                file_ids=(
+                    # Состав подтверждён, только если он был известен ДО
+                    # правки; иначе (рестарт) он остаётся неизвестным.
+                    file_ids
+                    if shown is not None
+                    else None
+                ),
             )
 
     progress: dict | None = None
@@ -337,11 +405,13 @@ async def sync_live_block(
     new_ids = tuple(int(mid) for mid in sent)
     if not new_ids:
         # Telegram не вернул message_id: блок не подтверждён, старый цел.
+        # Показанным остаётся прежний состав (если он был известен).
         return LiveBlock(
             message_ids=ids,
             text=text,
             replaced=len(ids),
-            photo_count=len(file_ids),
+            photo_count=len(shown) if shown is not None else 0,
+            file_ids=shown,
         )
     stored_ids = _persist_ids(
         telegram_user_id=telegram_user_id,
@@ -361,4 +431,5 @@ async def sync_live_block(
         replaced=len(replaced),
         photo_count=len(file_ids),
         fingerprint=fingerprint,
+        file_ids=file_ids,
     )

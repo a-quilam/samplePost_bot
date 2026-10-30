@@ -181,25 +181,24 @@ def photo_step_text(
     notice: str | None = None,
     announcement_is_empty: bool = False,
 ) -> str:
-    """Текст нижнего экрана шага фото (шутка — только здесь)."""
+    """
+    Текст нижнего экрана шага фото: короткая инструкция и счётчик.
+
+    Технических объяснений (медиагруппы, статус публикации, «партия») здесь
+    нет: владелец просил одно понятное действие. Шутка — только в этом
+    служебном экране и только пока текста анонса нет (S3 п.11).
+    """
     total = len(getattr(details, "photos", ()) or ())
-    free = photo_limit(details)
     lines = [
         "📷 Фотографии анонса",
         "",
-        "Пришлите одно фото или альбом — они уйдут выше, а текст станет "
-        "подписью под последним снимком. Анонс готовится сразу после "
-        "получения всей партии.",
-        f"Добавлено фотографий: {total} из {MAX_ANNOUNCEMENT_PHOTOS}.",
+        "Пришлите фотографию или альбом. Можно добавить до "
+        f"{MAX_ANNOUNCEMENT_PHOTOS} фотографий.",
     ]
-    if free == 0:
-        lines.append(
-            "Лимит исчерпан: новый снимок не добавится, пока не удалите лишний."
-        )
+    if total:
+        lines.append(f"Добавлено фотографий: {total} из {MAX_ANNOUNCEMENT_PHOTOS}.")
     if notice:
         lines.insert(1, notice)
-    # S3 п.11 / S4: шутка — только в нижнем служебном экране и только пока
-    # текста анонса нет. В живой блок и отправленный текст она не попадает.
     if announcement_is_empty:
         from utils import ui_humor
 
@@ -210,49 +209,31 @@ def photo_step_text(
 
 
 def photo_step_keyboard(details: Any) -> InlineKeyboardMarkup:
-    """Кнопки шага фото: без «Готово» — завершает партия или отказ от фото."""
+    """
+    Кнопки шага фото: ровно две в одной строке — «Назад» и «Пропустить».
+
+    «Пропустить» (callback `aw_photo_none`) сохраняет прежнюю семантику:
+    анонс завершается сразу, без вложений. Добавление фото отдельной
+    кнопкой не нужно — снимки принимаются обычным сообщением, о чём и
+    говорит текст экрана. «Назад» возвращает к предыдущему шагу (последний
+    кирпичик), не меняя уже сохранённые данные.
+    """
     draft_id = details.draft_id
     revision = details.revision
-    rows: list[list[InlineKeyboardButton]] = [
+    return InlineKeyboardMarkup(
         [
-            InlineKeyboardButton(
-                "📎 Добавить фото",
-                callback_data=f"aw_photo_add:{draft_id}:{revision}",
-            )
-        ],
-        [
-            InlineKeyboardButton(
-                "🚫 Без фотографий",
-                callback_data=f"aw_photo_none:{draft_id}:{revision}",
-            )
-        ],
-    ]
-    if getattr(details, "photos", ()):
-        rows.insert(
-            1,
             [
                 InlineKeyboardButton(
-                    "📷 Показать добавленные",
-                    callback_data=f"aw_photos:{draft_id}:{revision}:0",
-                )
-            ],
-        )
-    rows.append(
-        [
-            InlineKeyboardButton(
-                "🧱 К вопросам", callback_data=f"aw_qmanage:{draft_id}:{revision}"
-            )
+                    "◀️ Назад",
+                    callback_data=f"aw_photo_back:{draft_id}:{revision}",
+                ),
+                InlineKeyboardButton(
+                    "⏭ Пропустить",
+                    callback_data=f"aw_photo_none:{draft_id}:{revision}",
+                ),
+            ]
         ]
     )
-    rows.append(
-        [
-            InlineKeyboardButton(
-                "👁 Обзор анонса", callback_data=f"aw_preview:{draft_id}:{revision}"
-            )
-        ]
-    )
-    rows.append([InlineKeyboardButton("🏠 Главное меню", callback_data="main_menu")])
-    return InlineKeyboardMarkup(rows)
 
 
 async def render_photo_step(

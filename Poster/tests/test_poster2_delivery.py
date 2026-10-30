@@ -436,7 +436,7 @@ class AnnouncementDeliveryScenarioTests(unittest.TestCase):
         await h.callback("aw_start")
         await h.callback(_callback(h, "aw_open", f":{draft.id}"))
         self.assertEqual(len(h.posts()), posts_before, "рестарт не отправил дубль")
-        self.assertIn("Готовый анонс отправлен в этот чат", h.screen_text())
+        self.assertIn("✅ Анонс готов.", h.screen_text())
         self.assertEqual(h.dialog_state(name=CONVERSATION_NAME), AW_PREVIEW)
 
     @scenario_test
@@ -477,7 +477,7 @@ class AnnouncementDeliveryScenarioTests(unittest.TestCase):
 
         sent = _stored(h, draft.id)
         self.assertEqual(sent.publication_status, "sent")
-        self.assertIn("Готовый анонс отправлен в этот чат", h.screen_text())
+        self.assertIn("✅ Анонс готов.", h.screen_text())
         # Удаление не удалось — анонс всё равно доставлен, а старый блок
         # остался в чате: это известное ограничение, а не сбой доставки.
         self.assertEqual(sent.publication_photos, ("kept-photo",))

@@ -951,7 +951,7 @@ class PlacesIsolationTests(unittest.TestCase):
         await h.text("Кофейня «Дом»")
 
         self.assertEqual(place_count(h), before, "место не создано из текста")
-        self.assertIn("Готовый анонс отправлен", h.screen_text())
+        self.assertIn("✅ Анонс готов", h.screen_text())
 
     @scenario_test
     async def test_create_post_does_not_start_legacy_wizard_or_clear_place(self, h):

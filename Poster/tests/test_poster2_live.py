@@ -447,7 +447,7 @@ class CalendarAndTimeShortcutTests(unittest.TestCase):
     f"окружение недоступно: {INTEGRATION_IMPORT_ERROR}",
 )
 class PhotoStepTests(unittest.TestCase):
-    """Последний кирпичик ведёт на шаг фото; «Без фотографий» — финал."""
+    """Последний кирпичик ведёт на шаг фото; «Пропустить» — финал."""
 
     @scenario_test
     async def test_last_brick_opens_photo_step_without_finish_button(self, h):
@@ -457,9 +457,13 @@ class PhotoStepTests(unittest.TestCase):
         await h.text("Значение")
 
         self.assertIn("Фотографии анонса", h.screen_text())
-        labels = [label for label, _data in h.screen_buttons()]
-        self.assertIn("📎 Добавить фото", labels)
-        self.assertIn("🚫 Без фотографий", labels)
+        # U2b: ровно две кнопки в одной строке — «Назад» и «Пропустить».
+        buttons = h.screen_buttons()
+        self.assertEqual(
+            [label for label, _data in buttons], ["◀️ Назад", "⏭ Пропустить"]
+        )
+        self.assertTrue(_callbacks(h, "aw_photo_back"))
+        self.assertTrue(_callbacks(h, "aw_photo_none"))
         self.assertFalse(_callbacks(h, "aw_send"))
         # До выбора пользователя анонс ещё не отправлен.
         self.assertEqual(h.posts(), [])
@@ -472,7 +476,7 @@ class PhotoStepTests(unittest.TestCase):
         await h.text("Значение")
         await h.callback(_callback(h, "aw_photo_none"))
 
-        self.assertIn("Готовый анонс отправлен", h.screen_text())
+        self.assertIn("✅ Анонс готов", h.screen_text())
         posts = h.posts()
         self.assertEqual(len(posts), 1)
         self.assertIn("Значение", posts[0] or "")

@@ -187,6 +187,7 @@ class ExtraBrickCalendarTests(unittest.TestCase):
             from tests.test_stage27b_announcement_ui import (
                 _choose_personal,
                 _no_photos,
+                _open_edit,
                 _seed_personal_template,
                 _seed_place,
                 _start_to_template,
@@ -208,6 +209,8 @@ class ExtraBrickCalendarTests(unittest.TestCase):
             await h.text("Главное")
             await _no_photos(h)
 
+            # U2b: доп. кирпичики доставленного анонса — на экране правки.
+            await _open_edit(h)
             await h.callback(_first(h, "aw_extras"))
             await h.callback(_first(h, "aw_exadd"))
             suffix = f":{bricks['extra']}"
