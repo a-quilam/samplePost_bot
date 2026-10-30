@@ -355,19 +355,28 @@ class BrickProposalFlowTests(unittest.TestCase):
 
     @scenario_test
     async def test_01_hub_offers_propose_and_my_proposals(self, h: Harness) -> None:
+        # U3a №8: «предложить» живёт в строке кирпичика, общей кнопки нет.
+        source = self.make_personal(h, OWNER_TG, code="хаб_ui_26")
         await self.open_author(h)
         self.assertIn("Мои кирпичики", h.screen_text())
-        self.assertIn("bp_start", self.callbacks(h, "bp_start"))
+        self.assertEqual(self.callbacks(h, "bp_start"), [f"bp_start:{source.id}"])
         self.assertIn("bp_mine", self.callbacks(h, "bp_mine"))
 
     @scenario_test
     async def test_02_user_without_bricks_is_offered_existing_constructor(
         self, h: Harness
     ) -> None:
+        # U3a №8: без активных кирпичиков стартовать предложение нечем —
+        # в хабе только конструктор и список предложений.
         await self.open_author(h)
-        await h.callback("bp_start", user_id=OWNER_TG)
-        self.assertIn("Сначала создайте личный кирпичик", h.screen_text())
+        self.assertNotIn("bp_start", " ".join(self.callbacks(h, "")))
         self.assertIn("bk_create", " ".join(self.callbacks(h)))
+        # Устаревшая общая кнопка из старого сообщения: подсказка + хаб.
+        from handlers.bricks import PROPOSAL_CREATE_HINT
+
+        await h.callback("bp_start", user_id=OWNER_TG)
+        self.assertEqual(self.last_alert(h), PROPOSAL_CREATE_HINT)
+        self.assertIn("Мои кирпичики", h.screen_text())
         self.assertEqual(self._proposal_count(h), 0)
 
     @scenario_test
@@ -384,9 +393,9 @@ class BrickProposalFlowTests(unittest.TestCase):
             rules={"min": 0, "suffix": "мест"},
         )
         await self.open_author(h)
-        await h.callback("bp_start", user_id=OWNER_TG)
-        self.assertIn(f"bp_source:{source.id}", " ".join(self.callbacks(h)))
-        await h.callback(f"bp_source:{source.id}", user_id=OWNER_TG)
+        # U3a №8: вход в мастер — из строки кирпичика, шага выбора нет.
+        await h.callback(f"bp_start:{source.id}", user_id=OWNER_TG)
+        self.assertIn("Куда предложить", h.screen_text())
         await h.callback("bp_target:place", user_id=OWNER_TG)
         self.assertIn(f"bp_place:{place_id}", " ".join(self.callbacks(h)))
         await h.callback(f"bp_place:{place_id}", user_id=OWNER_TG)
@@ -411,8 +420,7 @@ class BrickProposalFlowTests(unittest.TestCase):
     ) -> None:
         source = self.make_personal(h, OWNER_TG, code="без_места_26")
         await self.open_author(h)
-        await h.callback("bp_start", user_id=OWNER_TG)
-        await h.callback(f"bp_source:{source.id}", user_id=OWNER_TG)
+        await h.callback(f"bp_start:{source.id}", user_id=OWNER_TG)
         await h.callback("bp_target:place", user_id=OWNER_TG)
         self.assertIn("нет мест", h.screen_text().lower())
         await h.callback("bp_place:999999", user_id=OWNER_TG)
@@ -427,8 +435,7 @@ class BrickProposalFlowTests(unittest.TestCase):
     ) -> None:
         source = self.make_personal(h, OWNER_TG, code="глобал_26", title="Глобал")
         await self.open_author(h)
-        await h.callback("bp_start", user_id=OWNER_TG)
-        await h.callback(f"bp_source:{source.id}", user_id=OWNER_TG)
+        await h.callback(f"bp_start:{source.id}", user_id=OWNER_TG)
         await h.callback("bp_target:system", user_id=OWNER_TG)
         self.assertIn("вся система", h.screen_text())
         await h.callback("bp_send", user_id=OWNER_TG)
@@ -456,8 +463,7 @@ class BrickProposalFlowTests(unittest.TestCase):
             rules={"min": 2, "max": 9, "suffix": "шт"},
         )
         await self.open_author(h)
-        await h.callback("bp_start", user_id=OWNER_TG)
-        await h.callback(f"bp_source:{source.id}", user_id=OWNER_TG)
+        await h.callback(f"bp_start:{source.id}", user_id=OWNER_TG)
         await h.callback("bp_target:place", user_id=OWNER_TG)
         await h.callback(f"bp_place:{place_id}", user_id=OWNER_TG)
         text = h.screen_text()
@@ -472,8 +478,10 @@ class BrickProposalFlowTests(unittest.TestCase):
         self.assertIn(f"bp_place:{place_id}", " ".join(self.callbacks(h)))
         await h.callback("bp_back", user_id=OWNER_TG)
         self.assertIn("bp_target:place", " ".join(self.callbacks(h)))
+        # Шаг выбора кирпичика пропущен: «назад» с экрана области ведёт в хаб.
         await h.callback("bp_back", user_id=OWNER_TG)
-        self.assertIn(f"bp_source:{source.id}", " ".join(self.callbacks(h)))
+        self.assertIn("Мои кирпичики", h.screen_text())
+        self.assertIn(f"bp_start:{source.id}", " ".join(self.callbacks(h)))
 
     @scenario_test
     async def test_07_code_conflict_hides_submit_and_keeps_no_row(
@@ -483,8 +491,7 @@ class BrickProposalFlowTests(unittest.TestCase):
         self.make_place_brick(h, SUPER_TG, place_id, code="занят_ui_26", title="Занят")
         source = self.make_personal(h, OWNER_TG, code="занят_ui_26")
         await self.open_author(h)
-        await h.callback("bp_start", user_id=OWNER_TG)
-        await h.callback(f"bp_source:{source.id}", user_id=OWNER_TG)
+        await h.callback(f"bp_start:{source.id}", user_id=OWNER_TG)
         await h.callback("bp_target:place", user_id=OWNER_TG)
         await h.callback(f"bp_place:{place_id}", user_id=OWNER_TG)
         self.assertNotIn("bp_send", " ".join(self.callbacks(h)))
@@ -507,11 +514,11 @@ class BrickProposalFlowTests(unittest.TestCase):
                 expected_revision=archived.revision,
             )
         await self.open_author(h)
-        await h.callback("bp_start", user_id=OWNER_TG)
-        self.assertNotIn(f"bp_source:{archived.id}", " ".join(self.callbacks(h)))
-        await h.callback(f"bp_source:{archived.id}", user_id=OWNER_TG)
+        # U3a №8: архивный кирпичик не получает кнопку предложения.
+        self.assertNotIn(f"bp_start:{archived.id}", " ".join(self.callbacks(h)))
+        await h.callback(f"bp_start:{archived.id}", user_id=OWNER_TG)
         self.assertIn("архив", h.screen_text().lower())
-        await h.callback("bp_source:999999", user_id=OWNER_TG)
+        await h.callback("bp_start:999999", user_id=OWNER_TG)
         self.assertEqual(self._proposal_count(h), 0)
 
     @scenario_test
@@ -667,6 +674,7 @@ class BrickProposalFlowTests(unittest.TestCase):
         proposal_id = self.direct_proposal(h, OWNER_TG, source.id, place_id=place_id)
         await self.open_own_card(h, proposal_id)
         h.bot.calls.clear()
+        # Legacy-кнопка шага выбора кирпичика: вне своей фазы она устарела.
         await h.callback(f"bp_source:{source.id}", user_id=OWNER_TG)
         self.assertIsNotNone(self.last_alert(h))
         await h.callback("bp_send", user_id=OWNER_TG)
@@ -728,7 +736,7 @@ class BrickProposalFlowTests(unittest.TestCase):
         self.assertIn(f"bp_open:{proposal_id}", " ".join(self.callbacks(h)))
         await h.callback("bp_back", user_id=OWNER_TG)
         self.assertIn("Мои кирпичики", h.screen_text())
-        self.assertIn("bp_start", " ".join(self.callbacks(h)))
+        self.assertIn(f"bp_start:{source.id}", " ".join(self.callbacks(h)))
 
     @scenario_test
     async def test_20_wip_post_and_announcement_survive_proposal_and_decision(
@@ -759,8 +767,7 @@ class BrickProposalFlowTests(unittest.TestCase):
             draft_id = draft.id
             payload = state.payload
         await self.open_author(h)
-        await h.callback("bp_start", user_id=OWNER_TG)
-        await h.callback(f"bp_source:{source.id}", user_id=OWNER_TG)
+        await h.callback(f"bp_start:{source.id}", user_id=OWNER_TG)
         await h.callback("bp_target:place", user_id=OWNER_TG)
         await h.callback(f"bp_place:{place_id}", user_id=OWNER_TG)
         await h.callback("bp_send", user_id=OWNER_TG)

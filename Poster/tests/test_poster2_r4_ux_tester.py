@@ -283,9 +283,9 @@ class R4TesterCase(unittest.TestCase):
         await h.text("/bricks", user_id=user_id)
 
     async def walk(self, h: Harness, source_id: int, place_id: int) -> None:
+        # U3a №8: предложение стартует только из строки кирпичика.
         await self.open_hub(h)
-        await h.callback("bp_start", user_id=OWNER)
-        await h.callback(f"bp_source:{source_id}", user_id=OWNER)
+        await h.callback(f"bp_start:{source_id}", user_id=OWNER)
         await h.callback("bp_target:place", user_id=OWNER)
         await h.callback(f"bp_place:{place_id}", user_id=OWNER)
 
@@ -299,13 +299,9 @@ class ProposalFlowTests(R4TesterCase):
         source = self.make_personal(h, OWNER, code="поток_1", title="Поток")
         await self.open_hub(h)
 
-        await h.callback("bp_start", user_id=OWNER)
+        await h.callback(f"bp_start:{source.id}", user_id=OWNER)
         self.assertIn(CRUMB, h.screen_text())
-        self.assertIn("Выберите кирпичик", h.screen_text())
-        self.assertTrue(has(h, "bp_back"))
-
-        await h.callback(f"bp_source:{source.id}", user_id=OWNER)
-        self.assertIn(CRUMB, h.screen_text())
+        self.assertIn("Куда предложить", h.screen_text())
         self.assertIn("Поток", h.screen_text())
         self.assertTrue(has(h, "bp_back"))
 
@@ -620,12 +616,13 @@ class ChatApplicationTests(R4TesterCase):
         source = self.make_personal(h, OWNER, code="nav_1", title="Навигация")
         await self.open_hub(h)
         sends = len(screen_sends(h))
-        for _ in range(4):
-            await h.callback("bp_start", user_id=OWNER)
-            await h.callback(f"bp_source:{source.id}", user_id=OWNER)
+        # U3a №8: экранов в мастере на один меньше, кругов — на один больше:
+        # проверка «экран перерисовывается, а не копится» не ослаблена.
+        for _ in range(6):
+            await h.callback(f"bp_start:{source.id}", user_id=OWNER)
             await h.callback("bp_target:place", user_id=OWNER)
             await h.callback(f"bp_place:{place_id}", user_id=OWNER)
-            for _ in range(4):
+            for _ in range(3):
                 await h.callback("bp_back", user_id=OWNER)
             self.assertIn("Мои кирпичики", h.screen_text())
         self.assertEqual(len(screen_sends(h)), sends, "служебные экраны копятся в чате")
@@ -941,7 +938,8 @@ class ForgeryAndIdorTests(R4TesterCase):
 
         await h.callback("bp_start:999999", user_id=OWNER)
         self.assertIn("не найден", h.screen_text())
-        self.assertTrue(has(h, "bp_start"))
+        # Строковые кнопки 📨 остаются на месте — хаб не теряет действий.
+        self.assertTrue(any(data.startswith("bp_start:") for data in callbacks(h)))
 
     @scenario_test
     async def test_malformed_bp_start_is_stale_and_safe(self, h: Harness) -> None:

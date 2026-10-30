@@ -122,7 +122,7 @@ from template_types import (
     TEMPLATE_SECTION_FOOTER,
     TEMPLATE_SECTION_HEADER,
 )
-from utils import calendar_view, screen, ui_humor
+from utils import calendar_view, keyboard_layouts, screen, ui_humor
 from utils import tg_context as ctx
 from utils.parsers import app_today
 from utils.place_labels import place_title
@@ -687,23 +687,25 @@ def _clamped_page(page: int, total: int, size: int) -> int:
 def _place_buttons(
     places: list[tuple[int, str]], *, prefix: str, page: int, total: int
 ) -> list[list[InlineKeyboardButton]]:
-    rows = [
-        [
-            InlineKeyboardButton(
-                _short(f"📍 {name}", 60),
-                callback_data=f"aw_place_open:{place_id}",
-            )
-        ]
+    # U3a №13: строки списка и пагинация — общие шаблоны компоновки.
+    rows = keyboard_layouts.list_rows(
+        (
+            keyboard_layouts.button(
+                _short(f"📍 {name}", 60), f"aw_place_open:{place_id}"
+            ),
+            None,
+        )
         for place_id, name in places
-    ]
-    nav: list[InlineKeyboardButton] = []
+    )
     size = PLACE_PAGE_SIZE
-    if page > 0:
-        nav.append(InlineKeyboardButton("◀️", callback_data=f"{prefix}:{page - 1}"))
-    if (page + 1) * size < total:
-        nav.append(InlineKeyboardButton("▶️", callback_data=f"{prefix}:{page + 1}"))
-    if nav:
-        rows.append(nav)
+    rows += keyboard_layouts.nav_row(
+        keyboard_layouts.button("◀️", f"{prefix}:{page - 1}") if page > 0 else None,
+        (
+            keyboard_layouts.button("▶️", f"{prefix}:{page + 1}")
+            if (page + 1) * size < total
+            else None
+        ),
+    )
     rows.append([InlineKeyboardButton("◀️ Назад", callback_data="aw_place_back")])
     return rows
 
@@ -1530,7 +1532,8 @@ async def _render_question(
     )
     if field.value_type == BRICK_TYPE_DATE:
         # U2a: внизу первого экрана даты — ровно одна строка навигации.
-        rows.append([back_button, skip_button])
+        # U3a №13: пара собирается общим шаблоном «Назад | Пропустить».
+        rows += keyboard_layouts.pair(back_button, skip_button)
     else:
         rows.append([skip_button])
         rows.append([back_button])
@@ -2166,16 +2169,16 @@ async def _render_calendar_months(
             source,
             error="Для выбора месяца нет доступных дат. Введите дату текстом.",
         )
-    rows = [
-        [
+    rows = keyboard_layouts.rows_of(
+        (
             InlineKeyboardButton(
                 calendar_view.format_month(key),
                 callback_data=f"aw_calmonth:{prefix}:{key[0]}:{key[1]}",
             )
-            for key in months[position : position + 3]
-        ]
-        for position in range(0, len(months), 3)
-    ]
+            for key in months
+        ),
+        3,
+    )
     rows.append(
         [
             InlineKeyboardButton(
@@ -2225,25 +2228,27 @@ async def _render_calendar_month(
         return await _stale(update, context)
     rows = _day_rows(days, prefix, per_row=7, label=calendar_view.format_month_day)
     position = months.index(key)
-    nav: list[InlineKeyboardButton] = []
-    if position > 0:
-        previous = months[position - 1]
-        nav.append(
-            InlineKeyboardButton(
+    # U3a №13: стрелки соседних месяцев — общий шаблон пагинации.
+    rows += keyboard_layouts.nav_row(
+        (
+            keyboard_layouts.button(
                 "◀️",
-                callback_data=f"aw_calmonth:{prefix}:{previous[0]}:{previous[1]}",
+                f"aw_calmonth:{prefix}:{months[position - 1][0]}:"
+                f"{months[position - 1][1]}",
             )
-        )
-    if position + 1 < len(months):
-        following = months[position + 1]
-        nav.append(
-            InlineKeyboardButton(
+            if position > 0
+            else None
+        ),
+        (
+            keyboard_layouts.button(
                 "▶️",
-                callback_data=f"aw_calmonth:{prefix}:{following[0]}:{following[1]}",
+                f"aw_calmonth:{prefix}:{months[position + 1][0]}:"
+                f"{months[position + 1][1]}",
             )
-        )
-    if nav:
-        rows.append(nav)
+            if position + 1 < len(months)
+            else None
+        ),
+    )
     rows.append(
         [InlineKeyboardButton("📅 Месяцы", callback_data=f"aw_calmonths:{prefix}")]
     )

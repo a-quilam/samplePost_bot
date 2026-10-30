@@ -33,7 +33,7 @@ import logging
 from dataclasses import dataclass
 from typing import Any
 
-from telegram import InlineKeyboardButton, InlineKeyboardMarkup
+from telegram import InlineKeyboardMarkup
 
 from announcement_store import (
     MAX_ANNOUNCEMENT_PHOTOS,
@@ -42,6 +42,7 @@ from announcement_store import (
     get_announcement_draft,
 )
 from database import SessionLocal
+from utils import keyboard_layouts
 from utils.tg_html import escape_html
 
 logger = logging.getLogger(__name__)
@@ -217,22 +218,19 @@ def photo_step_keyboard(details: Any) -> InlineKeyboardMarkup:
     кнопкой не нужно — снимки принимаются обычным сообщением, о чём и
     говорит текст экрана. «Назад» возвращает к предыдущему шагу (последний
     кирпичик), не меняя уже сохранённые данные.
+
+    U3a №13: пара собирается общим шаблоном `keyboard_layouts.pair`, а не
+    вручную — так же, как пара «Назад | Пропустить» на вопросе даты.
     """
     draft_id = details.draft_id
     revision = details.revision
     return InlineKeyboardMarkup(
-        [
-            [
-                InlineKeyboardButton(
-                    "◀️ Назад",
-                    callback_data=f"aw_photo_back:{draft_id}:{revision}",
-                ),
-                InlineKeyboardButton(
-                    "⏭ Пропустить",
-                    callback_data=f"aw_photo_none:{draft_id}:{revision}",
-                ),
-            ]
-        ]
+        keyboard_layouts.pair(
+            keyboard_layouts.button("◀️ Назад", f"aw_photo_back:{draft_id}:{revision}"),
+            keyboard_layouts.button(
+                "⏭ Пропустить", f"aw_photo_none:{draft_id}:{revision}"
+            ),
+        )
     )
 
 

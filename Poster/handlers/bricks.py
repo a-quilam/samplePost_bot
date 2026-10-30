@@ -90,12 +90,18 @@ from place_state import clear_place_session
 from place_store import get_place_details, list_places
 from template_state import clear_template_session
 from user_store import get_or_create_user
-from utils import screen
+from utils import keyboard_layouts, screen
 from utils import tg_context as ctx
 
 logger = logging.getLogger(__name__)
 
 STALE_TEXT = "Кнопка устарела: откройте раздел заново."
+# U3a №8: предложение запускается только из строки конкретного кирпичика.
+# Так отвечает устаревшая общая кнопка `bp_start` без id из старых сообщений.
+PROPOSAL_ROW_ONLY_HINT = "Выберите кирпичик в списке: «📨» справа от его названия."
+# U3a: у нового пользователя кирпичиков нет — ссылаться на «📨» не на что,
+# подсказка ведёт к кнопке, которая на экране действительно есть.
+PROPOSAL_CREATE_HINT = "Сначала создайте кирпичик кнопкой «➕ Создать кирпичик»."
 PAGE_SIZE = 8
 _BUTTON_TITLE_LIMIT = 48
 
@@ -152,8 +158,10 @@ _PROPOSAL_PHASES = frozenset(
         "proposal_withdraw_confirm",
     }
 )
-# Число шагов мастера предложения (R4 №24: человек видит «шаг N из 4»).
-PROPOSAL_STEPS = 4
+# Число шагов мастера предложения (R4 №24: человек видит «шаг N из M»).
+# U3a №8: шаг выбора кирпичика убран — мастер стартует из строки хаба,
+# поэтому шагов три: область → место → проверка.
+PROPOSAL_STEPS = 3
 PHASES = frozenset(
     {
         "hub",
@@ -460,32 +468,34 @@ def _list_keyboard(bricks, *, offset: int, total: int, archive: bool):
     №28: «предложить» доступно прямо из строки активного кирпичика — не нужно
     сначала открывать карточку. В архиве кнопка не нужна: архивный кирпичик
     предложить нельзя, поэтому строка остаётся одной кнопкой.
+
+    U3a №13: раскладка собирается общими шаблонами `utils.keyboard_layouts`:
+    «название + действие справа» и пагинация одной строкой.
     """
     prefix = "bk_apage" if archive else "bk_page"
-    rows = []
-    for brick in bricks:
-        row = [
-            InlineKeyboardButton(
-                _button_title(brick), callback_data=f"bk_open:{brick.id}"
-            )
-        ]
-        if not archive and brick.status == BRICK_STATUS_ACTIVE:
-            # Короткая подпись: полный текст съел бы место у названия.
-            row.append(InlineKeyboardButton("📨", callback_data=f"bp_start:{brick.id}"))
-        rows.append(row)
-    navigation: list[InlineKeyboardButton] = []
-    if offset > 0:
-        navigation.append(
-            InlineKeyboardButton(
-                "◀️", callback_data=f"{prefix}:{max(offset - PAGE_SIZE, 0)}"
-            )
+    rows = keyboard_layouts.list_rows(
+        (
+            keyboard_layouts.button(_button_title(brick), f"bk_open:{brick.id}"),
+            (
+                keyboard_layouts.button("📨", f"bp_start:{brick.id}")
+                if not archive and brick.status == BRICK_STATUS_ACTIVE
+                else None
+            ),
         )
-    if offset + len(bricks) < total:
-        navigation.append(
-            InlineKeyboardButton("▶️", callback_data=f"{prefix}:{offset + PAGE_SIZE}")
-        )
-    if navigation:
-        rows.append(navigation)
+        for brick in bricks
+    )
+    rows += keyboard_layouts.nav_row(
+        (
+            keyboard_layouts.button("◀️", f"{prefix}:{max(offset - PAGE_SIZE, 0)}")
+            if offset > 0
+            else None
+        ),
+        (
+            keyboard_layouts.button("▶️", f"{prefix}:{offset + PAGE_SIZE}")
+            if offset + len(bricks) < total
+            else None
+        ),
+    )
     return rows
 
 
@@ -516,6 +526,13 @@ def _hub_content(session: Session, user: User, state: dict):
     ]
     if total:
         parts.extend(["", f"Активных кирпичиков: {total}."])
+        parts.extend(
+            [
+                "",
+                "Чтобы предложить кирпичик месту или всей системе, нажмите "
+                "«📨» в его строке.",
+            ]
+        )
         if bricks:
             parts.extend(["", _page_note(offset, len(bricks), total)])
     elif archived_total:
@@ -539,9 +556,6 @@ def _hub_content(session: Session, user: User, state: dict):
     rows: list[list[InlineKeyboardButton]] = [
         [InlineKeyboardButton("➕ Создать кирпичик", callback_data="bk_create")]
     ]
-    rows.append(
-        [InlineKeyboardButton("📨 Предложить кирпичик", callback_data="bp_start")]
-    )
     rows.append([InlineKeyboardButton("📤 Мои предложения", callback_data="bp_mine")])
     if bricks:
         rows.extend(_list_keyboard(bricks, offset=offset, total=total, archive=False))
@@ -678,9 +692,10 @@ def _proposal_back_label(state: dict) -> str:
     """
     Подпись «Назад» для экрана области (R4 №24).
 
-    Если человек пришёл из строки хаба (`bp_start:<id>`), шаг выбора
-    кирпичика пропущен — «назад» должно возвращать в хаб, а не на экран
-    «выберите тот же кирпичик ещё раз».
+    U3a №8: мастер всегда запускается из строки хаба (`bp_start:<id>`), шаг
+    выбора кирпичика пропущен — «назад» возвращает в хаб, а не на экран
+    «выберите тот же кирпичик ещё раз». Ветка для старых сессий без метки
+    входа оставлена, чтобы сохранённое состояние не врало подписью.
     """
     if state.get("proposal_entry") == "row":
         return "◀️ К кирпичикам"
@@ -723,6 +738,15 @@ def _proposal_brick(session: Session, user: User, state: dict):
 
 
 def _proposal_select_brick_content(session: Session, user: User, state: dict):
+    """
+    Шаг выбора личного кирпичика — совместимость со старыми сессиями.
+
+    U3a №8: общей кнопки «📨 Предложить кирпичик» на хабе больше нет, поэтому
+    этот экран из интерфейса недостижим: предложение запускается только из
+    строки конкретного кирпичика (`bp_start:<id>`). Функция остаётся, чтобы
+    сохранённая ранее сессия в фазе `proposal_select_brick` не превратилась
+    в тупик после обновления: человек видит список и может продолжить.
+    """
     total = count_personal_bricks(session, user.telegram_user_id)
     if total <= 0:
         _proposal_reset_hub(
@@ -742,7 +766,7 @@ def _proposal_select_brick_content(session: Session, user: User, state: dict):
     )
     state["proposal_page"] = offset
     text = (
-        _proposal_header("Выберите кирпичик", step=1)
+        _proposal_header("Выберите кирпичик")
         + "\n\nВыберите свой личный кирпичик, который хотите предложить для "
         "места или всей системы.\n\n"
         "Будет отправлен снимок текущих названия, кода, типа и описания. "
@@ -751,29 +775,27 @@ def _proposal_select_brick_content(session: Session, user: User, state: dict):
     )
     rows = [
         [
-            InlineKeyboardButton(
+            keyboard_layouts.button(
                 _button_title(brick),
-                callback_data=f"bp_source:{brick.id}",
+                f"bp_source:{brick.id}",
             )
         ]
         for brick in bricks
     ]
-    navigation: list[InlineKeyboardButton] = []
-    if offset > 0:
-        navigation.append(
-            InlineKeyboardButton(
-                "◀️",
-                callback_data=f"bp_page:{max(offset - PROPOSAL_PAGE_SIZE, 0)}",
+    rows += keyboard_layouts.nav_row(
+        (
+            keyboard_layouts.button(
+                "◀️", f"bp_page:{max(offset - PROPOSAL_PAGE_SIZE, 0)}"
             )
-        )
-    if offset + len(bricks) < total:
-        navigation.append(
-            InlineKeyboardButton(
-                "▶️", callback_data=f"bp_page:{offset + PROPOSAL_PAGE_SIZE}"
-            )
-        )
-    if navigation:
-        rows.append(navigation)
+            if offset > 0
+            else None
+        ),
+        (
+            keyboard_layouts.button("▶️", f"bp_page:{offset + PROPOSAL_PAGE_SIZE}")
+            if offset + len(bricks) < total
+            else None
+        ),
+    )
     rows.append([InlineKeyboardButton("◀️ К кирпичикам", callback_data="bp_back")])
     return text, InlineKeyboardMarkup(rows)
 
@@ -787,7 +809,7 @@ def _proposal_scope_content(session: Session, user: User, state: dict):
         )
         return None
     text = (
-        _proposal_header("Куда предложить кирпичик?", step=2) + "\n\n"
+        _proposal_header("Куда предложить кирпичик?", step=1) + "\n\n"
         f"Кирпичик: <b>{_h(brick.title)}</b>\n"
         f"Обозначение: <code>[{_h(brick.code)}]</code>\n\n"
         "Выберите область:\n"
@@ -796,18 +818,21 @@ def _proposal_scope_content(session: Session, user: User, state: dict):
         "• вся система — рассматривает только суперадминистратор.\n\n"
         "Новое место автоматически не создаётся."
     )
-    return text, InlineKeyboardMarkup(
+    # Две цели — рядом в одной строке: это выбор из двух равноправных
+    # вариантов, а не список. «Назад» остаётся отдельной строкой ниже.
+    rows = keyboard_layouts.pair(
+        keyboard_layouts.button("📍 Место", "bp_target:place"),
+        keyboard_layouts.button("🌍 Вся система", "bp_target:system"),
+    )
+    rows.append(
         [
-            [InlineKeyboardButton("📍 Место", callback_data="bp_target:place")],
-            [InlineKeyboardButton("🌍 Вся система", callback_data="bp_target:system")],
-            [
-                InlineKeyboardButton(
-                    _proposal_back_label(state),
-                    callback_data="bp_back",
-                )
-            ],
+            InlineKeyboardButton(
+                _proposal_back_label(state),
+                callback_data="bp_back",
+            )
         ]
     )
+    return text, InlineKeyboardMarkup(rows)
 
 
 def _proposal_select_place_content(session: Session, user: User, state: dict):
@@ -825,7 +850,7 @@ def _proposal_select_place_content(session: Session, user: User, state: dict):
         places, total = list_places(session, offset=offset, limit=PROPOSAL_PAGE_SIZE)
     state["proposal_place_page"] = offset
     text = (
-        _proposal_header("Выберите место", step=3) + "\n\n"
+        _proposal_header("Выберите место", step=2) + "\n\n"
         f"Кирпичик: <b>{_h(brick.title)}</b> "
         f"<code>[{_h(brick.code)}]</code>\n\n"
         "Выберите место из существующего справочника. Новое место здесь "
@@ -917,7 +942,7 @@ def _proposal_preview_content(session: Session, user: User, state: dict):
             "кирпичике или выберите другую область."
         )
     text = (
-        _proposal_header("Проверьте предложение", step=4) + "\n\n"
+        _proposal_header("Проверьте предложение", step=3) + "\n\n"
         f"Название: <b>{_h(brick.title)}</b>\n"
         f"Обозначение: <code>[{_h(brick.code)}]</code>\n"
         f"Тип: {_h(_type_title(brick.value_type))}\n"
@@ -962,41 +987,49 @@ def _proposal_list_content(session: Session, user: User, state: dict):
         "администратор не принял решение."
     )
     if not total:
-        text += (
-            "\n\nВы ещё не отправляли предложений. Откройте «🧱 Кирпичики» "
-            "и нажмите «📨 Предложить»."
-        )
+        # U3a: у пользователя без активных кирпичиков кнопки «📨» нет —
+        # подсказка ведёт к созданию кирпичика.
+        if count_personal_bricks(session, user.telegram_user_id) > 0:
+            text += (
+                "\n\nВы ещё не отправляли предложений. Откройте «🧱 Кирпичики» и "
+                "нажмите «📨» в строке кирпичика, который хотите предложить."
+            )
+        else:
+            text += (
+                "\n\nВы ещё не отправляли предложений. Создайте кирпичик кнопкой "
+                "«➕ Создать кирпичик» в разделе «Мои кирпичики» — после этого "
+                "его можно будет предложить месту или всей системе."
+            )
     else:
         text += "\n\n" + _proposal_page_note(offset, len(proposals), total)
-    rows = [
-        [
-            InlineKeyboardButton(
+    rows = keyboard_layouts.list_rows(
+        (
+            keyboard_layouts.button(
                 _short(
                     f"{_proposal_status_ui(proposal.status)} · "
                     f"{proposal.title} — [{proposal.code}]",
                     60,
                 ),
-                callback_data=f"bp_open:{proposal.id}",
-            )
-        ]
+                f"bp_open:{proposal.id}",
+            ),
+            None,
+        )
         for proposal in proposals
-    ]
-    navigation: list[InlineKeyboardButton] = []
-    if offset > 0:
-        navigation.append(
-            InlineKeyboardButton(
-                "◀️",
-                callback_data=f"bp_mpage:{max(offset - PROPOSAL_PAGE_SIZE, 0)}",
+    )
+    rows += keyboard_layouts.nav_row(
+        (
+            keyboard_layouts.button(
+                "◀️", f"bp_mpage:{max(offset - PROPOSAL_PAGE_SIZE, 0)}"
             )
-        )
-    if offset + len(proposals) < total:
-        navigation.append(
-            InlineKeyboardButton(
-                "▶️", callback_data=f"bp_mpage:{offset + PROPOSAL_PAGE_SIZE}"
-            )
-        )
-    if navigation:
-        rows.append(navigation)
+            if offset > 0
+            else None
+        ),
+        (
+            keyboard_layouts.button("▶️", f"bp_mpage:{offset + PROPOSAL_PAGE_SIZE}")
+            if offset + len(proposals) < total
+            else None
+        ),
+    )
     rows.append([InlineKeyboardButton("◀️ К кирпичикам", callback_data="bp_back")])
     return text, InlineKeyboardMarkup(rows)
 
@@ -1054,16 +1087,11 @@ def _proposal_card_content(proposal: BrickProposalSnapshot):
             "правки личного кирпичика его не меняют.",
         ]
     )
-    rows: list[list[InlineKeyboardButton]] = []
-    if proposal.status == PROPOSAL_STATUS_PENDING:
-        rows.append(
-            [
-                InlineKeyboardButton(
-                    "🗑 Отозвать",
-                    callback_data="bp_withdraw",
-                )
-            ]
-        )
+    rows = keyboard_layouts.danger_row(
+        keyboard_layouts.button("🗑 Отозвать", "bp_withdraw")
+        if proposal.status == PROPOSAL_STATUS_PENDING
+        else None
+    )
     rows.append([InlineKeyboardButton("◀️ К предложениям", callback_data="bp_back")])
     return "\n".join(parts), InlineKeyboardMarkup(rows)
 
@@ -1078,12 +1106,12 @@ def _proposal_withdraw_confirm_content(proposal: BrickProposalSnapshot):
         "кирпичик останется у вас без изменений. Новое предложение можно "
         "будет отправить позже."
     )
-    return text, InlineKeyboardMarkup(
-        [
-            [InlineKeyboardButton("✅ Отозвать", callback_data="bp_withdraw_yes")],
-            [InlineKeyboardButton("◀️ К карточке", callback_data="bp_back")],
-        ]
+    # Необратимое действие — отдельной строкой над безопасным «назад».
+    rows = keyboard_layouts.danger_row(
+        keyboard_layouts.button("✅ Отозвать", "bp_withdraw_yes")
     )
+    rows.append([InlineKeyboardButton("◀️ К карточке", callback_data="bp_back")])
+    return text, InlineKeyboardMarkup(rows)
 
 
 def _proposal_content(
@@ -1776,19 +1804,22 @@ async def handle_proposal_start(
     update: Update, context: ContextTypes.DEFAULT_TYPE
 ) -> None:
     """
-    Вход в предложение кирпичика.
+    Вход в предложение кирпичика из строки списка (`bp_start:<id>`, №28).
 
-    Вызывается общей кнопкой хаба (`bp_start`) и компактной кнопкой строки
-    списка (`bp_start:<id>`, №28). Во втором случае шаг выбора кирпичика
-    пропускается: человек уже выбрал его в хабе, и лишний экран был бы
-    тупиком «выберите то же самое ещё раз».
+    Строка хаба уже выбрала кирпичик, поэтому шаг выбора пропускается:
+    человек сразу видит «куда предложить», а лишний экран «выберите то же
+    самое ещё раз» был бы тупиком.
+
+    U3a №8: общей кнопки `bp_start` без id на хабе больше нет — предложение
+    запускается только из активного кирпичика. Старые сообщения с такой
+    кнопкой ещё могут быть в чате, поэтому вызов без id не считается
+    ошибкой: человека возвращают на хаб с подсказкой выбрать кирпичик.
     """
     state = load_brick_session(ctx.user(update).id)
     if state is None or state.get("phase") != "hub":
         await _stale(update)
         return
     query = ctx.query(update)
-    await query.answer()
     data = query.data or ""
     source_id: int | None = None
     if data.startswith("bp_start:"):
@@ -1796,6 +1827,21 @@ async def handle_proposal_start(
         if source_id is None:
             await _stale(update)
             return
+    if source_id is None:
+        # Устаревшая общая кнопка: мягкий redirect на хаб, без «внутренней
+        # ошибки» и без ложного мастера «выберите кирпичик заново».
+        # U3a: на пустом хабе кнопки «📨» нет — подсказываем создание.
+        session = SessionLocal()
+        try:
+            user = _ensure_user(session, update)
+            has_active = count_personal_bricks(session, user.telegram_user_id) > 0
+        finally:
+            session.close()
+        hint = PROPOSAL_ROW_ONLY_HINT if has_active else PROPOSAL_CREATE_HINT
+        await query.answer(hint, show_alert=True)
+        await _render_phase(update, context, state)
+        return
+    await query.answer()
     session = SessionLocal()
     try:
         user = _ensure_user(session, update)
@@ -1834,14 +1880,12 @@ async def handle_proposal_start(
             ),
         )
         return
-    _proposal_new_state(state, "proposal_select_brick")
-    # R4 №24: откуда пришёл человек — от этого зависит подпись и цель «назад»
-    # на экране области. Из строки хаба шаг выбора кирпичика пропускается.
-    state["proposal_entry"] = "row" if brick is not None else "hub"
-    if brick is not None:
-        state["proposal_source_brick_id"] = brick.id
-        state["proposal_place_page"] = 0
-        state["phase"] = "proposal_scope"
+    _proposal_new_state(state, "proposal_scope")
+    # R4 №24: вход только из строки хаба, шаг выбора кирпичика пропущен —
+    # «назад» на экране области ведёт в хаб.
+    state["proposal_entry"] = "row"
+    state["proposal_source_brick_id"] = brick.id
+    state["proposal_place_page"] = 0
     await _render_phase(update, context, state, drop_input=True)
 
 
@@ -1860,6 +1904,13 @@ async def handle_proposal_mine(
 async def handle_proposal_source(
     update: Update, context: ContextTypes.DEFAULT_TYPE
 ) -> None:
+    """
+    Выбор кирпичика на legacy-экране шага 1 (сохранённые старые сессии).
+
+    U3a №8: из интерфейса этот шаг недостижим, поэтому обработчик остаётся
+    только ради совместимости: сохранённая ранее сессия в фазе
+    `proposal_select_brick` продолжает работать, а не превращается в тупик.
+    """
     state = load_brick_session(ctx.user(update).id)
     if state is None or state.get("phase") != "proposal_select_brick":
         await _stale(update)
@@ -1893,6 +1944,7 @@ async def handle_proposal_source(
         )
         return
     state["proposal_source_brick_id"] = brick.id
+    state["proposal_entry"] = "row"
     state.pop("proposal_scope", None)
     state.pop("proposal_place_id", None)
     state["proposal_place_page"] = 0

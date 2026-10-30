@@ -39,7 +39,7 @@ from brick_types import (
     BRICK_TYPE_TITLES,
     BRICK_TYPE_URL,
 )
-from utils import calendar_view
+from utils import calendar_view, keyboard_layouts
 from utils.parsers import app_today
 from utils.tg_html import escape_html, utf16_len
 
@@ -411,19 +411,20 @@ def day_rows(
     `label` выбирает формат подписи: быстрые даты — «29.10 чт», дни
     сетки месяца — просто число. Callback один и тот же (`aw_calday`),
     поэтому выбор даты на любом уровне сохраняет её без подтверждения.
+
+    U3a №13: нарезка строк — общий шаблон `keyboard_layouts.rows_of`.
+    Последняя строка месяца может быть неполной (например, 2 дня) — это
+    ожидаемо, а не дефект раскладки.
     """
-    rows: list[list[InlineKeyboardButton]] = []
-    for start in range(0, len(days), per_row):
-        rows.append(
-            [
-                InlineKeyboardButton(
-                    label(day),
-                    callback_data=(f"aw_calday:{prefix}:{day.strftime('%Y-%m-%d')}"),
-                )
-                for day in days[start : start + per_row]
-            ]
-        )
-    return rows
+    return keyboard_layouts.rows_of(
+        (
+            keyboard_layouts.button(
+                label(day), f"aw_calday:{prefix}:{day.strftime('%Y-%m-%d')}"
+            )
+            for day in days
+        ),
+        per_row,
+    )
 
 
 def calendar_shortcut_rows(

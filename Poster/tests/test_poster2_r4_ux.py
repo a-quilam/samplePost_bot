@@ -241,9 +241,9 @@ class R4HarnessCase(unittest.TestCase):
     async def walk_to_preview(
         self, h: Harness, source_id: int, place_id: int, user_id: int = OWNER_TG
     ) -> None:
+        # U3a №8: мастер предложения стартует только из строки кирпичика.
         await self.open_hub(h, user_id)
-        await h.callback("bp_start", user_id=user_id)
-        await h.callback(f"bp_source:{source_id}", user_id=user_id)
+        await h.callback(f"bp_start:{source_id}", user_id=user_id)
         await h.callback("bp_target:place", user_id=user_id)
         await h.callback(f"bp_place:{place_id}", user_id=user_id)
 
@@ -260,23 +260,21 @@ class ProposalNavigationTests(R4HarnessCase):
         place_id = self.make_place(h, "Зал крошек")
         source = self.make_personal(h, OWNER_TG, code="крошка_24", title="Крошка")
         await self.open_hub(h)
-        await h.callback("bp_start", user_id=OWNER_TG)
+        # U3a №8: общей кнопки «Предложить кирпичик» нет — вход только из
+        # строки, поэтому шаг 1 мастера — сразу «куда предложить».
+        await h.callback(f"bp_start:{source.id}", user_id=OWNER_TG)
 
         self.assertIn(CRUMB, h.screen_text(), "шаг 1 без крошки раздела")
-        self.assertIn("шаг 1 из 4", h.screen_text())
-        self.assertIn("Выберите кирпичик", h.screen_text())
-
-        await h.callback(f"bp_source:{source.id}", user_id=OWNER_TG)
-        self.assertIn(CRUMB, h.screen_text())
-        self.assertIn("шаг 2 из 4", h.screen_text())
+        self.assertIn("шаг 1 из 3", h.screen_text())
+        self.assertIn("Куда предложить", h.screen_text())
 
         await h.callback("bp_target:place", user_id=OWNER_TG)
         self.assertIn(CRUMB, h.screen_text())
-        self.assertIn("шаг 3 из 4", h.screen_text())
+        self.assertIn("шаг 2 из 3", h.screen_text())
 
         await h.callback(f"bp_place:{place_id}", user_id=OWNER_TG)
         self.assertIn(CRUMB, h.screen_text())
-        self.assertIn("шаг 4 из 4", h.screen_text())
+        self.assertIn("шаг 3 из 3", h.screen_text())
 
     @scenario_test
     async def test_list_and_card_have_crumb_without_step(self, h: Harness) -> None:
@@ -299,24 +297,19 @@ class ProposalNavigationTests(R4HarnessCase):
         place_id = self.make_place(h, "Зал возврата")
         source = self.make_personal(h, OWNER_TG, code="возврат_24")
         await self.walk_to_preview(h, source.id, place_id)
-        self.assertIn("шаг 4 из 4", h.screen_text())
-
-        # Шаг 4 → шаг 3.
-        await h.callback("bp_back", user_id=OWNER_TG)
-        self.assertIn("шаг 3 из 4", h.screen_text())
-        self.assertTrue(_has_button(h, f"bp_place:{place_id}"))
+        self.assertIn("шаг 3 из 3", h.screen_text())
 
         # Шаг 3 → шаг 2.
         await h.callback("bp_back", user_id=OWNER_TG)
-        self.assertIn("шаг 2 из 4", h.screen_text())
-        self.assertTrue(_has_button(h, "bp_target:place"))
+        self.assertIn("шаг 2 из 3", h.screen_text())
+        self.assertTrue(_has_button(h, f"bp_place:{place_id}"))
 
         # Шаг 2 → шаг 1.
         await h.callback("bp_back", user_id=OWNER_TG)
-        self.assertIn("шаг 1 из 4", h.screen_text())
-        self.assertTrue(_has_button(h, f"bp_source:{source.id}"))
+        self.assertIn("шаг 1 из 3", h.screen_text())
+        self.assertTrue(_has_button(h, "bp_target:place"))
 
-        # Шаг 1 → хаб: тупика нет.
+        # Шаг 1 → хаб: тупика нет, повторного выбора кирпичика нет.
         await h.callback("bp_back", user_id=OWNER_TG)
         self.assertIn("Мои кирпичики", h.screen_text())
         self.assertTrue(_has_button(h, "bk_create"))
@@ -330,7 +323,7 @@ class ProposalNavigationTests(R4HarnessCase):
         source = self.make_personal(h, OWNER_TG, code="строкой_24", title="Строкой")
         await self.open_hub(h)
         await h.callback(f"bp_start:{source.id}", user_id=OWNER_TG)
-        self.assertIn("шаг 2 из 4", h.screen_text())
+        self.assertIn("шаг 1 из 3", h.screen_text())
         back_label = _button(h, "bp_back")
         self.assertIn("кирпичикам", back_label.lower())
 
@@ -370,14 +363,12 @@ class ProposalNavigationTests(R4HarnessCase):
         proposal_id = self.make_proposal(h, OWNER_TG, source.id, place_id=place_id)
 
         await self.open_hub(h)
-        await h.callback("bp_start", user_id=OWNER_TG)
+        await h.callback(f"bp_start:{source.id}", user_id=OWNER_TG)
         self.assertTrue(_has_button(h, "bp_back"), "шаг 1 без «назад»")
-        await h.callback(f"bp_source:{source.id}", user_id=OWNER_TG)
-        self.assertTrue(_has_button(h, "bp_back"), "шаг 2 без «назад»")
         await h.callback("bp_target:place", user_id=OWNER_TG)
-        self.assertTrue(_has_button(h, "bp_back"), "шаг 3 без «назад»")
+        self.assertTrue(_has_button(h, "bp_back"), "шаг 2 без «назад»")
         await h.callback(f"bp_place:{place_id}", user_id=OWNER_TG)
-        self.assertTrue(_has_button(h, "bp_back"), "шаг 4 без «назад»")
+        self.assertTrue(_has_button(h, "bp_back"), "шаг 3 без «назад»")
         await h.callback("bp_send", user_id=OWNER_TG)
         self.assertTrue(_has_button(h, "bp_back"), "карточка без «назад»")
         await h.callback("bp_back", user_id=OWNER_TG)
@@ -677,12 +668,12 @@ class ChatAsApplicationTests(R4HarnessCase):
         source = self.make_personal(h, OWNER_TG, code="навигация_4", title="Навигация")
         await self.open_hub(h)
         sends_after_hub = len(_screen_sends(h))
-        for _ in range(5):
-            await h.callback("bp_start", user_id=OWNER_TG)
-            await h.callback(f"bp_source:{source.id}", user_id=OWNER_TG)
+        # U3a №8: в мастере на один экран меньше, поэтому кругов больше —
+        # проверка «экран перерисовывается, а не копится» остаётся строгой.
+        for _ in range(6):
+            await h.callback(f"bp_start:{source.id}", user_id=OWNER_TG)
             await h.callback("bp_target:place", user_id=OWNER_TG)
             await h.callback(f"bp_place:{place_id}", user_id=OWNER_TG)
-            await h.callback("bp_back", user_id=OWNER_TG)
             await h.callback("bp_back", user_id=OWNER_TG)
             await h.callback("bp_back", user_id=OWNER_TG)
             await h.callback("bp_back", user_id=OWNER_TG)
