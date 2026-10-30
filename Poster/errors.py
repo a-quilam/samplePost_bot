@@ -12,7 +12,13 @@ bot.py при импорте настраивает логирование и з
 - пользователю отправляется сообщение «внутренняя ошибка», но не чаще
   одного раза в ERROR_NOTICE_INTERVAL_SECONDS на чат (защита от спама);
 - «message is not modified» — штатное следствие повторного нажатия кнопки:
-  оно не ломает сценарий и не должно пугать пользователя.
+  оно не ломает сценарий и не должно пугать пользователя;
+- ОЖИДАЕМЫЕ доменные ошибки (валидация названия, недоступный шаблон,
+  кирпичик, черновик анонса) — не сбой бота, а рассинхронизация экрана с
+  данными (устаревшая кнопка, восстановленная после рестарта фаза с
+  потерянным ключом). Для них вместо «внутренней ошибки» показывается
+  понятное сообщение и открывается ближайший живой родительский экран
+  (главное меню) — общий fallback на все разделы.
 """
 
 import logging
@@ -31,8 +37,107 @@ ERROR_NOTICE_TEXT = (
     "⚠️ Произошла внутренняя ошибка. Попробуйте повторить действие чуть позже."
 )
 
+# Понятный текст для ожидаемых доменных ошибок: экран рассинхронизирован,
+# данные не потеряны, пользователь возвращается в меню и пробует снова.
+DOMAIN_NOTICE_TEXT = (
+    "Экран устарел: данные изменились или не сохранились. "
+    "Открываю главное меню — попробуйте ещё раз."
+)
+
 # chat_id -> время последнего уведомления (time.monotonic)
 _last_error_notice: dict[int, float] = {}
+
+# Кэш классов ожидаемых доменных ошибок (собирается лениво: импорт доменных
+# модулей не должен удорожать импорт errors.py и не создаёт циклов).
+_expected_error_types: tuple[type[BaseException], ...] | None = None
+
+
+def expected_domain_errors() -> tuple[type[BaseException], ...]:
+    """
+    Классы доменных ошибок, которые не являются сбоем бота.
+
+    Это ошибки валидации и прав из хранилищ предметной области: они
+    возникают, когда экран опирается на устаревшие/неполные данные
+    (например, восстановленная фаза без нужного ключа). Показывать на них
+    «внутренняя ошибка» нельзя — пользователю нужен понятный fallback.
+
+    Список собирается один раз; недоступность любого модуля (урезанная
+    сборка, тестовый стенд) просто сужает классификацию, а не ломает
+    обработчик ошибок.
+    """
+    global _expected_error_types
+    if _expected_error_types is not None:
+        return _expected_error_types
+
+    types: list[type[BaseException]] = []
+
+    def add(*candidates: object) -> None:
+        for candidate in candidates:
+            if isinstance(candidate, type) and issubclass(candidate, BaseException):
+                types.append(candidate)
+
+    try:  # места: названия
+        from place_store import PlaceNameError
+
+        add(PlaceNameError)
+    except Exception:  # noqa: BLE001 — классификация не должна падать
+        logger.debug("Классификация ошибок мест недоступна", exc_info=True)
+    try:  # шаблоны
+        from template_compiler import TemplateCompileError
+        from template_store import (
+            TemplateActorError,
+            TemplateError,
+            TemplatePermissionError,
+        )
+        from template_types import TemplateValidationError
+
+        add(
+            TemplateError,
+            TemplatePermissionError,
+            TemplateActorError,
+            TemplateValidationError,
+            TemplateCompileError,
+        )
+    except Exception:  # noqa: BLE001
+        logger.debug("Классификация ошибок шаблонов недоступна", exc_info=True)
+    try:  # кирпичики и предложения
+        from brick_proposal_store import (
+            ProposalActorError,
+            ProposalError,
+            ProposalPermissionError,
+        )
+        from brick_store import BrickActorError, BrickError, BrickPermissionError
+
+        add(
+            BrickError,
+            BrickPermissionError,
+            BrickActorError,
+            ProposalError,
+            ProposalPermissionError,
+            ProposalActorError,
+        )
+    except Exception:  # noqa: BLE001
+        logger.debug("Классификация ошибок кирпичиков недоступна", exc_info=True)
+    try:  # черновики анонсов
+        from handlers.announcement_wizard import (
+            AnnouncementActorError,
+            AnnouncementError,
+        )
+
+        add(AnnouncementError, AnnouncementActorError)
+    except Exception:  # noqa: BLE001
+        logger.debug("Классификация ошибок анонсов недоступна", exc_info=True)
+
+    _expected_error_types = tuple(types)
+    return _expected_error_types
+
+
+def is_expected_domain_error(error: BaseException | None) -> bool:
+    """True — ошибка ожидаемая (данные/права), а не сбой кода."""
+    if error is None:
+        return False
+    types = expected_domain_errors()
+    return bool(types) and isinstance(error, types)
 
 
 async def _send_error_notice(message, chat_id: int) -> bool:
@@ -54,6 +159,58 @@ async def _send_error_notice(message, chat_id: int) -> bool:
         return False
 
 
+async def _answer_query(update: Update, text: str) -> bool:
+    """Отвечает на callback (снимает «спиннер»), ошибки Telegram не критичны."""
+    query = update.callback_query
+    if query is None:
+        return False
+    try:
+        await query.answer(text, show_alert=True)
+        return True
+    except Exception:  # noqa: BLE001 — повторный answer не должен ломать fallback
+        logger.info("Не удалось ответить на callback в fallback: %s", text)
+        return False
+
+
+async def _render_fallback_parent(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> bool:
+    """
+    Открывает ближайший живой родительский экран — главное меню.
+
+    Меню перерисовывает существующий экран и сбрасывает незавершённые
+    «сломанные» сессии разделов, поэтому следующая навигация снова рабочая.
+    Любой сбой самого fallback'а не должен порождать вторую ошибку.
+    """
+    try:
+        from handlers.main_menu import render_main_menu
+
+        await render_main_menu(update, context)
+        return True
+    except Exception:  # noqa: BLE001 — fallback best-effort
+        logger.exception("Не удалось открыть fallback-экран после доменной ошибки")
+        return False
+
+
+async def _handle_expected_error(
+    update: object, context: ContextTypes.DEFAULT_TYPE, error: BaseException
+) -> bool:
+    """
+    Понятный fallback вместо «внутренней ошибки» для доменных ошибок.
+
+    Возвращает True, если ошибка обработана здесь (штатное уведомление
+    пользователю уже показано и не нужно).
+    """
+    if not is_expected_domain_error(error):
+        return False
+    logger.warning("Ожидаемая доменная ошибка при обработке экрана: %s", error)
+    if not isinstance(update, Update):
+        return True
+    await _answer_query(update, DOMAIN_NOTICE_TEXT)
+    await _render_fallback_parent(update, context)
+    return True
+
+
 async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
     """
     Обработчик исключений PTB: лог + ответ пользователю.
@@ -71,6 +228,9 @@ async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> N
         and "message is not modified" in str(error).lower()
     ):
         logger.info("Кнопка нажата повторно (message is not modified) — пропуск")
+        return
+
+    if error is not None and await _handle_expected_error(update, context, error):
         return
 
     logger.error("Exception while handling an update:", exc_info=error)

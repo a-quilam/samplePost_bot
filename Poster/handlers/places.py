@@ -615,10 +615,36 @@ def _names_content(
     return text, InlineKeyboardMarkup(keyboard)
 
 
+def _pending_alias_text(state: dict) -> str | None:
+    """
+    Название из предупреждения о конфликте — только если оно валидно.
+
+    Фаза `alias_warning` восстанавливается из БД после рестарта, а ключ
+    `pending_alias` мог не сохраниться (старый снимок WIP, частичная запись).
+    `find_name_conflicts` на пустой строке бросает `PlaceNameError`, поэтому
+    проверка стоит до него: `None` — названия нет, предупреждать не о чем.
+    """
+    raw = state.get("pending_alias")
+    if not isinstance(raw, str):
+        return None
+    try:
+        display = clean_display_name(raw)
+        normalize_place_name(display)
+    except PlaceNameError:
+        return None
+    return display
+
+
+def _drop_alias_warning_keys(state: dict) -> None:
+    """Сбрасывает ключи предупреждения о конфликте названия."""
+    for key in ("pending_alias", "alias_origin"):
+        state.pop(key, None)
+
+
 def _alias_warning_content(
     session: Session, details: PlaceDetails, state: dict
 ) -> tuple[str, InlineKeyboardMarkup]:
-    pending = str(state.get("pending_alias") or "")
+    pending = _pending_alias_text(state) or ""
     conflicts = find_name_conflicts(session, pending, exclude_place_id=details.place_id)
     other = conflicts[0] if conflicts else None
     if other is None:
@@ -937,11 +963,40 @@ async def _render_phase(
                 if isinstance(place_id, int)
                 else None
             )
+            pending_alias = _pending_alias_text(state)
             if details is None:
                 state.clear()
                 state.update(_new_hub())
                 notice = notice or "Место не существует или было удалено."
                 text, keyboard = _hub_content()
+            elif pending_alias is None:
+                # U3b: после рестарта/старого снимка WIP название могло не
+                # сохраниться. Предупреждать не о чем — возвращаемся на
+                # ближайший живой родительский экран вместо исключения.
+                _drop_alias_warning_keys(state)
+                state["phase"] = "confirm"
+                state.setdefault("return_phase", "all_places")
+                state.setdefault("return_page", 0)
+                notice = notice or (
+                    "Название для добавления не сохранилось. Выберите его "
+                    "заново в карточке места."
+                )
+                text = _card_text(details, state)
+                keyboard = InlineKeyboardMarkup(
+                    [
+                        [
+                            InlineKeyboardButton(
+                                "🔤 Выбрать альтернативное название",
+                                callback_data="pl_names:0",
+                            )
+                        ],
+                        [
+                            InlineKeyboardButton(
+                                "◀️ Вернуться к списку", callback_data="pl_back"
+                            )
+                        ],
+                    ]
+                )
             else:
                 text, keyboard = _alias_warning_content(session, details, state)
         elif phase == "confirmed":

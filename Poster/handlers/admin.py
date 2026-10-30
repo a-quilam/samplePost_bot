@@ -2687,7 +2687,13 @@ async def handle_places_page(
 async def handle_open_place(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     query = ctx.query(update)
     state = load_admin_session(ctx.user(update).id)
-    if state is None or state.get("phase") != "places":
+    if state is None or state.get("phase") not in {
+        "places",
+        # U3b: «◀️ К месту» из списка конфликтов кодов — живой возврат.
+        # Раньше эта кнопка получала «Кнопка устарела»: фаза `conflicts_list`
+        # не входила в allow-list, хотя экран предлагает такой переход.
+        "conflicts_list",
+    }:
         await _stale(update)
         return
     data = query.data or ""
@@ -5276,10 +5282,16 @@ def _conflict_callback_id(data: str) -> int | None:
 async def handle_conflicts_open(
     update: Update, context: ContextTypes.DEFAULT_TYPE
 ) -> None:
-    """Кнопка «Конфликты кодов» в карточке места."""
+    """Кнопка «Конфликты кодов» в карточке места и «◀️ К конфликтам» в задаче."""
     query = ctx.query(update)
     state = load_admin_session(ctx.user(update).id)
-    if state is None or state.get("phase") != "place":
+    if state is None or state.get("phase") not in {
+        "place",
+        # U3b: «◀️ К конфликтам» из карточки задачи конфликта — живой возврат.
+        # Без этой фазы кнопка отвечала «Кнопка устарела», хотя список задач
+        # остаётся на месте и доступ не менялся.
+        "conflict_card",
+    }:
         await _stale(update)
         return
     place_id = _conflict_callback_id(str(query.data or ""))

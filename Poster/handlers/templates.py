@@ -1885,6 +1885,9 @@ async def handle_hub(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         PHASE_SECTION_ERROR,
         PHASE_BRICK_LIST,
         PHASE_HELP,
+        # U3b: экран ввода названия нового шаблона — живой экран создания;
+        # «К списку» ведёт в список шаблонов, а не отвечает «устарело».
+        PHASE_AWAIT_NAME,
     }:
         await query.answer(STALE_TEXT, show_alert=True)
         return
@@ -2429,6 +2432,21 @@ async def handle_back(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         await query.answer(STALE_TEXT, show_alert=True)
         return
     phase = state.get("phase")
+    if phase == PHASE_AWAIT_NAME:
+        # U3b: экран ввода названия нового шаблона — живой экран создания.
+        # «Назад» не должен отвечать «Кнопка устарела»: возвращаемся в
+        # список шаблонов (как «Отмена»), создание не подтверждено.
+        await query.answer()
+        page = _page_value(state.get("page"))
+        state.clear()
+        state.update(_new_hub(page))
+        await _render_phase(
+            update,
+            context,
+            state,
+            notice="Создание шаблона не подтверждено. Данные не сохранены.",
+        )
+        return
     if phase not in {PHASE_BRICK_LIST, PHASE_HELP}:
         await query.answer(STALE_TEXT, show_alert=True)
         return
