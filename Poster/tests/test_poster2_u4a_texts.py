@@ -544,7 +544,7 @@ class DeadKeyScreenTests(_TempCatalog):
         self.assertIn("ИСКАТЬ-КАТАЛОГ", [label for label, _ in h.screen_buttons()])
 
     @scenario_test
-    async def test_canonical_line_and_apply_button_come_from_catalog(
+    async def test_canonical_line_and_menu_button_come_from_catalog(
         self, h: Harness
     ) -> None:
         from tests.test_stage27b_announcement_ui import (
@@ -555,10 +555,12 @@ class DeadKeyScreenTests(_TempCatalog):
             _start_to_template,
         )
 
+        # H3: кнопки «Применить изменения» больше нет, поэтому проверяем
+        # тот же смысл на живой кнопке экрана правки — «🏠 В главное меню».
         self.write_catalog(
             **{
                 "places.card.canonical": "КАНОН: {name}",
-                "buttons.finished.apply": "ПРИМЕНИТЬ-КАТАЛОГ",
+                "buttons.finished.main_menu": "МЕНЮ-КАТАЛОГ",
             }
         )
         self.assertTrue(ui_texts.reload_texts(self.path).ok)
@@ -584,9 +586,10 @@ class DeadKeyScreenTests(_TempCatalog):
         await h.text("Значение")
         await h.callback(_callback(h, "aw_photo_none"))
         await h.callback(_callback(h, "aw_edit"))
-        self.assertIn("ПРИМЕНИТЬ-КАТАЛОГ", [label for label, _ in h.screen_buttons()])
+        self.assertIn("МЕНЮ-КАТАЛОГ", [label for label, _ in h.screen_buttons()])
 
-        # Экран правки фотографий — тот же ключ заголовка, что шаг фото.
+        # Экран правки фотографий — тот же ключ заголовка, что шаг фото, и
+        # та же подпись выхода в меню (одна кнопка — одна подпись).
         photos = [
             data
             for _label, data in h.screen_buttons()
@@ -596,6 +599,7 @@ class DeadKeyScreenTests(_TempCatalog):
         self.assertTrue(
             h.screen_text().startswith(ui_texts.DEFAULTS["wizard.photos.title"])
         )
+        self.assertIn("МЕНЮ-КАТАЛОГ", [label for label, _ in h.screen_buttons()])
 
     @scenario_test
     async def test_photos_edit_screen_title_follows_catalog(self, h: Harness) -> None:

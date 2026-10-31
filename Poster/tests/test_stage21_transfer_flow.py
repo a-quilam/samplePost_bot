@@ -886,12 +886,16 @@ class SafetyAndAuditFlowTests(unittest.TestCase):
         await h.text("/admin")
         await h.callback(screen_callback(h, "adm_place:"))
         text = h.screen_text()
-        self.assertIn("Показаны первые 1500 символов", text)
-        self.assertIn("Полное значение сохранено", text)
+        # H3 (требование D): общий компонент «Текущее значение» — предел
+        # только физический (лимит Telegram), и о нём сказано явно.
+        self.assertIn("Показано начало значения", text)
+        self.assertIn("полное значение сохранено", text)
+        self.assertIn("4096", text)
+        self.assertNotIn("<code>", text)
 
         await h.callback(screen_callback(h, "adm_edit_place:"))
         text = h.screen_text()
-        self.assertIn("Показаны первые 1500 символов", text)
+        self.assertIn("Показано начало значения", text)
 
         session = h.session_factory()
         try:

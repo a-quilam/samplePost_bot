@@ -85,6 +85,7 @@ from announcement_store import (
 from announcement_wizard import (
     WizardStage,
     answer_payload_to_raw,
+    snapshot_tokens_by_text,
 )
 from brick_store import BrickError, list_available_bricks
 from brick_types import (
@@ -93,6 +94,7 @@ from brick_types import (
     BRICK_SCOPE_SYSTEM,
     BRICK_TYPE_CHOICE,
     BRICK_TYPE_DATE,
+    BRICK_TYPE_NUMBER,
     BRICK_TYPE_TIME,
     BRICK_TYPE_TITLES,
     BrickValueResult,
@@ -111,13 +113,14 @@ from template_compiler import (
     announcement_text_limit,
     check_announcement_length,
 )
+from template_parser import BrickNode, FormatNode, LinkNode
 from template_store import (
     TemplateError,
     get_standard_template,
     list_personal_templates,
 )
 from template_types import TEMPLATE_CONTENT, TEMPLATE_EXTENDED_CONTENT
-from utils import calendar_view, keyboard_layouts, screen, ui_humor
+from utils import calendar_view, current_value, keyboard_layouts, screen, ui_humor
 from utils import tg_context as ctx
 from utils.parsers import app_today
 from utils.place_labels import place_title
@@ -2149,6 +2152,18 @@ async def _save_question_value(
     resumed = await _resume_after_shortening(update, context, updated)
     if resumed is not None:
         return resumed
+    if updated.publication_sent:
+        # H3 (требование B): правка готового анонса применяется сразу.
+        # Отдельной кнопки «Применить изменения» нет, поэтому после
+        # сохранения значения новая версия заменяет прошлую, а автор
+        # видит экран завершения с обновлённым постом выше.
+        applied = await _apply_immediately(update, context, updated)
+        if applied is None:
+            # Причину уже показал `_finish_and_deliver` (лимит, ошибка
+            # сборки, отправка): перекрывать её нельзя.
+            return AW_PREVIEW
+        await _answer(update, f"Значение «{_short(field.title, 50)}» сохранено.")
+        return AW_PREVIEW
     return await _advance_question(
         update,
         context,
@@ -2750,46 +2765,54 @@ async def _render_extras(
     ui = _ui(context)
     _set_details(ui, details)
     _clear_active(ui)
+    await _ensure_service_screen_below(update, context, details.delivered_message_ids)
     await _sync_live(update, context, details)
     items = _extras_with_definitions(details, _user_id(update))
-    lines = [
-        "➕ Дополнительные кирпичики",
-        "",
-        "Дополнительные поля влияют только на этот анонс. Исходный шаблон "
-        "не меняется.",
-        "Если анонс уже отправлен, изменения применяются по кнопке "
-        "«Применить изменения»: новая версия заменит прошлую.",
-    ]
-    if items:
-        for number, (extra, definition) in enumerate(items, start=1):
-            field = _extra_field_state(details, extra, definition)
-            value = _field_value_text(field)
-            if field.status == FIELD_STATUS_MISSING:
-                value_text = "значение не задано"
-            elif field.status == FIELD_STATUS_SKIPPED:
-                value_text = tr("wizard.status.skipped")
-            else:
-                value_text = value or "пусто"
-            lines.append(
-                f"{number}. {_h(extra.title)}; "
-                f"значение: {_h(_short(value_text, 120))}"
-            )
-    else:
-        lines.extend(["", "Дополнительных кирпичиков пока нет."])
+    # H3: заголовок, вступление и пустое состояние — из каталога текстов.
+    header = tr("wizard.extras.title")
+    intro = tr("wizard.extras.intro")
+
+    def build(limits: list[int]) -> str:
+        lines = [header, "", intro]
+        if items:
+            for number, (extra, definition) in enumerate(items, start=1):
+                field = _extra_field_state(details, extra, definition)
+                value = _full_value_text(field)
+                if field.status == FIELD_STATUS_MISSING:
+                    value_text = "значение не задано"
+                elif field.status == FIELD_STATUS_SKIPPED:
+                    value_text = tr("wizard.status.skipped")
+                else:
+                    value_text = value or "пусто"
+                # H3 (требование D): строка списка — тоже показ значения.
+                # Раньше огромное значение обрывалось «…» без пометки; теперь
+                # у него бюджет на весь экран и честная пометка о сокращении.
+                shown = current_value.clip_html(
+                    escape_html(value_text), limit=limits[number - 1]
+                )
+                lines.append(f"{number}. {_h(extra.title)}; значение: {shown}")
+        else:
+            lines.extend(["", tr("wizard.extras.empty")])
+        return "\n".join(lines)
+
+    screen_text = current_value.fit_screen(build, blocks=max(len(items), 1))
 
     rows: list[list[InlineKeyboardButton]] = []
     for number, (extra, _definition) in enumerate(items, start=1):
         rows.append(
             [
                 InlineKeyboardButton(
-                    _short(f"✏️ {number}. {extra.title}", 60),
+                    _short(
+                        tr("buttons.extras.edit", number=number, title=extra.title),
+                        60,
+                    ),
                     callback_data=(
                         f"aw_exedit:{details.draft_id}:"
                         f"{details.revision}:{extra.brick_id}"
                     ),
                 ),
                 InlineKeyboardButton(
-                    _short(f"🗑 {number}", 8),
+                    _short(tr("buttons.extras.delete", number=number), 8),
                     callback_data=(
                         f"aw_exdel:{details.draft_id}:"
                         f"{details.revision}:{extra.extra_id}"
@@ -2797,54 +2820,18 @@ async def _render_extras(
                 ),
             ]
         )
-    rows.append(
-        [
-            InlineKeyboardButton(
-                "➕ Дополнительный кирпичик",
-                callback_data=(f"aw_exadd:{details.draft_id}:{details.revision}"),
-            )
-        ]
-    )
-    if details.publication_sent:
+    if _available_extra_bricks(details, _user_id(update)):
         rows.append(
             [
                 InlineKeyboardButton(
-                    tr("buttons.finished.apply"),
-                    callback_data=(f"aw_apply:{details.draft_id}:{details.revision}"),
-                )
-            ]
-        )
-        # U2b: возврат из правки ведёт на экран завершения, а не в конструктор.
-        rows.append(
-            [
-                InlineKeyboardButton(
-                    tr("buttons.nav.back"),
-                    callback_data=(f"aw_panel:{details.draft_id}:{details.revision}"),
-                )
-            ]
-        )
-    else:
-        rows.append(
-            [
-                InlineKeyboardButton(
-                    "👁 Обзор анонса",
-                    callback_data=(f"aw_preview:{details.draft_id}:{details.revision}"),
-                )
-            ]
-        )
-    if not details.publication_sent:
-        rows.append(
-            [
-                InlineKeyboardButton(
-                    "🧱 К вопросам",
-                    callback_data=(f"aw_qmanage:{details.draft_id}:{details.revision}"),
+                    tr("buttons.extras.add"),
+                    callback_data=(f"aw_exadd:{details.draft_id}:{details.revision}"),
                 )
             ]
         )
     rows.append([InlineKeyboardButton("🏠 Главное меню", callback_data="main_menu")])
-    text = "\n".join(lines)
-    body = f"{notice}\n\n{text}" if notice else text
-    await _render(update, context, body, InlineKeyboardMarkup(rows))
+    text = f"{notice}\n\n{screen_text}" if notice else screen_text
+    await _render(update, context, text, InlineKeyboardMarkup(rows))
     return AW_EXTRAS
 
 
@@ -2864,6 +2851,16 @@ async def _enter_extras(
 
 
 def _available_extra_bricks(details, telegram_user_id: int):
+    """
+    Кирпичики, которые ещё можно добавить как дополнительное поле анонса.
+
+    H3 (требование A): первыми идут brick-токены расширенного текста,
+    которых нет в каноническом `content` и которые ещё не выбраны, — в том
+    порядке, в каком они появятся в анонсе. Домен не разрешает добавить
+    кирпичик, уже входящий в снимок шаблона, поэтому дальше список
+    дополняется остальными доступными определениями (прежнее поведение
+    H2): расширение достраивается из канонического текста.
+    """
     with SessionLocal() as session:
         available = list_available_bricks(
             session,
@@ -2871,9 +2868,59 @@ def _available_extra_bricks(details, telegram_user_id: int):
             place_id=details.place_id,
         )
     snapshot = details.template_snapshot
+    chosen = {extra.brick_id for extra in details.extras}
+    available_by_id = {brick.id: brick for brick in available}
+    ordered: list[int] = []
+    if snapshot is not None:
+        for brick_id in _extra_candidate_ids(snapshot):
+            if brick_id in available_by_id and brick_id not in chosen:
+                ordered.append(brick_id)
     used = set(snapshot.brick_ids) if snapshot is not None else set()
-    used.update(extra.brick_id for extra in details.extras)
-    return [brick for brick in available if brick.id not in used]
+    used.update(chosen)
+    for brick in available:
+        if brick.id in used or brick.id in ordered:
+            continue
+        ordered.append(brick.id)
+    return [available_by_id[brick_id] for brick_id in ordered]
+
+
+def _extra_candidate_ids(snapshot) -> list[int]:
+    """
+    brick_id расширенного текста снимка, отсутствующие в каноническом.
+
+    Разбор идёт тем же `snapshot_tokens_by_text`, что и рендер: коды уже
+    разрешены снимком и заново не подменяются.
+    """
+    try:
+        texts = snapshot_tokens_by_text(snapshot)
+    except Exception:  # noqa: BLE001 — битый снимок покажет экран ошибки рендера
+        return []
+    content_ids = set(_brick_ids_in(texts.get(TEMPLATE_CONTENT, ())))
+    extended_ids = _brick_ids_in(texts.get(TEMPLATE_EXTENDED_CONTENT, ()))
+    ordered: list[int] = []
+    for brick_id in extended_ids:
+        if brick_id in content_ids or brick_id in ordered:
+            continue
+        ordered.append(brick_id)
+    return ordered
+
+
+def _brick_ids_in(nodes) -> list[int]:
+    """Плоский список brick_id токенов (включая вложенные в форматирование)."""
+    found: list[int] = []
+    for node in nodes:
+        if isinstance(node, BrickNode):
+            if node.brick_id is not None:
+                found.append(int(node.brick_id))
+        elif isinstance(node, FormatNode):
+            found.extend(_brick_ids_in(node.children))
+        elif isinstance(node, LinkNode):
+            found.extend(_brick_ids_in(node.label))
+            if isinstance(node.url, BrickNode) and node.url.brick_id is not None:
+                found.append(int(node.url.brick_id))
+        elif hasattr(node, "children"):
+            found.extend(_brick_ids_in(getattr(node, "children")))
+    return found
 
 
 async def _render_available_bricks(
@@ -2952,7 +2999,65 @@ async def _render_available_bricks(
     return AW_EXTRAS
 
 
-def _extra_value_text(extra, field: AnnouncementFieldState) -> str:
+EXTRA_DESCRIPTION_LIMIT = 800
+
+
+def _full_value_text(field: AnnouncementFieldState) -> str:
+    """
+    Полный видимый текст значения — без обрезки `format_value`.
+
+    `field_value_text`/`format_value` (U1b) режут показ до
+    `DISPLAY_TEXT_LIMIT` c молчаливым «…». Для строки списка дополнительных
+    полей это недопустимо (H3, требование D): длинное значение должно
+    получить бюджет экрана и явную пометку, что полное сохранено.
+    """
+    raw = field.raw_value
+    if isinstance(raw, (list, tuple)):
+        text = ", ".join(str(item) for item in raw)
+    else:
+        text = "" if raw is None else str(raw)
+    suffix = field.rules.get("suffix")
+    if (
+        field.value_type == BRICK_TYPE_NUMBER
+        and text
+        and isinstance(suffix, str)
+        and suffix
+    ):
+        return f"{text} {suffix}"
+    return text
+
+
+def _stored_value_with_note(field: AnnouncementFieldState) -> str:
+    """
+    Сохранённое значение для экрана и честная пометка о сокращении.
+
+    `stored_value_html` (U1b-fix) режет длинное значение до
+    `DISPLAY_TEXT_LIMIT` и обрывает его многоточием: так экран вопроса
+    укладывается в лимит Telegram. Но молчаливая потеря запрещена (H3,
+    требование D), поэтому рядом встаёт та же пометка общего компонента
+    «Текущее значение», что и на экранах шаблонов и мест: показано начало,
+    полное значение сохранено.
+    """
+    shown = wizard_questions.stored_value_html(field)
+    source = field.raw_html
+    if not (isinstance(source, str) and source.strip()):
+        raw = field.raw_value
+        if isinstance(raw, (list, tuple)):
+            raw = ", ".join(str(item) for item in raw)
+        source = _h("" if raw is None else raw)
+    full_visible = wizard_questions.visible_html_text(source)
+    shown_visible = wizard_questions.visible_html_text(shown)
+    if len(full_visible) > len(shown_visible):
+        return f"{shown}\n{current_value.TRUNCATED_NOTE}"
+    return shown
+
+
+def _extra_value_text(
+    extra,
+    field: AnnouncementFieldState,
+    *,
+    description_limit: int = EXTRA_DESCRIPTION_LIMIT,
+) -> str:
     lines = [
         # Заголовок кирпичика задаёт человеком и уходит в parse_mode=HTML
         # экран — экранируем (аудит: неэкранированный HTML ломал экран).
@@ -2962,14 +3067,18 @@ def _extra_value_text(extra, field: AnnouncementFieldState) -> str:
     description = wizard_questions.description_html(field.description)
     if description:
         # №27: описание — моноширинно и уже экранировано внутри `<code>`.
-        lines.append(f"📝 {description}")
+        # Описание тоже вводит человек: у огромного значения есть бюджет
+        # экрана и явная пометка вместо молчаливого обрыва.
+        lines.append(
+            f"📝 {current_value.clip_html(description, limit=description_limit)}"
+        )
     lines.append(_type_hint(field))
     if field.status == FIELD_STATUS_VALID:
         # U1b: сохранённое значение — с форматированием (см. stored_value_html).
         lines.append(
             tr_safe(
                 "wizard.question.current_value",
-                value=wizard_questions.stored_value_html(field),
+                value=_stored_value_with_note(field),
             )
         )
     elif field.status == FIELD_STATUS_SKIPPED:
@@ -2996,11 +3105,19 @@ async def _render_extra_value_prompt(
     ui["active_brick_id"] = field.brick_id
     ui["active_source"] = "extra"
     ui["editing"] = editing
-    lines = [_extra_value_text(extra, field)]
-    if error:
-        lines.append(f"⚠️ {_h(error)}")
-    if notice:
-        lines.append(_h(notice))
+
+    def build(limits: list[int]) -> str:
+        lines = [_extra_value_text(extra, field, description_limit=limits[0])]
+        if error:
+            lines.append(f"⚠️ {_h(error)}")
+        if notice:
+            lines.append(_h(notice))
+        return "\n\n".join(lines)
+
+    # Бюджет значения считается от обвязки экрана (заголовок кирпичика задаёт
+    # человек, описание и подсказка типа тоже занимают место): иначе
+    # сохранённое значение на 5000 символов выносило вопрос за лимит Telegram.
+    text = current_value.fit_screen(build, blocks=1)
     rows: list[list[InlineKeyboardButton]] = []
     if field.value_type == BRICK_TYPE_CHOICE:
         selected = set(_selected_choices(field))
@@ -3056,7 +3173,7 @@ async def _render_extra_value_prompt(
             )
         ]
     )
-    await _render(update, context, "\n\n".join(lines), InlineKeyboardMarkup(rows))
+    await _render(update, context, text, InlineKeyboardMarkup(rows))
     return AW_EXTRAS
 
 
@@ -3128,6 +3245,12 @@ async def _save_extra_value(
     resumed = await _resume_after_shortening(update, context, updated)
     if resumed is not None:
         return resumed
+    if updated.publication_sent:
+        # H3: правка доставленного анонса применяется сразу — кнопки
+        # «Применить изменения» больше нет.
+        await _apply_immediately(update, context, updated)
+        updated = _reload_details(update, updated)
+        notice = notice or "Значение сохранено, анонс обновлён в чате."
     return await _render_extras(update, context, updated, notice=notice)
 
 
@@ -3339,17 +3462,9 @@ def _preview_keyboard(
                 )
             ]
         )
-    if ready and details.publication_sent:
-        # В обзоре доставленного анонса единственное действие отправки —
-        # применение правок: новая версия заменит прошлую.
-        rows.append(
-            [
-                InlineKeyboardButton(
-                    tr("buttons.finished.apply"),
-                    callback_data=f"aw_apply:{draft_id}:{revision}",
-                )
-            ]
-        )
+    # H3: у доставленного анонса здесь нет кнопки «Применить изменения» —
+    # правки применяются сразу, а сам обзор недоступен из интерфейса
+    # (он остаётся внутренним маршрутом для проверки текста).
     if ready and not details.publication_sent:
         # Обычный путь доставляет анонс автоматически после последнего ответа.
         # Эта кнопка нужна только черновикам, остановленным на обзоре
@@ -3409,9 +3524,13 @@ async def _render_preview(
     if details.publication_sent and not preview_only:
         pending = _has_pending_changes(update, details)
         if saved:
+            # H3: кнопки «Применить изменения» больше нет. Здесь статус уже
+            # `sent`, а содержимое отличается от доставленного — значит,
+            # немедленное применение сорвалось. Обещать несуществующую
+            # кнопку нельзя: отправляем автора к повторной правке (она
+            # применится сразу) или к экрану повтора отправки.
             notice = (
-                "✅ Черновик сохранён. Есть неприменённые изменения: "
-                "нажмите «Применить изменения»."
+                APPLY_FAILED_TEXT
                 if pending
                 else "✅ Черновик сохранён. Отправленный анонс не менялся."
             )
@@ -3629,6 +3748,43 @@ def _length_problem_pending(context: ContextTypes.DEFAULT_TYPE, details) -> bool
     return int(flag.get("draft_id") or 0) == int(details.draft_id)
 
 
+def _reload_details(update: Update, details):
+    """Перечитывает черновик после действий, менявших revision."""
+    try:
+        return _session_details(_user_id(update), details.draft_id)
+    except AnnouncementError:
+        return details
+
+
+async def _apply_immediately(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+    details,
+):
+    """
+    H3 (требование B): сохранить правку готового анонса сразу.
+
+    Кнопки «Применить изменения» больше нет, поэтому каждое сохранённое
+    значение заменяет доставленную версию без промежуточного действия.
+    Возвращает свежие детали, если новая версия действительно ушла, и
+    `None`, когда применять нечего (анонс ещё не доставлен) или применить
+    не удалось — тогда `_finish_and_deliver` уже показал причину, и
+    вызывающий слой не должен её перекрывать.
+    """
+    if not details.publication_sent or _edit_blocked(details):
+        return None
+    await _finish_and_deliver(update, context, details)
+    try:
+        fresh = _session_details(_user_id(update), details.draft_id)
+    except AnnouncementError:
+        return None
+    if not fresh.publication_sent:
+        return None
+    if _has_pending_changes(update, fresh):
+        return None
+    return fresh
+
+
 async def _resume_after_shortening(
     update: Update,
     context: ContextTypes.DEFAULT_TYPE,
@@ -3786,8 +3942,8 @@ async def _render_photos(
         lines.extend(
             [
                 "",
-                "Изменения применятся по кнопке «Применить изменения»: "
-                "анонс соберётся заново и заменит прошлую версию в чате.",
+                "Изменения применяются сразу: после каждого действия анонс "
+                "собирается заново и заменяет прошлую версию в чате.",
             ]
         )
     if _edit_blocked(details):
@@ -3825,7 +3981,9 @@ async def _render_photos(
                     )
                 ]
             )
-    if total and not _edit_blocked(details):
+    if total and not _edit_blocked(details) and not details.publication_sent:
+        # H3: у доставленного анонса вложения уже стоят в чате выше —
+        # отдельный предпросмотр дублировал бы готовый пост.
         rows.append(
             [
                 InlineKeyboardButton(
@@ -3872,20 +4030,22 @@ async def _render_photos(
         rows.append(
             [
                 InlineKeyboardButton(
-                    tr("buttons.finished.apply"),
-                    callback_data=(f"aw_apply:{details.draft_id}:{details.revision}"),
+                    tr("buttons.finished.main_menu"), callback_data="main_menu"
                 )
             ]
         )
-    rows.append(
-        [
-            InlineKeyboardButton(
-                "◀️ К обзору",
-                callback_data=(f"aw_preview:{details.draft_id}:{details.revision}"),
-            )
-        ]
-    )
-    rows.append([InlineKeyboardButton("🏠 Главное меню", callback_data="main_menu")])
+    else:
+        rows.append(
+            [
+                InlineKeyboardButton(
+                    "◀️ К обзору",
+                    callback_data=(f"aw_preview:{details.draft_id}:{details.revision}"),
+                )
+            ]
+        )
+        rows.append(
+            [InlineKeyboardButton("🏠 Главное меню", callback_data="main_menu")]
+        )
     await _render(update, context, "\n".join(lines), InlineKeyboardMarkup(rows))
     return AW_PREVIEW
 
@@ -4373,6 +4533,18 @@ async def _promote_live_post(
 DELIVERED_TEXT = tr("wizard.finished.text")
 DELIVERED_PENDING_TEXT = tr("wizard.finished.pending")
 
+# H3: кнопка «Применить изменения» удалена, правка доставленного анонса
+# применяется сразу. Если после сохранения содержимое всё ещё отличается от
+# доставленного (статус `sent` и pending), немедленное применение сорвалось:
+# честно говорим об этом и не отсылаем к несуществующей кнопке. Повтор
+# доступен двумя путями — ещё одна правка (она применится сразу) или экран
+# повтора отправки, который появляется после неудачной попытки.
+APPLY_FAILED_TEXT = (
+    "⚠️ Черновик сохранён, но изменения в чат не ушли: применить их сразу "
+    "не удалось. Внесите изменение заново или используйте "
+    "«Повторить отправку», когда она появится."
+)
+
 # U2b: компактный экран редактирования готового анонса — только категории.
 DELIVERED_EDIT_TEXT = tr("wizard.finished.edit_text")
 
@@ -4396,49 +4568,50 @@ def _delivered_keyboard(details) -> InlineKeyboardMarkup:
     )
 
 
-def _delivered_edit_keyboard(details) -> InlineKeyboardMarkup:
+def _delivered_edit_keyboard(
+    details, *, extras_available: bool = True
+) -> InlineKeyboardMarkup:
     """
-    Категории правки готового анонса без дублей и служебных текстов.
+    Компактный экран правки доставленного анонса (H3, требование B).
 
-    «Применить изменения» — единственное действие, отправляющее новую
-    версию; «Назад» возвращает на экран завершения, а не в конструктор.
+    Изменения применяются сразу, поэтому кнопки «Применить изменения» здесь
+    нет. «Назад» тоже нет: экран живёт в состоянии AW_PREVIEW, и возврат на
+    экран завершения делается кнопкой «🏠 В главное меню» или повторной
+    правкой. «Обзор» и «Показать вложения» дублировали бы готовый пост.
     """
     draft_id = details.draft_id
     revision = details.revision
-    return InlineKeyboardMarkup(
+    rows: list[list[InlineKeyboardButton]] = [
         [
+            InlineKeyboardButton(
+                tr("buttons.finished.data"),
+                callback_data=f"aw_qmanage:{draft_id}:{revision}",
+            ),
+            InlineKeyboardButton(
+                tr("buttons.finished.photos", count=len(details.photos)),
+                callback_data=f"aw_photos:{draft_id}:{revision}:0",
+            ),
+        ]
+    ]
+    # «🧱 Дополнительные поля» показывается только когда добавлять есть что:
+    # пустой список доступных кирпичиков — не действие, а тупик.
+    if extras_available:
+        rows.append(
             [
                 InlineKeyboardButton(
-                    tr("buttons.finished.data"),
-                    callback_data=f"aw_qmanage:{draft_id}:{revision}",
-                )
-            ],
-            [
-                InlineKeyboardButton(
-                    tr("buttons.finished.photos", count=len(details.photos)),
-                    callback_data=f"aw_photos:{draft_id}:{revision}:0",
-                )
-            ],
-            [
-                InlineKeyboardButton(
-                    tr("buttons.finished.extras", count=len(details.extras)),
+                    tr("buttons.finished.extras_edit"),
                     callback_data=f"aw_extras:{draft_id}:{revision}",
                 )
-            ],
-            [
-                InlineKeyboardButton(
-                    tr("buttons.finished.apply"),
-                    callback_data=f"aw_apply:{draft_id}:{revision}",
-                )
-            ],
-            [
-                InlineKeyboardButton(
-                    tr("buttons.nav.back"),
-                    callback_data=f"aw_panel:{draft_id}:{revision}",
-                )
-            ],
+            ]
+        )
+    rows.append(
+        [
+            InlineKeyboardButton(
+                tr("buttons.finished.main_menu"), callback_data="main_menu"
+            )
         ]
     )
+    return InlineKeyboardMarkup(rows)
 
 
 async def _ensure_service_screen_below(
@@ -4537,11 +4710,15 @@ async def _render_delivered_edit(
     text = tr("wizard.finished.edit_text")
     if notice:
         text = f"{notice}\n\n{text}"
+    await _ensure_service_screen_below(update, context, details.delivered_message_ids)
     await _render(
         update,
         context,
         text,
-        _delivered_edit_keyboard(details),
+        _delivered_edit_keyboard(
+            details,
+            extras_available=bool(_available_extra_bricks(details, _user_id(update))),
+        ),
     )
     return AW_PREVIEW
 
@@ -5005,9 +5182,9 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> in
             ),
         )
     if details.publication_sent:
-        # Уже доставленный анонс: партия НЕ завершает его автоматически
-        # (новую версию отправляет «Применить изменения»). Поэтому ждать
-        # весь альбом незачем: каждый снимок сохраняется сразу, а ввод
+        # Уже доставленный анонс: H3 применяет каждый снимок сразу (новой
+        # версии не ждёт вся партия). Поэтому ждать весь альбом незачем:
+        # каждый снимок сохраняется и применяется по одному, а ввод
         # удаляется после подтверждённой записи (S4 §5.3).
         return await _add_photo_to_delivered(update, context, details, photo, message)
     user_data = ctx.data(context)
@@ -5062,13 +5239,12 @@ async def _add_photo_to_delivered(
     message,
 ) -> int:
     """
-    Фото к уже доставленному анонсу: сохранить сразу, без автофинала.
+    Фото к уже доставленному анонсу: сохранить и сразу применить.
 
-    Готовый пост не пересобирается на каждую партию — новую версию
-    отправляет явное «Применить изменения» (S4 §5.3). Поэтому ожидание
-    целого альбома здесь не нужно: каждый `file_id` сохраняется с CAS,
-    11-е фото отклоняется, а сообщение пользователя удаляется только после
-    подтверждённой записи.
+    H3: кнопки «Применить изменения» нет, поэтому подтверждённый снимок
+    сразу заменяет доставленную версию. Ожидание целого альбома здесь не
+    нужно: каждый `file_id` сохраняется с CAS, 11-е фото отклоняется, а
+    сообщение пользователя удаляется только после подтверждённой записи.
     """
     user_data = ctx.data(context)
     try:
@@ -5089,12 +5265,22 @@ async def _add_photo_to_delivered(
             notice=wizard_photos.rejected_photo_notice(exc),
         )
     _set_details(_ui(context), batch.details)
+    fresh = None
+    if batch.changed:
+        # H3: правка доставленного анонса применяется сразу — новая версия
+        # заменяет прошлую без кнопки «Применить изменения».
+        fresh = await _apply_immediately(update, context, batch.details)
+        if fresh is None:
+            # Доставка не подтверждена: `_finish_and_deliver` уже показал
+            # причину, а ввод остаётся в чате — автор видит свой снимок.
+            return AW_PREVIEW
     if batch.changed or batch.duplicate:
+        # Ввод удаляется только после подтверждённой доставки.
         await screen.drop_user_input(update, context)
     return await _render_photos(
         update,
         context,
-        batch.details,
+        fresh or batch.details,
         notice=wizard_photos.batch_notice(batch),
     )
 
@@ -5142,8 +5328,9 @@ async def _close_photo_batch(
     # (см. ветку `publication_sent`).
     _set_details(ui, details)
     if details.publication_sent:
-        # Фото добавлены к уже доставленному анонсу: новая версия — только по
-        # «Применить изменения», иначе каждая партия создавала бы замену.
+        # Фото добавлены к уже доставленному анонсу: H3 применяет снимки по
+        # одному сразу (см. `_add_photo_to_delivered`), поэтому закрытие
+        # партии ничего не пересобирает — только убирает ввод.
         await screen.cleanup_messages(context.bot, ctx.chat(update).id, inputs)
         return await _render_photos(
             update,
@@ -5847,12 +6034,14 @@ async def handle_extras_callback(
             await _answer(update, str(exc), alert=True)
             return await _resume_current(update, context, notice=str(exc))
         await _answer(update, "Дополнительный кирпичик удалён.")
-        return await _render_extras(
-            update,
-            context,
-            updated,
-            notice=f"Удалён кирпичик «{_short(extra.title, 50)}».",
-        )
+        notice = f"Удалён кирпичик «{_short(extra.title, 50)}»."
+        if updated.publication_sent:
+            # H3 (требование A): удаление применяется сразу, как и ввод.
+            # Последнее удалённое поле возвращает анонс к каноническому
+            # тексту без отдельного подтверждения.
+            await _apply_immediately(update, context, updated)
+            updated = _reload_details(update, updated)
+        return await _render_extras(update, context, updated, notice=notice)
     if action == "aw_exedit" and len(parts) == 4:
         if not all(item.isdigit() for item in parts[1:]):
             return await _stale(update, context)
@@ -5951,8 +6140,10 @@ async def handle_preview_callback(
                 context,
                 details,
                 notice=(
-                    "✅ Черновик сохранён. Есть неприменённые изменения: "
-                    "нажмите «Применить изменения»."
+                    # H3: кнопки «Применить изменения» больше нет — см.
+                    # `_render_preview`: правка применяется сразу, а
+                    # оставшиеся изменения означают сорвавшееся применение.
+                    APPLY_FAILED_TEXT
                     if pending
                     else "✅ Черновик сохранён. Отправленный анонс не менялся."
                 ),
@@ -6168,6 +6359,12 @@ async def handle_preview_callback(
             return await _render_photos(
                 update, context, details, notice=f"Фото не удалено: {_short(exc, 300)}"
             )
+        if updated.publication_sent:
+            # H3: удаление фото у доставленного анонса тоже применяется
+            # сразу — иначе без кнопки «Применить изменения» правка
+            # осталась бы только в черновике.
+            fresh = await _apply_immediately(update, context, updated)
+            updated = fresh or _reload_details(update, updated)
         _set_details(_ui(context), updated)
         await _answer(update, "Фото удалено.")
         await screen.cleanup_preview(context, ctx.chat(update).id, ctx.data(context))
@@ -6209,6 +6406,11 @@ async def handle_preview_callback(
             return await _render_photos(
                 update, context, details, notice=f"Фото не удалены: {_short(exc, 300)}"
             )
+        if updated.publication_sent:
+            # H3: очистка коллекции применяется сразу, как и удаление одного
+            # снимка: иначе готовый пост навсегда остался бы с фото.
+            fresh = await _apply_immediately(update, context, updated)
+            updated = fresh or _reload_details(update, updated)
         _set_details(_ui(context), updated)
         await _answer(update, "Все фотографии удалены.")
         await screen.cleanup_preview(context, ctx.chat(update).id, ctx.data(context))

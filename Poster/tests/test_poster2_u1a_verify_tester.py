@@ -789,9 +789,12 @@ class PlaceCityUiTests(unittest.TestCase):
     @scenario_test
     async def test_city_can_be_edited_from_place_card(self, h):
         """
-        Требование 1 (дефект 2): город виден в карточке места, редактируется
-        из «Управление → Площадки → карточка → Редактировать», и действия
-        `city_set`/`city_delete` реально меняют данные через UI.
+        Требование 1 (дефект 2) в редакции H3-C: город виден в карточке места
+        и меняется из «Управление → Площадки → карточка → Редактировать».
+
+        Удаление города из интерфейса убрано владельцем: у названия и города
+        корзины нет, поэтому сбросить город в NULL через UI нельзя. Проверка
+        `city_set` сохранена полностью — она и была сутью требования.
         """
         with h.session_factory() as session:
             user = get_or_create_user(session, DEFAULT_USER_ID, username="u1a-edit")
@@ -822,10 +825,20 @@ class PlaceCityUiTests(unittest.TestCase):
                 callbacks,
                 f"нет кнопки изменения города: callback'и = {callbacks}",
             )
-            self.assertIn(
+            self.assertNotIn(
                 f"adm_edit_city_delete:{place_id}",
                 callbacks,
-                f"нет кнопки удаления города: callback'и = {callbacks}",
+                "у города не должно быть удаления (H3-C)",
+            )
+            city_buttons = [
+                (label, data)
+                for label, data in h.screen_buttons()
+                if data and "city" in data
+            ]
+            self.assertEqual(
+                [label for label, _data in city_buttons],
+                ["🏙 Изменить город"],
+                f"у города должна быть только правка: {city_buttons}",
             )
 
             # `city_set` через UI: выбор действия → ввод → подтверждение.
@@ -839,16 +852,14 @@ class PlaceCityUiTests(unittest.TestCase):
             await h.callback("adm_edit_confirm")
             self.assertIn("✅ Город места обновлён.", h.screen_text())
 
-            # `city_delete` через UI: удаление из меню правки.
+            # Удаления города в меню нет: старый callback недоступен.
             menu = h.screen_text()
             self.assertIn("Тверь", menu, "меню правки не обновило город")
             await h.callback(f"adm_edit_city_delete:{place_id}")
-            self.assertIn("Подтвердите удаление города", h.screen_text())
-            await h.callback("adm_edit_confirm")
-            self.assertIn("✅ Город места удалён.", h.screen_text())
-            self.assertIn("Город: Не указан", h.screen_text())
+            self.assertNotIn("Подтвердите удаление города", h.screen_text())
+            self.assertIn("Тверь", h.screen_text())
 
-        self.assertEqual(_city(), None, "city_delete не сбросил город в NULL")
+        self.assertEqual(_city(), "Тверь", "город не должен сбрасываться через UI")
         with h.session_factory() as session:
             from models import PlaceEditLog
 
@@ -860,7 +871,7 @@ class PlaceCityUiTests(unittest.TestCase):
                     .order_by(PlaceEditLog.id)
                 ).all()
             ]
-        self.assertEqual(actions, ["city_set", "city_delete"], actions)
+        self.assertEqual(actions, ["city_set"], actions)
 
     @scenario_test
     async def test_official_place_picker_shows_city_in_list_and_search(self, h):

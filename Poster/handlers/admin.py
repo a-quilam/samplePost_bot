@@ -140,7 +140,6 @@ from place_edit_store import (
     clean_address_text,
     delete_place_address,
     delete_place_alias,
-    delete_place_city,
     delete_place_url,
     list_place_aliases,
     normalize_place_url,
@@ -162,7 +161,7 @@ from place_store import (
 )
 from template_state import clear_template_session
 from user_store import get_or_create_user
-from utils import screen
+from utils import current_value, screen
 from utils import tg_context as ctx
 from utils.ui_texts import tr
 
@@ -195,7 +194,6 @@ PHASES = {
     "edit_address_delete_confirm",
     "edit_city_input",
     "edit_city_confirm",
-    "edit_city_delete_confirm",
     "edit_url_input",
     "edit_url_confirm",
     "edit_url_delete_confirm",
@@ -237,9 +235,14 @@ def _short(value: object, limit: int = 100) -> str:
     return text[: max(limit - 1, 1)] + "…"
 
 
-# Экран Telegram ограничен 4096 символами. Длинный адрес хранится полностью;
-# на экране показываем начало с ЯВНОЙ пометкой, а не молчаливое «…».
-DISPLAY_VALUE_LIMIT = 1500
+# Экран Telegram ограничен 4096 символами. Длинное значение хранится
+# полностью; на экране показывается начало с ЯВНОЙ пометкой, а не молчаливое
+# «…» (H3: единый компонент «Текущее значение»).
+#
+# Бюджет значения здесь не константа: он считается от фактической обвязки
+# экрана общим механизмом `utils.current_value` (`value_limits`/`fit_screen`),
+# чтобы два длинных поля (адрес и ссылка, «текущее» и «новое») делили остаток
+# лимита и не выносили сообщение за 4096.
 
 # U1b: личные уведомления не разворачивают превью ссылок (PTB 22.8:
 # `LinkPreviewOptions` вместо устаревшего `disable_web_page_preview`).
@@ -249,21 +252,62 @@ DISPLAY_VALUE_LIMIT = 1500
 NOTIFICATION_LINK_PREVIEW = LinkPreviewOptions(is_disabled=True)
 
 
-def _long_value(value: object, limit: int = DISPLAY_VALUE_LIMIT) -> str:
-    """HTML-безопасный фрагмент длинного значения без потери данных в БД."""
-    text = str(value)
-    if len(text) <= limit:
-        return _h(text)
-    return (
-        _h(text[:limit])
-        + f"\n… Показаны первые {limit} символов. Полное значение сохранено."
+def _long_value(value: object, *, limit: int | None = None) -> str:
+    """
+    HTML-безопасное значение без косметической обрезки (H3, требование D).
+
+    Раньше адрес резался до 1500 символов «для красоты», и автор не видел
+    полный текст. Теперь ограничение только физическое — предел сообщения
+    Telegram — и о нём сказано явно; в базе значение всегда полное.
+    """
+    return current_value.clipped_text(
+        value, limit=current_value.VALUE_LIMIT if limit is None else limit
     )
 
 
-def _safe_link(url: str) -> str:
-    if url.lower().startswith(("http://", "https://")):
+# Ссылка остаётся кликабельной, пока сама укладывается в бюджет экрана.
+# Реальные ссылки короче сотни символов; экстремально длинный URL (например,
+# подписанная ссылка на несколько тысяч символов) раньше попадал в экран
+# ДВАЖДЫ — в href и в подписи — и раздувал сообщение далеко за лимит
+# Telegram, так что экран вообще не отправлялся.
+LINK_HREF_LIMIT = 1200
+
+
+def _place_value_limits(build, blocks: int) -> tuple[list[int], str]:
+    """
+    Бюджет значений места, посчитанный от фактической обвязки экрана.
+
+    H3 (требование D): единый механизм `utils.current_value`. Экран сначала
+    собирается с пустыми значениями (`limit <= 0`) и измеряется, затем остаток
+    лимита Telegram делится между длинными полями. Так два «полных» значения
+    по отдельности корректны, но вместе не выносят сообщение за 4096, и у
+    каждого сокращённого есть честная пометка.
+
+    Возвращает лимиты значений и уже собранный текст экрана.
+    """
+    count = max(int(blocks), 1)
+    limits = current_value.value_limits(build([0] * count), count)
+    return limits, current_value.clip_screen(build(limits))
+
+
+def _safe_link(url: str | None, *, limit: int | None = None) -> str:
+    """
+    Ссылка — только http(s); иначе показываем как обычный текст.
+
+    H3 (требование D): ограничение физическое, а не косметическое. Пока URL
+    короткий, он кликабелен; если не влезает в экран, показывается начало с
+    явной пометкой, что полное значение сохранено (utils/current_value), а не
+    обрезанный href — битая ссылка хуже, чем честный текст.
+
+    Отсутствующая ссылка показывается текстом «Не указана».
+    """
+    if not url:
+        return "Не указана"
+    if url.lower().startswith(("http://", "https://")) and len(url) <= LINK_HREF_LIMIT:
         return f'<a href="{_h(url)}">{_h(url)}</a>'
-    return _h(url)
+    return current_value.clipped_text(
+        url, limit=current_value.VALUE_LIMIT if limit is None else limit
+    )
 
 
 def _button_name(prefix: str, text: str) -> str:
@@ -1009,31 +1053,27 @@ def _place_text(
     viewer_telegram_user_id: int | None = None,
 ) -> str:
     active = get_active_place_admin(session, details.place_id)
-    text = f"🛡 Место\n\n📍 {_h(details.canonical_name)}"
+    head = f"🛡 Место\n\n📍 {_h(details.canonical_name)}"
     alternatives = [item for item in details.names if not item.is_canonical]
     if alternatives:
-        text += "\n\nАльтернативные названия:\n" + "\n".join(
+        head += "\n\nАльтернативные названия:\n" + "\n".join(
             f"— {_h(_short(item.name, 120))}" for item in alternatives[:8]
         )
         if len(alternatives) > 8:
-            text += f"\nЕщё {len(alternatives) - 8}."
-    if details.address:
-        text += f"\n\nАдрес: {_long_value(details.address)}"
-    # Poster 2.0 U1a: город показывается и у старых мест (NULL → «—»).
-    text += f"\n\nГород: {_h(details.city) if details.city else '—'}"
-    if details.url:
-        text += f"\n\nСсылка: {_safe_link(details.url)}"
+            head += f"\nЕщё {len(alternatives) - 8}."
+
+    tail = ""
     open_conflicts = count_open_conflicts_for_place(session, details.place_id)
     if open_conflicts:
-        text += (
+        tail += (
             "\n\n⚔️ Активные задачи конфликтов кодов: "
             f"{open_conflicts}. Их нужно разрешить до правки привязок: "
             "кирпичик места или глобальный кирпичик."
         )
     if active is None:
-        text += "\n\nАдминистратор: не назначен."
+        tail += "\n\nАдминистратор: не назначен."
     else:
-        text += (
+        tail += (
             "\n\nАдминистратор: "
             f"{_h(_user_label(active.user, with_id=True))}\n"
             f"Назначен: {_h(_date_label(active.assigned_at))}"
@@ -1041,16 +1081,34 @@ def _place_text(
     if active is not None and viewer_telegram_user_id == active.user.telegram_user_id:
         pending = get_pending_transfer_for_place(session, details.place_id)
         if pending is not None:
-            text += (
+            tail += (
                 "\n\n📨 Передача администрации: "
                 f"{_h(transfer_status_label(pending.status))} до "
                 f"{_h(_transfer_expiry_label(pending))}."
             )
-    text += (
+    tail += (
         "\n\nРедактирование названия, альтернативных названий, города, адреса "
         "и ссылки доступно из этого кабинета."
     )
-    return text
+
+    # H3 (требование D): на одном экране два длинных значения (адрес и
+    # ссылка), поэтому у них общий бюджет от фактической обвязки экрана —
+    # иначе два «полных» текста не влезают в 4096.
+    blocks = int(bool(details.address)) + int(bool(details.url))
+
+    def build(limits: list[int]) -> str:
+        text = head
+        position = 0
+        if details.address:
+            text += f"\n\nАдрес: {_long_value(details.address, limit=limits[position])}"
+            position += 1
+        # Poster 2.0 U1a: город показывается и у старых мест (NULL → «—»).
+        text += f"\n\nГород: {_h(details.city) if details.city else '—'}"
+        if details.url:
+            text += f"\n\nСсылка: {_safe_link(details.url, limit=limits[position])}"
+        return text + tail
+
+    return _place_value_limits(build, max(blocks, 1))[1]
 
 
 def _place_keyboard(
@@ -1734,17 +1792,41 @@ ALIAS_PAGE_SIZE = 6
 def _edit_menu_content(
     session: Session, details: PlaceDetails
 ) -> tuple[str, InlineKeyboardMarkup]:
-    """Меню редактирования данных места (Stage 20B)."""
+    """
+    Меню редактирования данных места (Stage 20B, H3 требование C).
+
+    Правка и удаление одного поля стоят парой «✏️ … | 🗑», чтобы действие и
+    его опасная альтернатива были рядом, но не сливались с подтверждением.
+    У названия и города удаления нет: каноническое название — якорь места, а
+    город задаётся только изменением (сброс города из UI убран, H3-C).
+    """
     aliases = list_place_aliases(session, details.place_id)
-    text = (
-        "✏️ Редактирование места\n\n"
-        f"📍 Название: {_h(details.canonical_name)}\n"
-        f"Альтернативные названия: {len(aliases)}\n"
-        f"Город: {_h(details.city) if details.city else 'Не указан'}\n"
-        f"Адрес: {_long_value(details.address) if details.address else 'Не указан'}\n"
-        f"Ссылка: {_safe_link(details.url) if details.url else 'Не указана'}\n\n"
-        "Выберите, что изменить:"
-    )
+    # H3 (требование D): на одном экране два длинных значения, поэтому у них
+    # общий бюджет (utils/current_value), а не фиксированные константы.
+    blocks = int(bool(details.address)) + int(bool(details.url))
+
+    def build(limits: list[int]) -> str:
+        position = 0
+        if details.address:
+            address_text = _long_value(details.address, limit=limits[position])
+            position += 1
+        else:
+            address_text = "Не указан"
+        if details.url:
+            url_text = _safe_link(details.url, limit=limits[position])
+        else:
+            url_text = "Не указана"
+        return (
+            "✏️ Редактирование места\n\n"
+            f"📍 Название: {_h(details.canonical_name)}\n"
+            f"Альтернативные названия: {len(aliases)}\n"
+            f"Город: {_h(details.city) if details.city else 'Не указан'}\n"
+            f"Адрес: {address_text}\n"
+            f"Ссылка: {url_text}\n\n"
+            "Выберите, что изменить:"
+        )
+
+    text = _place_value_limits(build, max(blocks, 1))[1]
     rows: list[list[InlineKeyboardButton]] = [
         [
             InlineKeyboardButton(
@@ -1760,49 +1842,36 @@ def _edit_menu_content(
         ],
         [
             InlineKeyboardButton(
-                "🏠 Изменить адрес",
-                callback_data=f"adm_edit_address:{details.place_id}",
-            )
-        ],
-        [
-            InlineKeyboardButton(
                 "🏙 Изменить город",
                 callback_data=f"adm_edit_city:{details.place_id}",
             )
         ],
         [
             InlineKeyboardButton(
-                "🔗 Изменить ссылку",
+                "✏️ Адрес",
+                callback_data=f"adm_edit_address:{details.place_id}",
+            )
+        ],
+        [
+            InlineKeyboardButton(
+                "✏️ Ссылка",
                 callback_data=f"adm_edit_url:{details.place_id}",
             )
         ],
     ]
-    if details.city:
-        rows.append(
-            [
-                InlineKeyboardButton(
-                    "🗑 Удалить город",
-                    callback_data=f"adm_edit_city_delete:{details.place_id}",
-                )
-            ]
-        )
     if details.address:
-        rows.append(
-            [
-                InlineKeyboardButton(
-                    "🗑 Удалить адрес",
-                    callback_data=f"adm_edit_address_delete:{details.place_id}",
-                )
-            ]
+        # Корзина рядом с правкой того же поля, но отдельной кнопкой:
+        # удаление всё равно требует подтверждения.
+        rows[3].append(
+            InlineKeyboardButton(
+                "🗑", callback_data=f"adm_edit_address_delete:{details.place_id}"
+            )
         )
     if details.url:
-        rows.append(
-            [
-                InlineKeyboardButton(
-                    "🗑 Удалить ссылку",
-                    callback_data=f"adm_edit_url_delete:{details.place_id}",
-                )
-            ]
+        rows[4].append(
+            InlineKeyboardButton(
+                "🗑", callback_data=f"adm_edit_url_delete:{details.place_id}"
+            )
         )
     rows.append([InlineKeyboardButton("◀️ Назад", callback_data="adm_cancel")])
     return text, InlineKeyboardMarkup(rows)
@@ -1838,14 +1907,24 @@ def _edit_input_content(
             "Введите новое название для этого варианта."
         )
     elif phase == "edit_address_input":
-        current = _long_value(details.address) if details.address else "Не указан"
-        text = (
-            "🏠 Изменение адреса\n\n"
-            f"📍 {_h(details.canonical_name)}\n"
-            f"Текущий адрес: {current}\n\n"
-            "Введите адрес места обычным текстом. Длина не ограничена "
-            "искусственно: адрес сохраняется полностью."
-        )
+
+        def build(limits: list[int]) -> str:
+            current = (
+                _long_value(details.address, limit=limits[0])
+                if details.address
+                else "Не указан"
+            )
+            return (
+                "🏠 Изменение адреса\n\n"
+                f"📍 {_h(details.canonical_name)}\n"
+                f"Текущий адрес: {current}\n\n"
+                "Введите адрес места обычным текстом. Длина не ограничена "
+                "искусственно: адрес сохраняется полностью."
+            )
+
+        # H3 (требование D): даже один длинный адрес ограничен бюджетом
+        # экрана, иначе ввод не отправится вовсе.
+        text = _place_value_limits(build, 1)[1]
     elif phase == "edit_city_input":
         current = _h(details.city) if details.city else "Не указан"
         text = (
@@ -1857,14 +1936,18 @@ def _edit_input_content(
             "поиском."
         )
     elif phase == "edit_url_input":
-        current = details.url if details.url else "Не указана"
-        text = (
-            "🔗 Изменение ссылки\n\n"
-            f"📍 {_h(details.canonical_name)}\n"
-            f"Текущая ссылка: {_safe_link(current)}\n\n"
-            "Введите ссылку на страницу места (например, example.com или "
-            "https://t.me/poster)."
-        )
+
+        def build(limits: list[int]) -> str:
+            return (
+                "🔗 Изменение ссылки\n\n"
+                f"📍 {_h(details.canonical_name)}\n"
+                f"Текущая ссылка: "
+                f"{_safe_link(details.url, limit=limits[0]) if details.url else 'Не указана'}\n\n"
+                "Введите ссылку на страницу места (например, example.com или "
+                "https://t.me/poster)."
+            )
+
+        text = _place_value_limits(build, 1)[1]
     else:
         text = "✏️ Редактирование места\n\nВведите новое значение."
     return text, InlineKeyboardMarkup(
@@ -1882,31 +1965,29 @@ def _edit_confirm_content(
     if phase == "edit_address_delete_confirm":
         if not details.address:
             return None
-        text = (
-            "🗑 Подтвердите удаление адреса\n\n"
-            f"📍 {_h(details.canonical_name)}\n\n"
-            f"Текущий адрес: {_long_value(details.address)}\n\n"
-            "Адрес будет удалён из карточки места. Само место сохранится."
-        )
-    elif phase == "edit_city_delete_confirm":
-        if not details.city:
-            return None
-        text = (
-            "🗑 Подтвердите удаление города\n\n"
-            f"📍 {_h(details.canonical_name)}\n\n"
-            f"Текущий город: {_h(details.city)}\n\n"
-            "Город будет удалён из карточки места. Само место и его шаблон "
-            "сохранятся; заполнить город заново можно в меню редактирования."
-        )
+
+        def build(limits: list[int]) -> str:
+            return (
+                "🗑 Подтвердите удаление адреса\n\n"
+                f"📍 {_h(details.canonical_name)}\n\n"
+                f"Текущий адрес: {_long_value(details.address, limit=limits[0])}\n\n"
+                "Адрес будет удалён из карточки места. Само место сохранится."
+            )
+
+        text = _place_value_limits(build, 1)[1]
     elif phase == "edit_url_delete_confirm":
         if not details.url:
             return None
-        text = (
-            "🗑 Подтвердите удаление ссылки\n\n"
-            f"📍 {_h(details.canonical_name)}\n\n"
-            f"Текущая ссылка: {_safe_link(details.url)}\n\n"
-            "Ссылка будет удалена из карточки места. Само место сохранится."
-        )
+
+        def build(limits: list[int]) -> str:
+            return (
+                "🗑 Подтвердите удаление ссылки\n\n"
+                f"📍 {_h(details.canonical_name)}\n\n"
+                f"Текущая ссылка: {_safe_link(details.url, limit=limits[0])}\n\n"
+                "Ссылка будет удалена из карточки места. Само место сохранится."
+            )
+
+        text = _place_value_limits(build, 1)[1]
     elif phase == "edit_alias_delete_confirm":
         target_name = _h(str(state.get("edit_target_name") or ""))
         text = (
@@ -1952,16 +2033,25 @@ def _edit_confirm_content(
                 "Название будет доступно для поиска вместе с каноническим."
             )
         elif phase == "edit_address_confirm":
-            current = _long_value(details.address) if details.address else "Не указан"
-            text = (
-                f"{warning_block}"
-                "🏠 Подтвердите изменение адреса\n\n"
-                f"📍 {_h(details.canonical_name)}\n\n"
-                f"Текущий адрес: {current}\n"
-                f"Новый адрес: {_long_value(value)}\n\n"
-                "Адрес будет виден в карточке места полностью; длинное "
-                "значение на экране помечается как фрагмент."
-            )
+
+            def build(limits: list[int]) -> str:
+                current = (
+                    _long_value(details.address, limit=limits[0])
+                    if details.address
+                    else "Не указан"
+                )
+                return (
+                    f"{warning_block}"
+                    "🏠 Подтвердите изменение адреса\n\n"
+                    f"📍 {_h(details.canonical_name)}\n\n"
+                    f"Текущий адрес: {current}\n"
+                    f"Новый адрес: {_long_value(value, limit=limits[1])}\n\n"
+                    "Адрес будет виден в карточке места полностью; длинное "
+                    "значение на экране помечается как фрагмент."
+                )
+
+            # Два значения на одном экране делят остаток лимита Telegram.
+            text = _place_value_limits(build, 2)[1]
         elif phase == "edit_city_confirm":
             current = _h(details.city) if details.city else "Не указан"
             text = (
@@ -1975,14 +2065,18 @@ def _edit_confirm_content(
             )
         elif phase == "edit_url_confirm":
             current = details.url if details.url else "Не указана"
-            text = (
-                f"{warning_block}"
-                "🔗 Подтвердите изменение ссылки\n\n"
-                f"📍 {_h(details.canonical_name)}\n\n"
-                f"Текущая ссылка: {_safe_link(current)}\n"
-                f"Новая ссылка: {_safe_link(value)}\n\n"
-                "Ссылка будет видна в карточке места."
-            )
+
+            def build(limits: list[int]) -> str:
+                return (
+                    f"{warning_block}"
+                    "🔗 Подтвердите изменение ссылки\n\n"
+                    f"📍 {_h(details.canonical_name)}\n\n"
+                    f"Текущая ссылка: {_safe_link(current, limit=limits[0])}\n"
+                    f"Новая ссылка: {_safe_link(value, limit=limits[1])}\n\n"
+                    "Ссылка будет видна в карточке места."
+                )
+
+            text = _place_value_limits(build, 2)[1]
         else:
             return None
     return text, InlineKeyboardMarkup(
@@ -2251,7 +2345,6 @@ async def _render_phase(
             "edit_address_confirm",
             "edit_address_delete_confirm",
             "edit_city_confirm",
-            "edit_city_delete_confirm",
             "edit_url_confirm",
             "edit_url_delete_confirm",
         }:
@@ -3045,7 +3138,6 @@ EDIT_CANCEL_TO_MENU_PHASES = frozenset(
         "edit_address_delete_confirm",
         "edit_city_input",
         "edit_city_confirm",
-        "edit_city_delete_confirm",
         "edit_url_input",
         "edit_url_confirm",
         "edit_url_delete_confirm",
@@ -3226,39 +3318,6 @@ async def handle_edit_address_delete(
     await _render_phase(update, context, state)
 
 
-async def handle_edit_city_delete(
-    update: Update, context: ContextTypes.DEFAULT_TYPE
-) -> None:
-    """«🗑 Удалить город»: подтверждение сброса города в NULL."""
-    result = await _edit_transition(update, context, allowed_phase="edit_menu")
-    if result is None:
-        return
-    query, state = result
-    await query.answer()
-    place_id = state.get("place_id")
-    session = SessionLocal()
-    try:
-        details = (
-            get_place_details(session, int(place_id))
-            if isinstance(place_id, int)
-            else None
-        )
-    finally:
-        session.close()
-    if details is None or details.city is None:
-        # Город уже удалён или его не было: предлагаем обновить меню.
-        await query.answer(
-            "Город уже отсутствует: обновите меню редактирования.",
-            show_alert=True,
-        )
-        return
-    # Фиксируем текущий город: подтверждение сработает только если
-    # другой администратор не изменил его в процессе.
-    state["edit_expected"] = details.city
-    state["phase"] = "edit_city_delete_confirm"
-    await _render_phase(update, context, state)
-
-
 async def handle_edit_url_delete(
     update: Update, context: ContextTypes.DEFAULT_TYPE
 ) -> None:
@@ -3421,16 +3480,15 @@ def _validate_edit_input(
         cleaned = clean_address_text(raw)
         if cleaned == details.address:
             raise PlaceEditValueError(
-                "Адрес уже такой. Если адрес нужно удалить, используйте кнопку "
-                "«Удалить адрес» в меню редактирования."
+                "Адрес уже такой. Если адрес нужно удалить, используйте "
+                "кнопку «🗑» рядом с адресом в меню редактирования."
             )
         return "edit_address_confirm", cleaned, ""
     if phase == "edit_city_input":
         cleaned_city = validate_place_city(raw)
         if cleaned_city == details.city:
             raise PlaceEditValueError(
-                "Город уже такой. Если город нужно удалить, используйте кнопку "
-                "«Удалить город» в меню редактирования."
+                "Город уже такой. Удалить город нельзя — укажите другой город."
             )
         return "edit_city_confirm", cleaned_city, ""
     if phase == "edit_url_input":
@@ -3438,7 +3496,7 @@ def _validate_edit_input(
         if normalized == details.url:
             raise PlaceEditValueError(
                 "Ссылка уже такая. Если ссылку нужно удалить, используйте "
-                "кнопку «Удалить ссылку» в меню редактирования."
+                "кнопку «🗑» рядом со ссылкой в меню редактирования."
             )
         return "edit_url_confirm", normalized, ""
 
@@ -3606,8 +3664,6 @@ def _edit_result_notice(
             return "✅ Адрес места удалён.", "edit_menu"
         if phase == "edit_city_confirm":
             return "✅ Город места обновлён.", "edit_menu"
-        if phase == "edit_city_delete_confirm":
-            return "✅ Город места удалён.", "edit_menu"
         if phase == "edit_url_confirm":
             return "✅ Ссылка места обновлена.", "edit_menu"
         return "✅ Ссылка места удалена.", "edit_menu"
@@ -3667,7 +3723,6 @@ async def handle_edit_confirm(
         "edit_address_confirm",
         "edit_address_delete_confirm",
         "edit_city_confirm",
-        "edit_city_delete_confirm",
         "edit_url_confirm",
         "edit_url_delete_confirm",
     }:
@@ -3760,13 +3815,6 @@ async def handle_edit_confirm(
                     actor_telegram_user_id=actor_telegram_user_id,
                     place_id=place_id,
                     city=str(state.get("edit_value") or ""),
-                    expected_city=_expected_field_from_state(state, details.city),
-                )
-            elif phase == "edit_city_delete_confirm":
-                result = delete_place_city(
-                    session,
-                    actor_telegram_user_id=actor_telegram_user_id,
-                    place_id=place_id,
                     expected_city=_expected_field_from_state(state, details.city),
                 )
             elif phase == "edit_url_confirm":
@@ -5648,10 +5696,6 @@ def admin_handlers() -> list[BaseHandler]:
             pattern=r"^adm_edit_address_delete:\d+$",
         ),
         CallbackQueryHandler(handle_edit_city, pattern=r"^adm_edit_city:\d+$"),
-        CallbackQueryHandler(
-            handle_edit_city_delete,
-            pattern=r"^adm_edit_city_delete:\d+$",
-        ),
         CallbackQueryHandler(handle_edit_url, pattern=r"^adm_edit_url:\d+$"),
         CallbackQueryHandler(
             handle_edit_url_delete, pattern=r"^adm_edit_url_delete:\d+$"

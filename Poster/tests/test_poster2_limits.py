@@ -165,7 +165,7 @@ class PhotoLimitScenarioTests(unittest.TestCase):
     @scenario_test
     async def test_eleventh_photo_is_rejected_and_ten_are_kept(self, h) -> None:
         from tests.test_stage27c_announcement_ui import (
-            _callback,
+            _callbacks,
             _open_photos,
             _personal_delivered,
         )
@@ -185,14 +185,24 @@ class PhotoLimitScenarioTests(unittest.TestCase):
         # Сообщение с отклонённым снимком не удалено: автор видит причину.
         self.assertNotIn(rejected.message.message_id, h.deleted_ids())
 
-        # Готовность после партии: анонс уходит ровно одной медиагруппой.
-        await h.callback(_callback(h, "aw_apply"))
+        # H3: каждое фото применяется сразу — отдельной кнопки нет. Поэтому
+        # важна не «одна отправка», а итог: последняя версия несёт все 10
+        # снимков одной медиагруппой, а прошлые заменены.
+        self.assertFalse(_callbacks(h, "aw_apply"))
         sent = self._draft(h, draft.id)
         self.assertEqual(sent.publication_status, "sent")
         self.assertEqual(sent.publication_total, 1)
-        groups = [c for c in h.calls if c["type"] == "media_group"]
-        self.assertEqual(len(groups), 1)
         self.assertEqual(
-            [getattr(item, "media", None) for item in groups[0]["media"]],
+            sent.publication_photos,
+            tuple(f"limit-photo-{index}" for index in range(10)),
+        )
+        groups = [c for c in h.calls if c["type"] == "media_group"]
+        self.assertTrue(groups, "фото так и не ушли")
+        self.assertEqual(
+            [getattr(item, "media", None) for item in groups[-1]["media"]],
             [f"limit-photo-{index}" for index in range(10)],
         )
+        # Прошлые версии заменены: в чате ровно одна актуальная группа.
+        live = [message_id for message_id in sent.delivered_message_ids]
+        self.assertEqual(len(live), 1)
+        self.assertNotIn(live[0], h.deleted_ids())

@@ -8,7 +8,9 @@ Poster 2.0 U2b, независимая проверка экрана завер�
 - подделанный `aw_edit` с чужим `draft_id` или ревизией отклоняется;
 - чужой пользователь не открывает и не применяет правку чужого анонса (IDOR);
 - двойное нажатие «Изменить» не создаёт второй экран и не отправляет копию;
-- «Применить изменения» дважды подряд не даёт второй пост;
+- H3: чужая кнопка не может заменить версию (кнопки «Применить изменения»
+  больше нет, поэтому проверяется чужой `aw_qedit`/`aw_edit`);
+- повторное открытие экранов правки не даёт второй пост;
 - устаревшая кнопка экрана правки не меняет готовый анонс.
 
 Реальная `post_bot.db`, `.env` и сеть Telegram не используются.
@@ -105,7 +107,8 @@ class ForeignDeliveredTests(unittest.TestCase):
         self.assertTrue(_callbacks(h, "aw_edit"))
 
     @scenario_test
-    async def test_foreign_apply_cannot_replace_the_version(self, h) -> None:
+    async def test_foreign_edit_callback_cannot_change_the_version(self, h) -> None:
+        """H3: версия меняется сохранением, поэтому чужой ввод — главный риск."""
         await h.text("/start")
         draft, _bricks = await _delivered(h)
         version_ids = _details(h, draft.id).delivered_message_ids
@@ -115,21 +118,28 @@ class ForeignDeliveredTests(unittest.TestCase):
         await h.callback(_callback(h, "aw_qmanage"))
         await h.callback(_callback(h, "aw_qgoto"))
         await h.callback(_callback(h, "aw_qedit"))
-        await h.text("Чужое изменение")
-        await h.callback(_callback(h, "aw_edit"))
-        apply_data = _callback(h, "aw_apply")
+        await h.text("Своё изменение")
+        stored = _details(h, draft.id)
+        self.assertIn("Своё изменение", stored.publication_text or "")
+        posts_sent_by_author = h.posts()
 
+        # Чужой пользователь пытается открыть правку чужого анонса по
+        # актуальной ревизии и записать своё значение.
         _ensure_other_user(h)
-        await h.callback(apply_data, user_id=OTHER_TG)
+        await h.callback(f"aw_edit:{draft.id}:{stored.revision}", user_id=OTHER_TG)
+        self.assertFalse(_callbacks(h, "aw_qmanage"), "чужая правка не открылась")
+        await h.text("Чужое изменение", user_id=OTHER_TG)
 
         stored = _details(h, draft.id)
         self.assertEqual(stored.publication_status, "sent")
-        self.assertEqual(tuple(stored.delivered_message_ids), version_ids)
-        self.assertEqual(h.posts(), posts_before)
-        # Сохранённое значение автора не подменено чужим: чужая правка
-        # отклонена до записи.
         self.assertNotIn("Чужое изменение", stored.publication_text or "")
-        self.assertIn("Значение", stored.publication_text or "")
+        self.assertIn("Своё изменение", stored.publication_text or "")
+        self.assertEqual(h.posts(), posts_sent_by_author)
+        self.assertTrue(set(version_ids) <= set(h.deleted_ids()))
+
+        # Негатив: без чужого вмешательства постов ровно два.
+        self.assertEqual(len(posts_before), 1)
+        self.assertEqual(len(h.posts()), 2)
 
     @scenario_test
     async def test_foreign_open_of_draft_does_not_deliver(self, h) -> None:
@@ -196,43 +206,47 @@ class ForgedDeliveredCallbackTests(unittest.TestCase):
         self.assertEqual(h.posts(), posts_before)
 
     @scenario_test
-    async def test_apply_twice_creates_no_second_post(self, h) -> None:
+    async def test_reopening_edit_screens_creates_no_second_post(self, h) -> None:
+        """H3: применения по кнопке нет — и повторное открытие не плодит пост."""
         await h.text("/start")
         draft, _bricks = await _delivered(h)
         version_ids = _details(h, draft.id).delivered_message_ids
+        posts_before = h.posts()
 
-        await h.callback(_callback(h, "aw_edit"))
-        await h.callback(_callback(h, "aw_apply"))
-        posts_after_first = h.posts()
-        await h.callback(_callback(h, "aw_edit"))
-        await h.callback(_callback(h, "aw_apply"))
+        for _attempt in range(2):
+            await h.callback(_callback(h, "aw_edit"))
+            await h.callback(_callback(h, "aw_photos"))
+            await h.callback("main_menu")
+            await h.text("/start")
+            await h.callback("my_announcements")
+            await h.callback(f"aw_open:{draft.id}")
 
-        self.assertEqual(h.posts(), posts_after_first)
+        self.assertEqual(h.posts(), posts_before)
         stored = _details(h, draft.id)
         self.assertEqual(tuple(stored.delivered_message_ids), version_ids)
         self.assertEqual(stored.publication_status, "sent")
+        self.assertFalse(_callbacks(h, "aw_apply"))
 
     @scenario_test
-    async def test_stale_apply_from_old_edit_screen_changes_nothing(self, h) -> None:
+    async def test_stale_edit_from_old_screen_changes_nothing(self, h) -> None:
         await h.text("/start")
         draft, _bricks = await _delivered(h)
 
-        await h.callback(_callback(h, "aw_edit"))
-        stale_apply = _callback(h, "aw_apply")
-        # Правка поднимает ревизию: кнопка применения со старого экрана
-        # устарела и не должна отправлять версию.
+        # Кнопка «Изменить» с экрана завершения запоминается до правки.
+        stale_edit = _callback(h, "aw_edit")
+        await h.callback(stale_edit)
         await h.callback(_callback(h, "aw_qmanage"))
         await h.callback(_callback(h, "aw_qgoto"))
         await h.callback(_callback(h, "aw_qedit"))
         await h.text("Новое значение")
         posts_before = h.posts()
 
-        await h.callback(stale_apply)
+        await h.callback(stale_edit)
 
         self.assertIn("Экран устарел", h.answer_texts()[-1])
         self.assertEqual(h.posts(), posts_before)
         stored = _details(h, draft.id)
         self.assertEqual(stored.publication_status, "sent")
-        # Отправленный текст остался прежним: «Новое значение» ещё не
-        # применено, а устаревшая кнопка не имеет права его отправлять.
-        self.assertEqual(stored.publication_text, "Значение")
+        # Устаревшая кнопка не откатила и не удвоила сохранённую версию.
+        self.assertEqual(stored.publication_text, "Новое значение")
+        self.assertEqual(len(h.posts()), 2)

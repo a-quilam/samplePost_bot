@@ -232,10 +232,8 @@ class FormattingScreenTests(unittest.TestCase):
         payload = _stored_payload(h, draft.id, bricks["main"])
         self.assertEqual(payload["text"], "Новое")
         self.assertEqual(payload["html"], "<s>Новое</s>")
-        # Доставленный анонс меняется явной кнопкой (U2b: она на экране
-        # «Изменить») — с той же разметкой.
-        await _open_edit(h)
-        await h.callback(_callback(h, "aw_apply"))
+        # H3: доставленный анонс меняется сразу сохранением значения — с
+        # той же разметкой и без кнопки «Применить изменения».
         self.assertEqual(h.posts()[-1], "<s>Новое</s>")
 
     @scenario_test

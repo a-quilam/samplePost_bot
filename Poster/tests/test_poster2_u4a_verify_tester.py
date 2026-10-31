@@ -526,15 +526,14 @@ class CompletenessTests(_Case):
         self.assertIn("КАНОН-КАТАЛОГ: Дом культуры", h.screen_text())
 
     @scenario_test
-    async def test_apply_button_label_is_the_same_on_every_screen(
+    async def test_menu_button_label_is_the_same_on_every_screen(
         self, h: Harness
     ) -> None:
         """
-        reproduces D3. Ожидание: у одной и той же кнопки «Применить
-        изменения» (`buttons.finished.apply`) подпись на всех экранах
-        берётся из каталога. Факт: экран правки читает каталог, а обзор,
-        экран кирпичиков и экран фотографий — литерал, поэтому после правки
-        YAML в одном чате появляются две разные подписи одной кнопки.
+        reproduces D3. Ожидание: у одной и той же кнопки выхода в меню
+        (`buttons.finished.main_menu`) подпись на всех экранах берётся из
+        каталога. H3: прежняя кнопка «Применить изменения» удалена, поэтому
+        проверяется живой ключ с тем же смыслом «одна кнопка — одна подпись».
         """
         from tests.test_stage27b_announcement_ui import (
             _callback,
@@ -544,7 +543,7 @@ class CompletenessTests(_Case):
             _start_to_template,
         )
 
-        self.write(_full_catalog(**{"buttons.finished.apply": "ПРИМЕНИТЬ-КАТАЛОГ"}))
+        self.write(_full_catalog(**{"buttons.finished.main_menu": "МЕНЮ-КАТАЛОГ"}))
         self.assertTrue(ui_texts.reload_texts(self.path).ok)
 
         await h.text("/start")
@@ -557,7 +556,7 @@ class CompletenessTests(_Case):
         await h.callback(_callback(h, "aw_edit"))
 
         edit_labels = [label for label, _data in h.screen_buttons()]
-        self.assertIn("ПРИМЕНИТЬ-КАТАЛОГ", edit_labels)
+        self.assertIn("МЕНЮ-КАТАЛОГ", edit_labels)
 
         photos = [
             data
@@ -566,7 +565,7 @@ class CompletenessTests(_Case):
         ]
         await h.callback(photos[0])
         collected = [label for label, _data in h.screen_buttons()]
-        self.assertIn("ПРИМЕНИТЬ-КАТАЛОГ", collected)
+        self.assertIn("МЕНЮ-КАТАЛОГ", collected)
 
 
 class CatalogContractTests(unittest.TestCase):

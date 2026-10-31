@@ -90,7 +90,7 @@ from place_state import clear_place_session
 from place_store import get_place_details, list_places
 from template_state import clear_template_session
 from user_store import get_or_create_user
-from utils import keyboard_layouts, screen
+from utils import current_value, keyboard_layouts, screen
 from utils import tg_context as ctx
 from utils.ui_texts import tr
 
@@ -387,18 +387,36 @@ def _description_text(value: object) -> str:
     return text or "нет"
 
 
-def _description_html(value: object) -> str:
+def _description_shown(
+    value: object, *, limit: int = current_value.VALUE_LIMIT
+) -> tuple[str, bool]:
     """
-    Описание кирпичика моноширинно (Poster 2.1 R4 №27).
+    Описание кирпичика для экрана: моноширинный блок и признак сокращения.
 
-    Текст целиком задаёт человек, поэтому он экранируется, а затем
-    оборачивается в `<code>`. Пустое описание остаётся коротким «нет» без
-    тега: это не описание, а отметка об отсутствии.
+    Текст целиком задаёт человек, поэтому он сначала экранируется, а затем
+    оборачивается в `<code>` (Poster 2.1 R4 №27). Длина не ограничена
+    искусственно: описание в 5000 символов раньше раздувало карточку, меню
+    и предпросмотр далеко за лимит Telegram. Теперь у значения есть бюджет
+    экрана (`limit`), а о сокращении честно говорит пометка общего
+    компонента «Текущее значение». Пустое описание — «нет» без тега.
     """
     text = " ".join(str(value or "").split())
     if not text:
-        return "нет"
-    return f"<code>{_h(text)}</code>"
+        return "нет", False
+    if limit <= 0:
+        return current_value.EMPTY, False
+    shown, truncated = current_value.clip_parts(
+        html_escape(text, quote=False), limit=limit
+    )
+    return f"<code>{shown}</code>", truncated
+
+
+def _description_html(value: object, *, limit: int = current_value.VALUE_LIMIT) -> str:
+    """Описание кирпичика внутри готовой строки «Описание: …»."""
+    shown, truncated = _description_shown(value, limit=limit)
+    if not truncated:
+        return shown
+    return f"{shown}\n{current_value.TRUNCATED_NOTE}"
 
 
 def _format_number(value: object) -> str:
@@ -597,18 +615,25 @@ def _archive_content(session: Session, user: User, state: dict):
 
 def _card_content(brick):
     state_label = "🟢 Активный" if brick.status == BRICK_STATUS_ACTIVE else "🗄 В архиве"
-    text = (
-        f"🧱 <b>{_h(brick.title)}</b>\n\n"
-        f"Обозначение: <code>[{_h(brick.code)}]</code>\n"
-        f"Тип: {_h(_type_title(brick.value_type))}\n"
-        f"Описание: {_description_html(brick.description)}\n"
-        "Область: личная (видна только вам)\n"
-        f"Статус: {state_label}\n"
-        f"Настройки: {_h(_settings_text(brick.value_type, brick.rules))}\n\n"
-        "Это только определение поля. Значение появится, когда кирпичик "
-        "будет использован в шаблоне анонса; сейчас он не вставляется в "
-        "посты автоматически."
-    )
+
+    def build(limits: list[int]) -> str:
+        return (
+            f"🧱 <b>{_h(brick.title)}</b>\n\n"
+            f"Обозначение: <code>[{_h(brick.code)}]</code>\n"
+            f"Тип: {_h(_type_title(brick.value_type))}\n"
+            f"Описание: {_description_html(brick.description, limit=limits[0])}\n"
+            "Область: личная (видна только вам)\n"
+            f"Статус: {state_label}\n"
+            f"Настройки: {_h(_settings_text(brick.value_type, brick.rules))}\n\n"
+            "Это только определение поля. Значение появится, когда кирпичик "
+            "будет использован в шаблоне анонса; сейчас он не вставляется в "
+            "посты автоматически."
+        )
+
+    # Бюджет описания считается от обвязки экрана: название кирпичика задаёт
+    # человек и тоже может быть огромным, поэтому экран дополнительно
+    # страхуется общим лимитом Telegram.
+    text = current_value.fit_screen(build, blocks=1)
     if brick.status == BRICK_STATUS_ACTIVE:
         rows = [
             [InlineKeyboardButton("✏️ Изменить", callback_data="bk_edit")],
@@ -943,19 +968,23 @@ def _proposal_preview_content(session: Session, user: User, state: dict):
             "Код не будет изменён автоматически. Исправьте код в личном "
             "кирпичике или выберите другую область."
         )
-    text = (
-        _proposal_header("Проверьте предложение", step=3) + "\n\n"
-        f"Название: <b>{_h(brick.title)}</b>\n"
-        f"Обозначение: <code>[{_h(brick.code)}]</code>\n"
-        f"Тип: {_h(_type_title(brick.value_type))}\n"
-        f"Описание: {_description_html(brick.description)}\n"
-        f"Настройки: {_h(_settings_text(brick.value_type, brick.rules))}\n"
-        f"Цель: {target}\n\n"
-        f"{availability_text}\n\n"
-        "После отправки будет сохранён неизменяемый снимок. Последующие "
-        "правки или архивация личного кирпичика не изменят ожидающее "
-        "предложение. Исходный кирпичик не копируется и не перепривязывается."
-    )
+
+    def build(limits: list[int]) -> str:
+        return (
+            _proposal_header("Проверьте предложение", step=3) + "\n\n"
+            f"Название: <b>{_h(brick.title)}</b>\n"
+            f"Обозначение: <code>[{_h(brick.code)}]</code>\n"
+            f"Тип: {_h(_type_title(brick.value_type))}\n"
+            f"Описание: {_description_html(brick.description, limit=limits[0])}\n"
+            f"Настройки: {_h(_settings_text(brick.value_type, brick.rules))}\n"
+            f"Цель: {target}\n\n"
+            f"{availability_text}\n\n"
+            "После отправки будет сохранён неизменяемый снимок. Последующие "
+            "правки или архивация личного кирпичика не изменят ожидающее "
+            "предложение. Исходный кирпичик не копируется и не перепривязывается."
+        )
+
+    text = current_value.fit_screen(build, blocks=1)
     rows: list[list[InlineKeyboardButton]] = []
     if availability.available:
         rows.append([InlineKeyboardButton("📨 Отправить", callback_data="bp_send")])
@@ -1186,16 +1215,20 @@ def _edit_menu_content(state: dict):
         )
     rows.append([InlineKeyboardButton("👁 К проверке", callback_data="bk_preview")])
     rows.append([InlineKeyboardButton("◀️ Назад", callback_data="bk_back")])
-    text = (
-        "✏️ <b>Изменить кирпичик</b>\n\n"
-        f"Название: {_h(draft.get('title') or '—')}\n"
-        f"Обозначение: <code>[{_h(draft.get('code') or '—')}]</code>\n"
-        f"Тип: {_h(_type_title(value_type))}\n"
-        f"Описание: {_description_html(draft.get('description'))}\n"
-        f"Настройки: {_h(_settings_text(value_type, draft.get('rules') or {}))}\n\n"
-        "Тип после создания не меняется: для другого типа создайте новый "
-        "кирпичик. Идентификатор сохраняется при любых изменениях."
-    )
+
+    def build(limits: list[int]) -> str:
+        return (
+            "✏️ <b>Изменить кирпичик</b>\n\n"
+            f"Название: {_h(draft.get('title') or '—')}\n"
+            f"Обозначение: <code>[{_h(draft.get('code') or '—')}]</code>\n"
+            f"Тип: {_h(_type_title(value_type))}\n"
+            f"Описание: {_description_html(draft.get('description'), limit=limits[0])}\n"
+            f"Настройки: {_h(_settings_text(value_type, draft.get('rules') or {}))}\n\n"
+            "Тип после создания не меняется: для другого типа создайте новый "
+            "кирпичик. Идентификатор сохраняется при любых изменениях."
+        )
+
+    text = current_value.fit_screen(build, blocks=1)
     return text, InlineKeyboardMarkup(rows)
 
 
@@ -1211,25 +1244,35 @@ THREE_FIELDS_HINT = (
 
 def _title_input_content(state: dict):
     draft = _draft(state)
-    if state.get("mode") == "edit":
-        text = (
-            "✏️ <b>Название кирпичика</b>\n\n"
-            f"Сейчас: {_h(draft.get('title') or '—')}\n\n"
-            "Введите новое человекочитаемое название — то, что человек видит "
-            "в списках и на экране вопроса. Оно может повторять названия "
-            "других кирпичиков: однозначность обеспечивает техническое "
-            "обозначение."
-        )
-    else:
-        text = (
-            "1️⃣ <b>Как назвать кирпичик?</b>\n\n"
-            "Например: «Ведущий мероприятия», «Формат участия» или "
-            "«Стоимость билета».\n\n"
-            "Название видно в списках и на экране вопроса — это то, что "
-            "прочитает человек, заполняющий анонс. Техническое обозначение и "
-            "описание зададим следующими шагами."
-        )
-    text += "\n\n" + THREE_FIELDS_HINT
+
+    def build(limits: list[int]) -> str:
+        if state.get("mode") == "edit":
+            text = (
+                "✏️ <b>Название кирпичика</b>\n\n"
+                + current_value.current_value_text(
+                    "Текущее значение", draft.get("title") or "—", limit=limits[0]
+                )
+                + "\n\n"
+                "Введите новое человекочитаемое название — то, что человек видит "
+                "в списках и на экране вопроса. Оно может повторять названия "
+                "других кирпичиков: однозначность обеспечивает техническое "
+                "обозначение."
+            )
+        else:
+            text = (
+                "1️⃣ <b>Как назвать кирпичик?</b>\n\n"
+                "Например: «Ведущий мероприятия», «Формат участия» или "
+                "«Стоимость билета».\n\n"
+                "Название видно в списках и на экране вопроса — это то, что "
+                "прочитает человек, заполняющий анонс. Техническое обозначение и "
+                "описание зададим следующими шагами."
+            )
+        return text + "\n\n" + THREE_FIELDS_HINT
+
+    # Название кирпичика не ограничено по длине: бюджет блока считается от
+    # обвязки этого экрана, иначе «Текущее значение» на 4000 символов вместе
+    # с подсказкой выносило экран за лимит Telegram.
+    text = current_value.fit_screen(build, blocks=1)
     return text, InlineKeyboardMarkup(
         [[InlineKeyboardButton("◀️ Назад", callback_data="bk_back")]]
     )
@@ -1246,7 +1289,7 @@ def _code_input_content(state: dict):
             "или отправить другое."
         )
     current = (
-        f"Сейчас: <code>[{_h(code)}]</code>\n\n"
+        current_value.current_value_text("Текущее обозначение", f"[{code}]") + "\n\n"
         if code
         else "Обозначение ещё не задано.\n\n"
     )
@@ -1277,17 +1320,28 @@ def _description_input_content(state: dict):
     """Ввод описания: инструкция автору анонса, видимая на вопросе."""
     draft = _draft(state)
     current = draft.get("description") or ""
-    shown = f"Сейчас: {_h(_short(current, 200))}\n\n" if current else ""
-    text = (
-        "3️⃣ <b>Описание для автора анонса</b>\n\n"
-        f"{shown}"
-        "Напишите подсказку тому, кто будет заполнять это поле: что именно "
-        "указать и в каком виде. Например: «Имя и фамилия ведущего, без "
-        "должности» или «Цена в рублях, только число».\n\n"
-        "Описание видно на экране вопроса — над полем ввода. В текст "
-        "анонса оно не попадает и на шаблон не влияет.\n\n"
-        "Поле необязательное: без описания кирпичик работает как обычно."
-    )
+
+    def build(limits: list[int]) -> str:
+        shown = (
+            current_value.current_value_text(
+                "Текущее описание", current, limit=limits[0]
+            )
+            + "\n\n"
+            if current
+            else ""
+        )
+        return (
+            "3️⃣ <b>Описание для автора анонса</b>\n\n"
+            f"{shown}"
+            "Напишите подсказку тому, кто будет заполнять это поле: что именно "
+            "указать и в каком виде. Например: «Имя и фамилия ведущего, без "
+            "должности» или «Цена в рублях, только число».\n\n"
+            "Описание видно на экране вопроса — над полем ввода. В текст "
+            "анонса оно не попадает и на шаблон не влияет.\n\n"
+            "Поле необязательное: без описания кирпичик работает как обычно."
+        )
+
+    text = current_value.fit_screen(build, blocks=1)
     rows: list[list[InlineKeyboardButton]] = [
         [InlineKeyboardButton("⏭ Без описания", callback_data="bk_skip_description")]
     ]
@@ -1427,19 +1481,24 @@ def _preview_content(state: dict):
     mode = state.get("mode")
     title = draft.get("title") or "—"
     code = draft.get("code") or "—"
-    text = (
-        "👁 <b>Проверьте кирпичик</b>\n\n"
-        f"Название: {_h(title)}\n"
-        f"Обозначение: <code>[{_h(code)}]</code>\n"
-        f"Тип: {_h(_type_title(value_type))}\n"
-        f"Описание: {_description_html(draft.get('description'))}\n"
-        "Область: личная (видна только вам)\n"
-        f"Настройки: {_h(_settings_text(value_type, draft.get('rules') or {}))}\n\n"
-        "После сохранения кирпичик появится в вашем списке. В посты и "
-        "шаблоны он пока не вставляется."
-    )
-    if mode == "edit":
-        text += "\n\nТип при редактировании не меняется."
+
+    def build(limits: list[int]) -> str:
+        text = (
+            "👁 <b>Проверьте кирпичик</b>\n\n"
+            f"Название: {_h(title)}\n"
+            f"Обозначение: <code>[{_h(code)}]</code>\n"
+            f"Тип: {_h(_type_title(value_type))}\n"
+            f"Описание: {_description_html(draft.get('description'), limit=limits[0])}\n"
+            "Область: личная (видна только вам)\n"
+            f"Настройки: {_h(_settings_text(value_type, draft.get('rules') or {}))}\n\n"
+            "После сохранения кирпичик появится в вашем списке. В посты и "
+            "шаблоны он пока не вставляется."
+        )
+        if mode == "edit":
+            text += "\n\nТип при редактировании не меняется."
+        return text
+
+    text = current_value.fit_screen(build, blocks=1)
     rows = [
         [InlineKeyboardButton("💾 Сохранить", callback_data="bk_save")],
         [InlineKeyboardButton("✏️ Изменить", callback_data="bk_change")],

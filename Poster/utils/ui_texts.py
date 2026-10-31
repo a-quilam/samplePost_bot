@@ -199,15 +199,19 @@ DEFAULTS: dict[str, str] = {
     "wizard.finished.text": (
         "✅ Анонс готов.\n\nСообщение выше можно скопировать или переслать"
     ),
-    "wizard.finished.pending": (
-        "✏️ Есть изменения, ещё не отправленные в чат. "
-        "Нажмите «Применить изменения»."
-    ),
+    "wizard.finished.pending": ("✏️ Есть изменения, ещё не отправленные в чат."),
     "wizard.finished.edit_text": (
         "✏️ Редактирование анонса\n\n"
-        "Выберите, что изменить. Новая копия уходит в чат только по "
-        "«Применить изменения»."
+        "Выберите, что изменить. Изменения применяются сразу: новая версия "
+        "заменяет прошлую в чате."
     ),
+    "wizard.extras.title": "🧱 Дополнительные поля",
+    "wizard.extras.intro": (
+        "Дополнительные поля влияют только на этот анонс. Исходный шаблон "
+        "не меняется.\nИзменения применяются сразу: введённое значение "
+        "попадает в анонс, а новая версия заменяет прошлую в чате."
+    ),
+    "wizard.extras.empty": "Дополнительных полей пока нет.",
     "wizard.ready.collecting": (
         "✅ Анонс готов: он собирается и приходит в этот чат автоматически."
     ),
@@ -423,10 +427,13 @@ DEFAULTS: dict[str, str] = {
     "buttons.wizard.choose_month": "📅 Выбрать месяц",
     "buttons.finished.edit": "✏️ Изменить",
     "buttons.finished.menu": "🏠 В меню",
-    "buttons.finished.data": "✏️ Данные",
-    "buttons.finished.photos": "📷 Фотографии ({count})",
-    "buttons.finished.extras": "➕ Кирпичики ({count})",
-    "buttons.finished.apply": "🔄 Применить изменения",
+    "buttons.finished.data": "📝 Данные",
+    "buttons.finished.photos": "🖼 Фото ({count})",
+    "buttons.finished.extras_edit": "🧱 Дополнительные поля",
+    "buttons.finished.main_menu": "🏠 В главное меню",
+    "buttons.extras.add": "➕ Добавить поле",
+    "buttons.extras.edit": "✏️ {number}. {title}",
+    "buttons.extras.delete": "🗑 {number}",
     "buttons.bricks.create": "➕ Создать кирпичик",
     "buttons.bricks.proposals": "📤 Мои предложения",
     "buttons.bricks.archive": "🗄 Архив ({count})",

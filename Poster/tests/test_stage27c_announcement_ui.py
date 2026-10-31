@@ -187,7 +187,8 @@ class AnnouncementAutoDeliveryPhotoTests(unittest.TestCase):
         first_delivery_ids = set(_stored(h, draft.id).delivered_message_ids)
         self.assertTrue(first_delivery_ids)
 
-        # Фото добавляются уже после доставки: сама доставка не повторяется.
+        # H3: фото к доставленному анонсу применяются сразу — каждая
+        # подтверждённая партия заменяет прошлую версию без «Применить».
         await _open_photos(h)
         first_update = await h.photo("photo-1", media_group_id="album-1")
         await h.photo("photo-2", media_group_id="album-1")
@@ -200,14 +201,26 @@ class AnnouncementAutoDeliveryPhotoTests(unittest.TestCase):
             if call["type"] == "delete_message" and len(call["args"]) > 1
         ]
         self.assertIn(first_update.message.message_id, deleted_inputs)
-        # Добавление фото не отправляет новую версию само по себе.
-        self.assertEqual(len(h.posts()), 1)
+        # Кнопки применения нет: версия заменилась сама.
+        self.assertFalse(_callbacks(h, "aw_apply"))
+        after_album = _stored(h, draft.id)
+        self.assertEqual(after_album.publication_photos, ("photo-1", "photo-2"))
+        self.assertEqual(
+            [
+                getattr(item, "media", None)
+                for item in _post_types(h, {"media_group"})[-1]["media"]
+            ],
+            ["photo-1", "photo-2"],
+        )
 
-        # Повторный Update того же file_id не создаёт второе вложение.
+        # Повторный Update того же file_id не создаёт второе вложение и
+        # не отправляет ещё одну версию.
+        posts_before_duplicate = len(h.posts())
         await h.photo("photo-1")
         duplicate = _draft_by_id(h, draft.id)
         self.assertEqual(duplicate.revision, revision)
         self.assertEqual(tuple(json.loads(duplicate.photos)), ("photo-1", "photo-2"))
+        self.assertEqual(len(h.posts()), posts_before_duplicate)
 
         # Рестарт теряет user_data, но фото и доставка остаются в SQLite.
         await h.restart()
@@ -215,32 +228,28 @@ class AnnouncementAutoDeliveryPhotoTests(unittest.TestCase):
         await h.callback("aw_start")
         await h.callback(_callback(h, "aw_open", f":{draft.id}"))
         self.assertIn("✅ Анонс готов.", h.screen_text())
-        # U2b: экран завершения не перечисляет счётчики; о расхождении с
-        # отправленной версией говорит только строка о неприменённых правках.
-        self.assertIn("Есть изменения", h.screen_text())
+        # H3: применённое изменение не оставляет «неприменённых» — экран
+        # завершения показывает ровно свой фиксированный текст.
+        self.assertNotIn("Есть изменения", h.screen_text())
         self.assertEqual(h.dialog_state(name=CONVERSATION_NAME), AW_PREVIEW)
-        self.assertEqual(len(h.posts()), 1)
 
         # Удаление одного фото и добавление нового — замена без фото-кирпичиков.
         await _open_photos(h)
+        before_delete = _stored(h, draft.id)
         await h.callback(_callback(h, "aw_photo_del"))
         after_delete = _draft_by_id(h, draft.id)
         self.assertEqual(tuple(json.loads(after_delete.photos)), ("photo-2",))
+        # H3: удаление тоже применено сразу, прошлая версия заменена.
+        deleted_version = _stored(h, draft.id)
+        self.assertEqual(deleted_version.publication_photos, ("photo-2",))
+        self.assertEqual(
+            set(deleted_version.previous_message_ids),
+            set(before_delete.delivered_message_ids),
+        )
+
         await h.photo("photo-3")
         after_add = _draft_by_id(h, draft.id)
         self.assertEqual(tuple(json.loads(after_add.photos)), ("photo-2", "photo-3"))
-
-        # Правки применяются явной кнопкой: новая версия заменяет прошлую.
-        await h.callback(_callback(h, "aw_apply"))
-        posts_after_edit = h.posts()
-        self.assertEqual(len(posts_after_edit), 2)
-        self.assertEqual(
-            [
-                getattr(item, "media", None)
-                for item in _post_types(h, {"media_group"})[0]["media"]
-            ],
-            ["photo-2", "photo-3"],
-        )
 
         sent = _stored(h, draft.id)
         self.assertEqual(sent.publication_status, "sent")
@@ -248,24 +257,31 @@ class AnnouncementAutoDeliveryPhotoTests(unittest.TestCase):
         self.assertEqual(sent.photos, ("photo-2", "photo-3"))
         self.assertIn("Значение", sent.publication_text or "")
         self.assertNotIn("[фото]", sent.publication_text or "")
+        self.assertEqual(
+            [
+                getattr(item, "media", None)
+                for item in _post_types(h, {"media_group"})[-1]["media"]
+            ],
+            ["photo-2", "photo-3"],
+        )
         new_ids = set(sent.delivered_message_ids)
         self.assertTrue(new_ids)
         # id прошлой версии не смешиваются с id текущей доставки.
         self.assertFalse(new_ids & first_delivery_ids)
-        self.assertEqual(set(sent.previous_message_ids), first_delivery_ids)
-        # Прошлая версия удалена только после успешной доставки новой.
+        self.assertTrue(set(sent.previous_message_ids))
+        self.assertFalse(set(sent.previous_message_ids) & new_ids)
+        # Первая версия удалена после первой успешной замены.
         self.assertTrue(first_delivery_ids <= set(h.deleted_ids()))
 
-        # Повторное применение без изменений не создаёт дубль: кнопки
-        # применения нет, экран прямо сообщает, что версия уже отправлена.
+        # Возврат в меню с экрана коллекции не отправляет копию и не
+        # откатывает применённую версию.
         posts_before = len(h.posts())
-        self.assertEqual(_callbacks(h, "aw_apply"), [])
-        # U2b: заход в правку и возврат не отправляют новую копию.
-        await h.callback(_callback(h, "aw_edit"))
+        await h.callback("main_menu")
+        self.assertIn("Выберите действие", h.screen_text())
         self.assertEqual(len(h.posts()), posts_before)
-        await h.callback(_callback(h, "aw_panel"))
-        self.assertEqual(len(h.posts()), posts_before)
-        self.assertIn("✅ Анонс готов.", h.screen_text())
+        self.assertEqual(
+            _stored(h, draft.id).publication_photos, ("photo-2", "photo-3")
+        )
 
     @scenario_test
     async def test_single_photo_caption_failure_is_failed_and_resumes(self, h) -> None:
@@ -280,11 +296,11 @@ class AnnouncementAutoDeliveryPhotoTests(unittest.TestCase):
         await h.text("/start")
         draft, _bricks = await _personal_delivered(h)
         await _open_photos(h)
-        await h.photo("caption-photo")
-        self.assertEqual(len(h.posts()), 1, "фото к готовому анонсу не публикуют")
-
+        posts_before = len(h.posts())
+        # Сбой Telegram на первой же замене версии: фото уже сохранено, но
+        # доставка (H3 — сразу после приёма снимка) не подтверждена.
         h.bot.fail_after["photo"] = 0
-        await h.callback(_callback(h, "aw_apply"))
+        rejected = await h.photo("caption-photo")
 
         failed = _stored(h, draft.id)
         self.assertEqual(failed.publication_status, "failed")
@@ -297,16 +313,14 @@ class AnnouncementAutoDeliveryPhotoTests(unittest.TestCase):
             "Повторить отправку", " ".join(label for label, _data in h.screen_buttons())
         )
         self.assertFalse(_callbacks(h, "aw_pub_reset"))
+        self.assertEqual(len(h.posts()), posts_before, "новая версия не ушла")
         # Прошлая доставленная версия остаётся в чате до успеха новой:
         # её адреса сохранены, но не выдаются за id текущей отправки.
         self.assertTrue(failed.previous_message_ids)
         self.assertEqual(failed.delivered_message_ids, ())
         self.assertIn("В чате остаётся прошлая доставленная версия", h.screen_text())
         # Ввод-фото не удалён: подтверждённой доставки не было.
-        self.assertNotIn(
-            h.calls[-1].get("message_id"),
-            h.deleted_ids(),
-        )
+        self.assertNotIn(rejected.message.message_id, h.deleted_ids())
 
         h.bot.fail_after.clear()
         photos_before = len(_post_types(h, {"photo"}))
@@ -340,22 +354,36 @@ class AnnouncementAutoDeliveryPhotoTests(unittest.TestCase):
         # что именно не принято.
         self.assertNotIn(update.message.message_id, h.deleted_ids())
 
-        await h.callback(_callback(h, "aw_apply"))
+        # H3: каждый принятый снимок применяется сразу, поэтому важно не
+        # число отправок, а итог: последняя версия несёт все 10 фото одной
+        # группой, а каждая следующая версия заменяет прошлую.
+        self.assertFalse(_callbacks(h, "aw_apply"))
         sent = _stored(h, draft.id)
         self.assertEqual(sent.publication_status, "sent")
         self.assertEqual(sent.publication_total, 1)
-        groups = _post_types(h, {"media_group"})
-        self.assertEqual(len(groups), 1)
         self.assertEqual(
-            [getattr(item, "media", None) for item in groups[0]["media"]],
+            sent.publication_photos,
+            tuple(f"group-photo-{index}" for index in range(10)),
+        )
+        groups = _post_types(h, {"media_group"})
+        self.assertTrue(groups, "фото так и не ушли")
+        self.assertEqual(
+            [getattr(item, "media", None) for item in groups[-1]["media"]],
             [f"group-photo-{index}" for index in range(10)],
         )
-        # Хвостового sendPhoto нет: 10 фото — ровно одна группа.
-        self.assertEqual(_post_types(h, {"photo"}), [])
         self.assertEqual(
-            [getattr(item, "caption", None) for item in groups[0]["media"]][:-1],
+            [getattr(item, "caption", None) for item in groups[-1]["media"]][:-1],
             [None] * 9,
             "подпись разрешена только у последнего фотосегмента",
+        )
+        # В чате ровно одна актуальная версия: прошлые удалены.
+        self.assertTrue(set(sent.previous_message_ids))
+        self.assertFalse(
+            set(sent.previous_message_ids) & set(sent.delivered_message_ids)
+        )
+        self.assertTrue(
+            set(sent.previous_message_ids) <= set(h.deleted_ids()),
+            "прошлые версии не удалены",
         )
 
 
@@ -464,8 +492,11 @@ class AnnouncementAutoDeliveryFailureTests(unittest.TestCase):
         await h.callback(_callback(h, "aw_qgoto"))
         await h.callback(_callback(h, "aw_qedit"))
         await h.text("Чужое изменение")
-        await _open_edit(h)
-        send_data = _callback(h, "aw_apply")
+        # H3: «Применить изменения» больше нет, версия меняется сохранением.
+        # Чужой callback пытается открыть правку по актуальной ревизии.
+        self.assertFalse(_callbacks(h, "aw_apply"))
+        stored = _stored(h, draft.id)
+        send_data = f"aw_edit:{draft.id}:{stored.revision}"
 
         with h.session_factory() as session:
             other = session.scalar(
@@ -481,11 +512,15 @@ class AnnouncementAutoDeliveryFailureTests(unittest.TestCase):
                 session.commit()
 
         posts_before = len(h.post_records())
+        version_ids = tuple(stored.delivered_message_ids)
         await h.callback(send_data, user_id=OTHER_TG)
         self.assertEqual(len(h.post_records()), posts_before)
         stored = _stored(h, draft.id)
         self.assertEqual(stored.publication_status, "sent")
-        self.assertEqual(len(stored.delivered_message_ids), 1)
+        self.assertEqual(tuple(stored.delivered_message_ids), version_ids)
+        # Чужая правка не открылась и не изменила сохранённое значение:
+        # в тексте остаётся ровно то, что применил сам автор.
+        self.assertEqual(stored.publication_text, "Чужое изменение")
 
     @scenario_test
     async def test_group_chat_never_receives_auto_delivery(self, h) -> None:
@@ -558,21 +593,10 @@ class AnnouncementRedeliveryTests(unittest.TestCase):
         await h.callback(_callback(h, "aw_qedit"))
         await h.text("Обновлённое")
 
-        # Ответ на правку не отправляет сам: экран завершения сообщает о
-        # неприменённых изменениях, а применение — на экране правки.
-        self.assertEqual(len(h.posts()), 1)
-        self.assertIn("Есть изменения", h.screen_text())
-        await _open_edit(h)
-        self.assertIn("Применить изменения", str(h.screen_buttons()))
-
-        # Пересборка доставленной версии — не «возобновление изменившегося
-        # поста»: ложного предупреждения о сбросе прогресса быть не должно.
-        # Легаси-модуля `handlers.post_creation` больше нет (S5): проверяем
-        # живой журнал отправки. Пересборка доставленной версии по явной
-        # кнопке — не «возобновление изменившегося поста», поэтому ложного
-        # предупреждения о сбросе прогресса быть не должно.
-        with self.assertNoLogs("delivery", level="WARNING"):
-            await h.callback(_callback(h, "aw_apply"))
+        # H3: ответ сразу применил правку — отдельной кнопки нет, а
+        # «неприменённых» изменений на экране завершения не бывает.
+        self.assertFalse(_callbacks(h, "aw_apply"))
+        self.assertNotIn("Есть изменения", h.screen_text())
         posts = h.posts()
         self.assertEqual(len(posts), 2)
         self.assertIn("Обновлённое", posts[-1] or "")
@@ -593,8 +617,6 @@ class AnnouncementRedeliveryTests(unittest.TestCase):
         await h.callback(_callback(h, "aw_qgoto"))
         await h.callback(_callback(h, "aw_qedit"))
         await h.text("Третье")
-        await _open_edit(h)
-        await h.callback(_callback(h, "aw_apply"))
         third = _stored(h, draft.id)
         self.assertEqual(tuple(third.previous_message_ids), second_ids)
         self.assertIn("Третье", h.posts()[-1] or "")
@@ -619,8 +641,6 @@ class AnnouncementRedeliveryTests(unittest.TestCase):
         await h.callback(_callback(h, "aw_qgoto"))
         await h.callback(_callback(h, "aw_qedit"))
         await h.text("Новая версия")
-        await _open_edit(h)
-        await h.callback(_callback(h, "aw_apply"))
 
         # Неудача удаления не откатывает успешную доставку: новая версия есть,
         # статус остаётся sent, прошлая копия просто осталась в чате.
@@ -662,18 +682,19 @@ class AnnouncementRedeliveryTests(unittest.TestCase):
         await h.text("Дополнительно")
         self.assertIn("Дополнительно", h.screen_text())
 
-        await h.callback(_callback(h, "aw_apply"))
+        # H3: значение применилось сразу, без кнопки «Применить изменения».
+        self.assertFalse(_callbacks(h, "aw_apply"))
         self.assertIn("Дополнительно", h.posts()[-1] or "")
         sent = _stored(h, draft.id)
         self.assertEqual(tuple(sent.previous_message_ids), first_ids)
         self.assertTrue(set(first_ids) <= set(h.deleted_ids()))
 
-        # Удаление доп. кирпичика тоже приводит к новой версии.
-        await _open_edit(h)
-        await h.callback(_callback(h, "aw_extras"))
+        # Удаление доп. кирпичика тоже приводит к новой версии. H3: после
+        # сохранения значения остаёшься в списке дополнительных полей.
+        self.assertIn("Доп 0", h.screen_text())
         await h.callback(_callback(h, "aw_exdel"))
-        self.assertIn("Дополнительных кирпичиков пока нет", h.screen_text())
-        await h.callback(_callback(h, "aw_apply"))
+        self.assertIn("Дополнительных полей пока нет", h.screen_text())
+        # Удаление тоже применилось сразу: канонический текст без extras.
         self.assertNotIn("Дополнительно", h.posts()[-1] or "")
 
 

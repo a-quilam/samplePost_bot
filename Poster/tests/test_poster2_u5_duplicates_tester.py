@@ -7,8 +7,8 @@ Poster 2.2 U5: независимая приёмка — текстовый ан
    она выше экрана «✅ Анонс готов.» с ровно двумя кнопками.
 2. Завершение сразу после последнего кирпичика (кнопка «Отправить» в обзоре,
    минуя шаг фото): тоже одна копия.
-3. «Изменить» → правка → «Применить изменения»: старая копия заменена,
-   второй копии нет.
+3. H3: «Изменить» → правка значения: старая копия заменена сразу, второй
+   копии нет (кнопки «Применить изменения» больше нет).
 4. Повторное завершение без правки: «уже отправлена», новой отправки нет.
 5. Фото-путь (1 фото и альбом): по-прежнему одна копия поста, фото на месте.
 6. Рестарт доставленного текстового анонса: экран завершения цел, дублей нет.
@@ -192,8 +192,8 @@ class TextAnnouncementNoDuplicatesTests(unittest.TestCase):
         self.assertEqual(len(h.posts()), 1)
 
     @scenario_test
-    async def test_edit_and_apply_replaces_the_copy(self, h) -> None:
-        """П.3: «Изменить» → правка → «Применить изменения»."""
+    async def test_edit_applies_and_replaces_the_copy(self, h) -> None:
+        """П.3 (H3): сохранение правки сразу заменяет прошлую копию."""
         await h.text("/start")
         draft = await _to_photo_step(h)
         await _no_photos(h)
@@ -204,12 +204,12 @@ class TextAnnouncementNoDuplicatesTests(unittest.TestCase):
         await h.callback(_callback(h, "aw_qgoto"))
         await h.callback(_callback(h, "aw_qedit"))
         await h.text(UPDATED)
-        await _open_edit(h)
-        self.assertIn(
-            "🔄 Применить изменения",
-            [label for label, _data in h.screen_buttons()],
+        # Кнопки применения на экране правки нет: версия уже заменена.
+        labels = [label for label, _data in h.screen_buttons()]
+        self.assertFalse(
+            any("Применить изменения" in label for label in labels), labels
         )
-        await h.callback(_callback(h, "aw_apply"))
+        self.assertFalse(_callbacks(h, "aw_apply"))
 
         updated = _assert_single_copy(self, h, draft.id, text=UPDATED)
         stored = _stored(h, draft.id)

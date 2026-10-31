@@ -32,6 +32,7 @@ try:
     from tests.test_stage27b_announcement_ui import (
         OTHER_TG,
         _callback,
+        _callbacks,
         _choose_personal,
         _latest_draft,
         _seed_personal_template,
@@ -219,8 +220,9 @@ class DuplicatePhotoTests(unittest.TestCase):
         await h.callback(_callback(h, "aw_edit"))
         await h.callback(_callback(h, "aw_photos"))
         await h.photo("late-1")
+        # H3: фото к доставленному анонсу применяется сразу, без «Применить».
+        self.assertFalse(_callbacks(h, "aw_apply"))
         await h.photo("late-1")
-        await h.callback(_callback(h, "aw_apply"))
 
         after = _details(h, draft_id)
         self.assertEqual(after.publication_status, "sent")

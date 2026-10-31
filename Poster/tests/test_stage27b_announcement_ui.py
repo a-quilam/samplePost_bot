@@ -640,7 +640,7 @@ class AnnouncementWizardExtrasTests(unittest.TestCase):
         await _open_edit(h)
         await h.callback(_callback(h, "aw_extras"))
         self.assertEqual(h.dialog_state(name=CONVERSATION_NAME), AW_EXTRAS)
-        self.assertIn("Дополнительных кирпичиков пока нет", h.screen_text())
+        self.assertIn("Дополнительных полей пока нет", h.screen_text())
 
         await h.callback(_callback(h, "aw_exadd"))
         found = False
@@ -702,16 +702,11 @@ class AnnouncementWizardExtrasTests(unittest.TestCase):
             )
             self.assertEqual(second.extras, ())
 
-        # Stage 28: правки доп. поля применяются явной кнопкой и заменяют
-        # доставленную версию (U2b: кнопка живёт на экране правки).
-        await _open_edit(h)
-        await h.callback(_callback(h, "aw_apply"))
+        # Stage 28 / H3: сохранённое доп. поле сразу заменяет доставленную
+        # версию — отдельной кнопки «Применить изменения» больше нет.
         self.assertIn("Дополнительно", h.posts()[-1] or "")
-        await _preview(h)
-        self.assertIn("Дополнительно", h.screen_text())
-        await h.callback(_callback(h, "aw_panel"))
-        await _open_edit(h)
-        await h.callback(_callback(h, "aw_extras"))
+        self.assertFalse(_callbacks(h, "aw_apply"))
+        # Экран списка остаётся рабочим: поле видно и его можно править.
         self.assertIn("Доп 0", h.screen_text())
         await h.callback(_callback(h, "aw_exedit"))
         self.assertIn("Дополнительно", h.screen_text())
@@ -728,7 +723,7 @@ class AnnouncementWizardExtrasTests(unittest.TestCase):
             assert value is not None
             self.assertTrue(value.is_empty_optional)
         await h.callback(_callback(h, "aw_exdel"))
-        self.assertIn("Дополнительных кирпичиков пока нет", h.screen_text())
+        self.assertIn("Дополнительных полей пока нет", h.screen_text())
         with h.session_factory() as session:
             details = get_announcement_draft(
                 session,
@@ -772,12 +767,13 @@ class AnnouncementWizardPersistenceTests(unittest.TestCase):
         await h.callback(_callback(h, "aw_qedit"))
         self.assertIn("Текущее значение: Исходное", h.screen_text())
         await h.text("Новое")
-        # U2b: ответ вернул на экран завершения (есть неприменённые
-        # изменения); применение — явной кнопкой на экране правки.
-        self.assertIn("Есть изменения", h.screen_text())
-        await _open_edit(h)
-        self.assertIn("Применить изменения", str(h.screen_buttons()))
-        await h.callback(_callback(h, "aw_apply"))
+        # H3: ответ сразу применил изменение — новой версии достаточно,
+        # строки «Есть изменения» и кнопки применения больше нет.
+        self.assertEqual(
+            h.screen_text(),
+            "✅ Анонс готов.\n\nСообщение выше можно скопировать или переслать",
+        )
+        self.assertFalse(_callbacks(h, "aw_apply"))
         self.assertIn("Новое", h.posts()[-1] or "")
 
         # Обзор открывается для проверки и не отправляет ещё одну копию.

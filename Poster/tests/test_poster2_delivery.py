@@ -692,8 +692,9 @@ class TextAnnouncementSingleCopyTests(unittest.TestCase):
         self, h
     ) -> None:
         """
-        «Изменить» → «Применить изменения» — обычная замена: контент другой,
-        промоушен запрещён, прошлая копия удаляется после новой доставки.
+        H3: сохранение значения — обычная замена: контент другой, промоушен
+        запрещён, прошлая копия удаляется после новой доставки. Отдельной
+        кнопки «Применить изменения» больше нет.
         """
         from tests.test_stage27b_announcement_ui import (
             _callback,
@@ -711,8 +712,6 @@ class TextAnnouncementSingleCopyTests(unittest.TestCase):
         await h.callback(_callback(h, "aw_qgoto"))
         await h.callback(_callback(h, "aw_qedit"))
         await h.text("Обновлено")
-        await _open_edit(h)
-        await h.callback(_callback(h, "aw_apply"))
 
         updated = self._assert_single_copy(h, draft.id, text="Обновлено")
         stored = _stored(h, draft.id)

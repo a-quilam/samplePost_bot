@@ -98,6 +98,7 @@ from template_types import (
     validate_template_name,
 )
 from user_store import get_or_create_user
+from utils import current_value
 from utils.tg_html import escape_html
 from utils.ui_texts import tr
 
@@ -108,7 +109,9 @@ logger = logging.getLogger(__name__)
 PAGE_SIZE = 8
 BRICK_PAGE_SIZE = 8
 BUTTON_TITLE_LIMIT = 42
-TEXT_PREVIEW_LIMIT = 1200
+# H3 (требование D): превью значения больше не режется «для красоты».
+# Единственный предел — физический лимит сообщения Telegram; он живёт в
+# общем компоненте «Текущее значение» (utils/current_value.py).
 ERROR_TEXT_LIMIT = 1400
 
 PHASE_HUB = "hub"
@@ -217,22 +220,59 @@ def _short(value: object, limit: int = BUTTON_TITLE_LIMIT) -> str:
     return text[: max(0, limit - 1)] + "…"
 
 
-def _clip(value: object, limit: int = TEXT_PREVIEW_LIMIT) -> str:
-    text = str(value)
+def _clip(value: object, limit: int = ERROR_TEXT_LIMIT) -> str:
+    """
+    Текст ошибки без разметки, ограниченный по длине.
+
+    Это не «текущее значение» автора, а техническое сообщение, поэтому
+    пометка компонента («полное значение сохранено») здесь была бы ложной:
+    ошибка целиком лежит в логе.
+    """
+    text = _h(value)
     if len(text) <= limit:
         return text
-    return text[:limit] + "\n… (на экране сокращено; в шаблоне сохранено полностью)"
+    return text[:limit] + "\n… (сообщение сокращено; подробности в журнале)"
 
 
-def _display(value: object, limit: int = TEXT_PREVIEW_LIMIT) -> str:
-    """Отображает текст секции, не теряя факт пустоты/пробелов."""
+def _value_block(
+    label: str, value: object, *, limit: int = current_value.VALUE_LIMIT
+) -> str:
+    """
+    Блок «Текущее значение»: подпись, разделители, сохранённый текст.
+
+    Общий компонент (utils/current_value.py) сохраняет разметку SafeHtml,
+    не добавляет `<code>` и не режет текст эстетически — только по
+    физическому лимиту Telegram, с явной пометкой. Здесь значение только
+    экранируется: обрезку и пометку делает сам компонент, иначе пометка
+    задвоилась бы.
+
+    `limit` приходит из общего бюджета экрана (utils/current_value.py):
+    на экране с двумя значениями каждому достаётся половина остатка, иначе
+    два «полных» блока вместе не влезают в 4096.
+    """
     if not isinstance(value, str):
-        return "— нет —"
+        return current_value.current_value_block(label, "— нет —", limit=limit)
     if value == "":
-        return "— пусто —"
-    if not value.strip():
-        return "— только пробелы —"
-    return _h(_clip(value, limit))
+        shown = "— пусто —"
+    elif not value.strip():
+        shown = "— только пробелы —"
+    else:
+        shown = _h(value)
+    return current_value.current_value_block(label, shown, limit=limit)
+
+
+def _fit_value_screen(build, blocks: int) -> str:
+    """
+    Текст экрана с бюджетом для `blocks` значений.
+
+    Сначала экран собирается с пустыми значениями: это обвязка (заголовок,
+    подписи, подсказки, привязки). Остаток лимита Telegram делится между
+    значениями (utils/current_value.value_limits), затем экран собирается
+    окончательно. Так даже два огромных значения не выносят сообщение за
+    4096, и у каждого сокращённого есть честная пометка.
+    """
+    limits = current_value.value_limits(build([0] * blocks), blocks)
+    return current_value.clip_screen(build(limits))
 
 
 def _positive_int(value: object) -> TypeGuard[int]:
@@ -599,25 +639,38 @@ def _card_content(
         if template.kind == TEMPLATE_KIND_STANDARD
         else "Личный шаблон"
     )
-    lines = [
-        f"📄 <b>{_h(template.display_name)}</b>",
-        f"Тип: {kind_title}",
-        f"Версия: {template.revision}",
-    ]
-    if template.kind == TEMPLATE_KIND_STANDARD and place_name:
-        lines.append(f"Место: {_h(place_name)}")
-    lines.extend(["", f"📝 Текст:\n{_display(version.content, 900)}"])
-    if version.extended_content is not None:
-        lines.extend(
-            ["", f"📝 Расширенный текст:\n{_display(version.extended_content, 900)}"]
-        )
+    has_extended = version.extended_content is not None
+
+    def build(limits: list[int]) -> str:
+        lines = [
+            f"📄 <b>{_h(template.display_name)}</b>",
+            f"Тип: {kind_title}",
+            f"Версия: {template.revision}",
+        ]
+        if template.kind == TEMPLATE_KIND_STANDARD and place_name:
+            lines.append(f"Место: {_h(place_name)}")
+        lines.extend(["", _value_block("📝 Текст", version.content, limit=limits[0])])
+        if has_extended:
+            lines.extend(
+                [
+                    "",
+                    _value_block(
+                        "📝 Расширенный текст",
+                        version.extended_content,
+                        limit=limits[1],
+                    ),
+                ]
+            )
+        return "\n".join(lines)
+
+    text = _fit_value_screen(build, blocks=2 if has_extended else 1)
     edit_row = [
         InlineKeyboardButton(
             "✏️ Текст",
             callback_data=f"tp_edit:{template.template_id}",
         )
     ]
-    if version.extended_content is not None:
+    if has_extended:
         edit_row.append(
             InlineKeyboardButton(
                 "✏️ Расширенный",
@@ -627,18 +680,20 @@ def _card_content(
     keyboard = InlineKeyboardMarkup(
         [
             edit_row,
+            # H3 (требование E): просмотр текста и список кодов — два
+            # связанных действия «посмотреть», они стоят рядом.
             [
                 InlineKeyboardButton(
                     "👁 Предпросмотр",
                     callback_data=f"tp_preview:{template.template_id}",
-                )
-            ],
-            [
+                ),
                 InlineKeyboardButton(
-                    "📋 Доступные кирпичики",
+                    "📋 Кирпичики",
                     callback_data=f"tp_bricks:{template.template_id}",
-                )
+                ),
             ],
+            # Опасное действие — отдельной строкой: его нельзя нажать
+            # случайно рядом с просмотром.
             [
                 InlineKeyboardButton(
                     "♻️ Восстановить стандарт",
@@ -661,49 +716,62 @@ def _card_content(
                 )
             ],
         )
-    return "\n".join(lines), InlineKeyboardMarkup(rows)
+    return text, InlineKeyboardMarkup(rows)
 
 
 def _preview_content(
     template: TemplateDetails, *, place_name: str | None = None
 ) -> tuple[str, InlineKeyboardMarkup]:
     version = template.current_version
-    lines = [
-        f"👁 Предпросмотр: {_h(template.display_name)}",
-    ]
-    if template.kind == TEMPLATE_KIND_STANDARD and place_name:
-        lines.append(f"Место: {_h(place_name)}")
-    lines.extend(
-        [
-            f"Версия: {template.revision}",
-            "",
-            f"📝 Текст:\n{_display(version.content)}",
+    has_extended = version.extended_content is not None
+
+    def build(limits: list[int]) -> str:
+        lines = [
+            f"👁 Предпросмотр: {_h(template.display_name)}",
         ]
-    )
-    if version.extended_content is not None:
+        if template.kind == TEMPLATE_KIND_STANDARD and place_name:
+            lines.append(f"Место: {_h(place_name)}")
         lines.extend(
-            ["", f"📝 Расширенный текст:\n{_display(version.extended_content)}"]
+            [
+                f"Версия: {template.revision}",
+                "",
+                _value_block("📝 Текст", version.content, limit=limits[0]),
+            ]
         )
-    lines.append("")
-    if version.bindings:
-        lines.append("🔗 Привязки кирпичиков:")
-        for binding in version.bindings:
-            label = (
-                f"• [{_h(binding.code)}] — {_h(binding.title)} "
-                f"({SCOPE_TITLES.get(binding.scope, binding.scope)})"
+        if has_extended:
+            lines.extend(
+                [
+                    "",
+                    _value_block(
+                        "📝 Расширенный текст",
+                        version.extended_content,
+                        limit=limits[1],
+                    ),
+                ]
             )
-            if not binding.is_active:
-                label += " · архив"
-            lines.append(label)
-    else:
-        lines.append("🔗 Привязок кирпичиков нет.")
-    lines.extend(
-        [
-            "",
-            "Это структура шаблона. Значения кирпичиков подставятся при "
-            "создании анонса.",
-        ]
-    )
+        lines.append("")
+        if version.bindings:
+            lines.append("🔗 Привязки кирпичиков:")
+            for binding in version.bindings:
+                label = (
+                    f"• [{_h(binding.code)}] — {_h(binding.title)} "
+                    f"({SCOPE_TITLES.get(binding.scope, binding.scope)})"
+                )
+                if not binding.is_active:
+                    label += " · архив"
+                lines.append(label)
+        else:
+            lines.append("🔗 Привязок кирпичиков нет.")
+        lines.extend(
+            [
+                "",
+                "Это структура шаблона. Значения кирпичиков подставятся при "
+                "создании анонса.",
+            ]
+        )
+        return "\n".join(lines)
+
+    text = _fit_value_screen(build, blocks=2 if has_extended else 1)
     keyboard = InlineKeyboardMarkup(
         [
             [
@@ -714,7 +782,7 @@ def _preview_content(
             ]
         ]
     )
-    return "\n".join(lines), keyboard
+    return text, keyboard
 
 
 def _reset_confirm_content(
@@ -872,33 +940,39 @@ def _text_edit_content(
     text_name = state["text_name"]
     title = TEXT_GENITIVE[text_name]
     draft = state.get("draft_text", "")
-    text = (
-        f"✏️ Редактирование {title}\n\n"
-        f"Текст (черновик):\n{_display(draft)}"
-        "\n\n"
-        "Отправьте новым сообщением ПОЛНЫЙ текст. Переводы строк, "
-        "пробелы и Unicode сохраняются как есть.\n\n"
-        "Кирпичики записываются в квадратных скобках: [код]. Список доступных "
-        "кодов — по кнопке ниже. Служебные скобки [[ и ]] выводятся как текст.\n"
-        "Форматирование: **жирный**, *курсив*, __подчёркнутый__, "
-        "~~зачёркнутый~~. Ссылка: Текст(https://example.com).\n"
-        "Фотографии в шаблон не входят."
-    )
+
+    def build(limits: list[int]) -> str:
+        # Бюджет значения считается от обвязки ЭТОГО экрана: заголовок и
+        # подсказка про формат входят в 4096 вместе с блоком значения.
+        return (
+            f"✏️ Редактирование {title}\n\n"
+            f"{_value_block('Текст (черновик)', draft, limit=limits[0])}"
+            "\n\n"
+            "Отправьте новым сообщением ПОЛНЫЙ текст. Переводы строк, "
+            "пробелы и Unicode сохраняются как есть.\n\n"
+            "Кирпичики записываются в квадратных скобках: [код]. Список доступных "
+            "кодов — по кнопке ниже. Служебные скобки [[ и ]] выводятся как текст.\n"
+            "Форматирование: **жирный**, *курсив*, __подчёркнутый__, "
+            "~~зачёркнутый~~. Ссылка: Текст(https://example.com).\n"
+            "Фотографии в шаблон не входят."
+        )
+
+    text = _fit_value_screen(build, blocks=1)
     template_id = state["template_id"]
     keyboard = InlineKeyboardMarkup(
         [
+            # H3 (требование E): два справочных действия рядом.
             [
                 InlineKeyboardButton(
-                    "📋 Доступные кирпичики",
+                    "📋 Кирпичики",
                     callback_data=f"tp_bricks:{template_id}",
-                )
-            ],
-            [
+                ),
                 InlineKeyboardButton(
-                    "❓ Подсказка по оформлению",
+                    "❓ Подсказка",
                     callback_data=f"tp_help:{template_id}",
-                )
+                ),
             ],
+            # Очистка — отдельной строкой: необратимо для черновика.
             [InlineKeyboardButton("🧹 Очистить", callback_data="tp_clear")],
             [
                 InlineKeyboardButton(
@@ -939,30 +1013,39 @@ def _section_error_content(
     kind = str(state.get("error_kind") or "unexpected")
     message = str(state.get("error_message") or "Повторите попытку.")
     draft = state.get("draft_text", "")
-    lines = [
-        _error_header(kind),
-        "",
-        _h(_clip(message, ERROR_TEXT_LIMIT)),
-        "",
-        "Ваш текст сохранён:" if draft else "Секция сейчас пуста.",
-    ]
-    if draft:
-        lines.append(_display(draft))
-    lines.append("")
-    if kind == "stale":
+
+    def build(limits: list[int]) -> str:
+        lines = [
+            _error_header(kind),
+            "",
+            _clip(message, ERROR_TEXT_LIMIT),
+            "",
+        ]
         lines.append(
-            "Новая версия не создана: чужие изменения не перезаписаны. "
-            "Обновите версию, проверьте текст и подтвердите сохранение."
+            _value_block("Ваш текст сохранён", draft, limit=limits[0])
+            if draft
+            else "Секция сейчас пуста."
         )
-    elif kind == "conflict":
-        lines.append(
-            "Данные не потеряны. Повторите сохранение; при повторной "
-            "неоднозначности выберите кирпичик кнопками."
-        )
-    elif kind == "forbidden":
-        lines.append("Изменение невозможно: права на шаблон больше не действуют.")
-    else:
-        lines.append(_TEXT_INPUT_ERROR)
+        lines.append("")
+        if kind == "stale":
+            lines.append(
+                "Новая версия не создана: чужие изменения не перезаписаны. "
+                "Обновите версию, проверьте текст и подтвердите сохранение."
+            )
+        elif kind == "conflict":
+            lines.append(
+                "Данные не потеряны. Повторите сохранение; при повторной "
+                "неоднозначности выберите кирпичик кнопками."
+            )
+        elif kind == "forbidden":
+            lines.append("Изменение невозможно: права на шаблон больше не действуют.")
+        else:
+            lines.append(_TEXT_INPUT_ERROR)
+        return "\n".join(lines)
+
+    # Текст ошибки занимает экран вместе со значением: бюджет считается от
+    # фактической обвязки, иначе черновик на 5000 символов вынесет экран.
+    text = _fit_value_screen(build, blocks=1)
 
     template_id = state["template_id"]
     rows: list[list[InlineKeyboardButton]] = []
@@ -994,15 +1077,15 @@ def _section_error_content(
         )
         rows.append([_section_back_button(state)])
     else:
-        rows.append(
-            [InlineKeyboardButton("✏️ Исправить текст", callback_data="tp_retry")]
-        )
+        # H3 (требование E): «поправить» и «посмотреть коды» — действия над
+        # тем же текстом, поэтому стоят в одной строке.
         rows.append(
             [
+                InlineKeyboardButton("✏️ Исправить", callback_data="tp_retry"),
                 InlineKeyboardButton(
-                    "📋 Доступные кирпичики",
+                    "📋 Кирпичики",
                     callback_data=f"tp_bricks:{template_id}",
-                )
+                ),
             ]
         )
         rows.append(
@@ -1013,22 +1096,29 @@ def _section_error_content(
                 )
             ]
         )
-    return "\n".join(lines), InlineKeyboardMarkup(rows)
+    return text, InlineKeyboardMarkup(rows)
 
 
 def _access_error_content(state: dict) -> tuple[str, InlineKeyboardMarkup]:
     draft = state.get("draft_text", "")
-    lines = [
-        "⚠️ Шаблон больше недоступен",
-        "",
-        "Права изменились или шаблон удалён. Текст ниже сохранён в сессии, "
-        "но записать его в этот шаблон уже нельзя.",
-        "",
-        "Ваш текст:" if draft else "Секция сейчас пуста.",
-    ]
-    if draft:
-        lines.append(_display(draft))
-    return "\n".join(lines), InlineKeyboardMarkup([[_section_back_button(state)]])
+
+    def build(limits: list[int]) -> str:
+        lines = [
+            "⚠️ Шаблон больше недоступен",
+            "",
+            "Права изменились или шаблон удалён. Текст ниже сохранён в сессии, "
+            "но записать его в этот шаблон уже нельзя.",
+            "",
+        ]
+        lines.append(
+            _value_block("Ваш текст", draft, limit=limits[0])
+            if draft
+            else "Секция сейчас пуста."
+        )
+        return "\n".join(lines)
+
+    text = _fit_value_screen(build, blocks=1)
+    return text, InlineKeyboardMarkup([[_section_back_button(state)]])
 
 
 def _chosen_rows(state: dict) -> list[str]:
@@ -1044,37 +1134,44 @@ def _confirm_content(
     text_name = state["text_name"]
     title = TEXT_GENITIVE[text_name]
     draft = state.get("draft_text", "")
-    lines = [
-        f"✅ Предпросмотр и подтверждение сохранения ({title})",
-        "",
-        _display(draft),
-        "",
-        "Второй текст шаблона не меняется. Новая версия создастся только "
-        "после нажатия «Сохранить».",
-    ]
-    chosen = _chosen_rows(state)
-    if chosen:
-        lines.extend(["", "Явно выбраны кирпичики: " + ", ".join(chosen) + "."])
+
+    def build(limits: list[int]) -> str:
+        lines = [
+            f"✅ Предпросмотр и подтверждение сохранения ({title})",
+            "",
+            _value_block("Текст (черновик)", draft, limit=limits[0]),
+            "",
+            "Второй текст шаблона не меняется. Новая версия создастся только "
+            "после нажатия «Сохранить».",
+        ]
+        chosen = _chosen_rows(state)
+        if chosen:
+            lines.extend(["", "Явно выбраны кирпичики: " + ", ".join(chosen) + "."])
+        return "\n".join(lines)
+
+    text = _fit_value_screen(build, blocks=1)
     template_id = state["template_id"]
     keyboard = InlineKeyboardMarkup(
         [
-            [InlineKeyboardButton("💾 Сохранить", callback_data="tp_save")],
-            [InlineKeyboardButton("✏️ Исправить текст", callback_data="tp_retry")],
+            # H3 (требование E): пара «принять / поправить» — оба действия
+            # относятся к показанному выше черновику.
             [
-                InlineKeyboardButton(
-                    "📋 Доступные кирпичики",
-                    callback_data=f"tp_bricks:{template_id}",
-                )
+                InlineKeyboardButton("💾 Сохранить", callback_data="tp_save"),
+                InlineKeyboardButton("✏️ Исправить", callback_data="tp_retry"),
             ],
             [
+                InlineKeyboardButton(
+                    "📋 Кирпичики",
+                    callback_data=f"tp_bricks:{template_id}",
+                ),
                 InlineKeyboardButton(
                     "◀️ К шаблону",
                     callback_data=f"tp_open:{template_id}",
-                )
+                ),
             ],
         ]
     )
-    return "\n".join(lines), keyboard
+    return text, keyboard
 
 
 def _ambiguties(state: dict) -> list[dict[str, Any]]:
@@ -1136,13 +1233,15 @@ def _ambiguity_content(
                 ]
             )
     template_id = state["template_id"]
-    rows.append([InlineKeyboardButton("✏️ Исправить текст", callback_data="tp_retry")])
+    # H3 (требование E): выбор варианта уже сделан выше; ниже — пара
+    # «поправить / посмотреть коды» и отдельно выход к шаблону.
     rows.append(
         [
+            InlineKeyboardButton("✏️ Исправить", callback_data="tp_retry"),
             InlineKeyboardButton(
-                "📋 Доступные кирпичики",
+                "📋 Кирпичики",
                 callback_data=f"tp_bricks:{template_id}",
-            )
+            ),
         ]
     )
     rows.append(
@@ -1251,7 +1350,9 @@ def _create_name_content(
     if isinstance(current, str) and current.strip():
         lines.extend(["", f"Текущее название: «{_h(current)}»"])
     lines.extend(["", "Введите название нового шаблона:"])
-    return "\n".join(lines), InlineKeyboardMarkup(
+    # Название вводит человек, и оно может быть любой длины: экран всё равно
+    # обязан уложиться в лимит Telegram (с явной пометкой о сокращении).
+    return current_value.clip_screen("\n".join(lines)), InlineKeyboardMarkup(
         [[InlineKeyboardButton("◀️ Отмена", callback_data="tp_cancel")]]
     )
 
@@ -1259,7 +1360,7 @@ def _create_name_content(
 def _create_choice_content(
     name: str,
 ) -> tuple[str, InlineKeyboardMarkup]:
-    text = (
+    text = current_value.clip_screen(
         f"Шаблон «{_h(name)}»\n\n"
         "Выберите начальное содержимое:\n"
         "• «На основе стандартного» — встроенный текст Poster с системными "
@@ -1269,14 +1370,15 @@ def _create_choice_content(
     )
     return text, InlineKeyboardMarkup(
         [
+            # H3 (требование E): два варианта основы — один выбор, одна строка.
             [
-                InlineKeyboardButton(
-                    "📄 На основе стандартного", callback_data="tp_cstd"
-                )
+                InlineKeyboardButton("📄 Стандартный", callback_data="tp_cstd"),
+                InlineKeyboardButton("📄 Пустой", callback_data="tp_cempty"),
             ],
-            [InlineKeyboardButton("📄 Пустой шаблон", callback_data="tp_cempty")],
-            [InlineKeyboardButton("✏️ Изменить название", callback_data="tp_cname")],
-            [InlineKeyboardButton("◀️ Отмена", callback_data="tp_cancel")],
+            [
+                InlineKeyboardButton("✏️ Название", callback_data="tp_cname"),
+                InlineKeyboardButton("◀️ Отмена", callback_data="tp_cancel"),
+            ],
         ]
     )
 
@@ -1293,30 +1395,38 @@ def _create_confirm_content(
         if mode == "standard"
         else "пустой шаблон (минимальная заготовка)"
     )
-    lines = [
-        "📄 Проверьте новый шаблон",
-        "",
-        f"Название: «{_h(name)}»",
-        f"Основа: {mode_title}",
-        "",
-        f"📝 Текст:\n{_display(content)}",
-    ]
-    if isinstance(extended, str):
-        lines.extend(["", f"📝 Расширенный текст:\n{_display(extended)}"])
-    if mode == "empty":
-        lines.extend(
-            [
-                "",
-                "Совсем пустой шаблон база не принимает, поэтому в тексте "
-                "остаётся минимальный кирпичик [название]. Его можно заменить "
-                "или дополнить после создания.",
-            ]
-        )
+    has_extended = isinstance(extended, str)
     error = state.get("error_message")
-    if isinstance(error, str) and error:
-        lines.extend(["", f"⚠️ {_h(_clip(error, ERROR_TEXT_LIMIT))}"])
-    lines.extend(["", "Подтвердите создание?"])
-    return "\n".join(lines), InlineKeyboardMarkup(
+
+    def build(limits: list[int]) -> str:
+        lines = [
+            "📄 Проверьте новый шаблон",
+            "",
+            f"Название: «{_h(name)}»",
+            f"Основа: {mode_title}",
+            "",
+            _value_block("📝 Текст", content, limit=limits[0]),
+        ]
+        if isinstance(extended, str):
+            lines.extend(
+                ["", _value_block("📝 Расширенный текст", extended, limit=limits[1])]
+            )
+        if mode == "empty":
+            lines.extend(
+                [
+                    "",
+                    "Совсем пустой шаблон база не принимает, поэтому в тексте "
+                    "остаётся минимальный кирпичик [название]. Его можно заменить "
+                    "или дополнить после создания.",
+                ]
+            )
+        if isinstance(error, str) and error:
+            lines.extend(["", f"⚠️ {_clip(error, ERROR_TEXT_LIMIT)}"])
+        lines.extend(["", "Подтвердите создание?"])
+        return "\n".join(lines)
+
+    text = _fit_value_screen(build, blocks=2 if has_extended else 1)
+    return text, InlineKeyboardMarkup(
         [
             [InlineKeyboardButton("💾 Создать", callback_data="tp_csave")],
             [InlineKeyboardButton("◀️ К выбору основы", callback_data="tp_cback")],

@@ -226,11 +226,11 @@ class EditMenuAccessTests(unittest.TestCase):
             labels = [label for label, _ in h.screen_buttons()]
             self.assertIn("🏷 Изменить название", labels)
             self.assertIn("📝 Альтернативные названия", labels)
-            self.assertIn("🏠 Изменить адрес", labels)
-            self.assertIn("🔗 Изменить ссылку", labels)
-            # адреса и ссылки нет — кнопок удаления быть не должно
-            self.assertNotIn("🗑 Удалить адрес", labels)
-            self.assertNotIn("🗑 Удалить ссылку", labels)
+            # H3-C: правка и удаление поля — рядом, одной парой.
+            self.assertIn("✏️ Адрес", labels)
+            self.assertIn("✏️ Ссылка", labels)
+            # адреса и ссылки нет — корзин быть не должно
+            self.assertNotIn("🗑", labels)
 
     @scenario_test
     async def test_place_admin_sees_edit_menu_for_own_place(self, h):
@@ -390,7 +390,7 @@ class AddressUrlEditTests(unittest.TestCase):
             place_id = insert_place(h, "Кофейня «Локал»", address="ул. Старая, 9")
             await open_edit_menu(h, place_id)
             labels = [label for label, _ in h.screen_buttons()]
-            self.assertIn("🗑 Удалить адрес", labels)
+            self.assertIn("🗑", labels)
 
             await h.callback(screen_callback(h, "adm_edit_address_delete:"))
             self.assertIn("Подтвердите удаление адреса", h.screen_text())
@@ -398,9 +398,9 @@ class AddressUrlEditTests(unittest.TestCase):
             self.assertIn("✅ Адрес места удалён.", h.screen_text())
             self.assertIsNone(place_address(h, place_id))
 
-            # кнопка удаления исчезла, адрес показывает «Не указан»
+            # корзина исчезла, адрес показывает «Не указан»
             labels = [label for label, _ in h.screen_buttons()]
-            self.assertNotIn("🗑 Удалить адрес", labels)
+            self.assertNotIn("🗑", labels)
             self.assertIn("Не указан", h.screen_text())
 
     @scenario_test
@@ -410,7 +410,7 @@ class AddressUrlEditTests(unittest.TestCase):
             place_id = insert_place(h, "Кофейня «Локал»", url="https://t.me/poster")
             await open_edit_menu(h, place_id)
             labels = [label for label, _ in h.screen_buttons()]
-            self.assertIn("🗑 Удалить ссылку", labels)
+            self.assertIn("🗑", labels)
 
             await h.callback(screen_callback(h, "adm_edit_url_delete:"))
             self.assertIn("Подтвердите удаление ссылки", h.screen_text())
@@ -419,7 +419,7 @@ class AddressUrlEditTests(unittest.TestCase):
             self.assertIsNone(place_url(h, place_id))
 
             labels = [label for label, _ in h.screen_buttons()]
-            self.assertNotIn("🗑 Удалить ссылку", labels)
+            self.assertNotIn("🗑", labels)
 
 
 @unittest.skipIf(
