@@ -85,7 +85,7 @@ from announcement_store import (
 from announcement_wizard import (
     WizardStage,
     answer_payload_to_raw,
-    snapshot_tokens_by_text,
+    extra_candidate_brick_ids,
 )
 from brick_store import BrickError, list_available_bricks
 from brick_types import (
@@ -113,7 +113,6 @@ from template_compiler import (
     announcement_text_limit,
     check_announcement_length,
 )
-from template_parser import BrickNode, FormatNode, LinkNode
 from template_store import (
     TemplateError,
     get_standard_template,
@@ -2277,22 +2276,6 @@ async def _render_question_manager(
             ]
         )
     rows.append(
-        [
-            InlineKeyboardButton(
-                tr("buttons.wizard.dopolnitelnyy_kirpichik"),
-                callback_data=(f"aw_extras:{details.draft_id}:{details.revision}"),
-            )
-        ]
-    )
-    rows.append(
-        [
-            InlineKeyboardButton(
-                tr("buttons.wizard.obzor_anonsa"),
-                callback_data=(f"aw_preview:{details.draft_id}:{details.revision}"),
-            )
-        ]
-    )
-    rows.append(
         [InlineKeyboardButton(tr("buttons.nav.back"), callback_data="aw_manage_back")]
     )
     text = "\n".join(lines)
@@ -2941,73 +2924,36 @@ def _available_extra_bricks(details, telegram_user_id: int):
     """
     Кирпичики, которые ещё можно добавить как дополнительное поле анонса.
 
-    H3 (требование A): первыми идут brick-токены расширенного текста,
-    которых нет в каноническом `content` и которые ещё не выбраны, — в том
-    порядке, в каком они появятся в анонсе. Домен не разрешает добавить
-    кирпичик, уже входящий в снимок шаблона, поэтому дальше список
-    дополняется остальными доступными определениями (прежнее поведение
-    H2): расширение достраивается из канонического текста.
+    Poster 2.3.1 (E1): список строго по расширенному шаблону — brick_id
+    `extended_content` снимка минус brick_id канонического `content`, минус
+    уже выбранные, в порядке первого появления в расширенном тексте.
+    Никаких других кирпичиков список не предлагает: доп. поле живёт только
+    там, где для него есть место в тексте. Без `extended_content` список
+    пуст.
     """
+    snapshot = details.template_snapshot
+    if snapshot is None:
+        return []
+    chosen = {extra.brick_id for extra in details.extras}
+    candidates = [
+        brick_id
+        for brick_id in extra_candidate_brick_ids(snapshot)
+        if brick_id not in chosen
+    ]
+    if not candidates:
+        return []
     with SessionLocal() as session:
         available = list_available_bricks(
             session,
             viewer_telegram_user_id=telegram_user_id,
             place_id=details.place_id,
         )
-    snapshot = details.template_snapshot
-    chosen = {extra.brick_id for extra in details.extras}
     available_by_id = {brick.id: brick for brick in available}
-    ordered: list[int] = []
-    if snapshot is not None:
-        for brick_id in _extra_candidate_ids(snapshot):
-            if brick_id in available_by_id and brick_id not in chosen:
-                ordered.append(brick_id)
-    used = set(snapshot.brick_ids) if snapshot is not None else set()
-    used.update(chosen)
-    for brick in available:
-        if brick.id in used or brick.id in ordered:
-            continue
-        ordered.append(brick.id)
-    return [available_by_id[brick_id] for brick_id in ordered]
-
-
-def _extra_candidate_ids(snapshot) -> list[int]:
-    """
-    brick_id расширенного текста снимка, отсутствующие в каноническом.
-
-    Разбор идёт тем же `snapshot_tokens_by_text`, что и рендер: коды уже
-    разрешены снимком и заново не подменяются.
-    """
-    try:
-        texts = snapshot_tokens_by_text(snapshot)
-    except Exception:  # noqa: BLE001 — битый снимок покажет экран ошибки рендера
-        return []
-    content_ids = set(_brick_ids_in(texts.get(TEMPLATE_CONTENT, ())))
-    extended_ids = _brick_ids_in(texts.get(TEMPLATE_EXTENDED_CONTENT, ()))
-    ordered: list[int] = []
-    for brick_id in extended_ids:
-        if brick_id in content_ids or brick_id in ordered:
-            continue
-        ordered.append(brick_id)
-    return ordered
-
-
-def _brick_ids_in(nodes) -> list[int]:
-    """Плоский список brick_id токенов (включая вложенные в форматирование)."""
-    found: list[int] = []
-    for node in nodes:
-        if isinstance(node, BrickNode):
-            if node.brick_id is not None:
-                found.append(int(node.brick_id))
-        elif isinstance(node, FormatNode):
-            found.extend(_brick_ids_in(node.children))
-        elif isinstance(node, LinkNode):
-            found.extend(_brick_ids_in(node.label))
-            if isinstance(node.url, BrickNode) and node.url.brick_id is not None:
-                found.append(int(node.url.brick_id))
-        elif hasattr(node, "children"):
-            found.extend(_brick_ids_in(getattr(node, "children")))
-    return found
+    return [
+        available_by_id[brick_id]
+        for brick_id in candidates
+        if brick_id in available_by_id
+    ]
 
 
 async def _render_available_bricks(
@@ -3148,7 +3094,7 @@ def _extra_value_text(
         # Заголовок кирпичика задаёт человеком и уходит в parse_mode=HTML
         # экран — экранируем (аудит: неэкранированный HTML ломал экран).
         f"➕ {_h(field.title)}",
-        tr("wizard.extra_value.kirpichik_dobavlyaet_stroku_konec"),
+        tr("wizard.extra_value.position_from_template"),
     ]
     description = wizard_questions.description_html(field.description)
     if description:
@@ -4806,8 +4752,9 @@ def _delivered_edit_keyboard(
             ),
         ]
     ]
-    # «🧱 Дополнительные поля» показывается только когда добавлять есть что:
-    # пустой список доступных кирпичиков — не действие, а тупик.
+    # «🧱 Дополнительные поля» показывается, когда есть что добавить ИЛИ
+    # когда уже выбранные поля надо посмотреть/удалить: пустой список без
+    # выбранных полей — не действие, а тупик.
     if extras_available:
         rows.append(
             [
@@ -4930,7 +4877,9 @@ async def _render_delivered_edit(
         text,
         _delivered_edit_keyboard(
             details,
-            extras_available=bool(_available_extra_bricks(details, _user_id(update))),
+            extras_available=bool(
+                _available_extra_bricks(details, _user_id(update)) or details.extras
+            ),
         ),
     )
     return AW_PREVIEW

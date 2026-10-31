@@ -45,6 +45,8 @@ from template_parser import (
     parse_template,
 )
 from template_types import (
+    TEMPLATE_CONTENT,
+    TEMPLATE_EXTENDED_CONTENT,
     TEMPLATE_TEXTS,
 )
 
@@ -364,16 +366,22 @@ def _parse_snapshot_text(
 
 def iter_snapshot_bricks(
     snapshot: AnnouncementTemplateSnapshot,
+    *,
+    text_name: str | None = None,
 ) -> Iterable[BrickNode]:
     """
     Обходит тексты снимка в порядке `content` → `extended_content`.
 
     `brick_id` восстанавливается только из сохранённых привязок снимка.
     Текстовый код не разрешается заново и не может подменить определение.
+
+    `text_name` ограничивает обход одним текстом: конструктор вопросов
+    спрашивает только `content` (Poster 2.3.1, E1).
     """
     bindings = _bindings_by_code(snapshot)
-    for text_name in TEXT_ORDER:
-        tokens = _parse_snapshot_text(snapshot, text_name, bindings)
+    text_names = TEXT_ORDER if text_name is None else (text_name,)
+    for name in text_names:
+        tokens = _parse_snapshot_text(snapshot, name, bindings)
         if tokens is None:
             continue
         yield from _iter_nodes(tokens)
@@ -395,6 +403,52 @@ def snapshot_tokens_by_text(
         if tokens is not None:
             result[text_name] = tokens
     return result
+
+
+def snapshot_brick_ids_in_text(
+    snapshot: AnnouncementTemplateSnapshot,
+    text_name: str,
+) -> tuple[int, ...]:
+    """
+    Уникальные brick_id одного текста снимка в порядке первого появления.
+
+    Используется правилом доп. кирпичиков (Poster 2.3.1, E1): список
+    кандидатов считается по расширенному тексту за вычетом канонического.
+    """
+    ids: list[int] = []
+    for node in iter_snapshot_bricks(snapshot, text_name=text_name):
+        assert node.brick_id is not None
+        if node.brick_id not in ids:
+            ids.append(node.brick_id)
+    return tuple(ids)
+
+
+def snapshot_has_extended_content(snapshot: AnnouncementTemplateSnapshot) -> bool:
+    """Есть ли у снимка расширенный текст (иначе доп. поля недоступны)."""
+    raw = snapshot.texts.get(TEMPLATE_EXTENDED_CONTENT)
+    return isinstance(raw, str) and bool(raw.strip())
+
+
+def extra_candidate_brick_ids(
+    snapshot: AnnouncementTemplateSnapshot,
+) -> tuple[int, ...]:
+    """
+    Кирпичики, которые можно добавить как доп. поле этого анонса.
+
+    Правило Poster 2.3.1 (E1): brick_id расширенного текста снимка минус
+    brick_id канонического текста, в порядке первого появления в
+    расширенном. Выбранные extras и доступность определений проверяет
+    вызывающий слой. Без `extended_content` кандидатов нет: доп. поле
+    некуда поставить в тексте.
+    """
+    if not snapshot_has_extended_content(snapshot):
+        return ()
+    content_ids = set(snapshot_brick_ids_in_text(snapshot, TEMPLATE_CONTENT))
+    return tuple(
+        brick_id
+        for brick_id in snapshot_brick_ids_in_text(snapshot, TEMPLATE_EXTENDED_CONTENT)
+        if brick_id not in content_ids
+    )
 
 
 def _validate_context_value(
@@ -424,8 +478,10 @@ def build_questions(
     """
     Строит детерминированный список недостающих вопросов.
 
-    - порядок — первое появление кирпичика: сначала `content`, затем
-      `extended_content`;
+    - вопросы задаются ТОЛЬКО по каноническому `content` снимка
+      (Poster 2.3.1, E1): доп. поля из `extended_content` спрашиваются
+      не в конструкторе, а позже — после выбора кирпичика;
+    - порядок — первое появление кирпичика в `content`;
     - повторяющийся `brick_id` встречается в списке один раз;
     - кирпичики вне снимка игнорируются, даже если переданы в context/answers;
     - известное и корректное значение места/контекста не спрашивается;
@@ -443,7 +499,7 @@ def build_questions(
     seen: set[int] = set()
     questions: list[Question] = []
 
-    for node in iter_snapshot_bricks(snapshot):
+    for node in iter_snapshot_bricks(snapshot, text_name=TEMPLATE_CONTENT):
         assert node.brick_id is not None
         brick_id = node.brick_id
         if brick_id in seen:

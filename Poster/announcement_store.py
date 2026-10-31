@@ -48,8 +48,10 @@ from announcement_wizard import (
     answer_payload_to_raw,
     build_questions,
     evaluate_announcement_readiness,
+    extra_candidate_brick_ids,
     place_context_values,
     snapshot_brick_ids_by_code,
+    snapshot_has_extended_content,
     snapshot_tokens_by_text,
     visible_announcement_text,
     visible_brick_issue,
@@ -1563,13 +1565,12 @@ def add_announcement_extra(
     """
     Добавляет дополнительный кирпичик только в текущий анонс.
 
-    Исходный шаблон/снимок не меняются. Кирпичик должен быть доступен
-    пользователю в выбранном месте, отсутствовать в снимке и ещё не быть
-    добавленным. Значение можно передать сразу — одной транзакцией.
-
-    Poster 2.3 H2: секции и позиции больше нет. Кирпичик добавляет строку в
-    конец текста анонса, а сам анонс рендерится по `extended_content`, если
-    он есть у шаблона.
+    Исходный шаблон/снимок не меняются. Poster 2.3.1 (E1): разрешён только
+    кирпичик из списка кандидатов расширенного шаблона — brick_id
+    `extended_content` снимка, которого нет в `content` и который ещё не
+    выбран. Значение рендерится ровно на месте токена в расширенном тексте.
+    Без `extended_content` доп. поля недоступны. Значение можно передать
+    сразу — одной транзакцией.
     """
     actor = _require_actor(session, actor_telegram_user_id)
     if not _valid_positive_id(brick_id):
@@ -1581,18 +1582,18 @@ def add_announcement_extra(
     snapshot = _draft_snapshot(session, actor, row)
     if snapshot is None:
         raise AnnouncementStageError("Сначала выберите шаблон анонса.")
-    if brick_id in set(snapshot.brick_ids):
-        raise AnnouncementBrickError("Этот кирпичик уже входит в выбранный шаблон.")
-    existing = session.scalar(
-        select(AnnouncementExtra).where(
-            AnnouncementExtra.draft_id == row.id,
-            AnnouncementExtra.brick_id == brick_id,
-            AnnouncementExtra.occurrence == 1,
+    if not snapshot_has_extended_content(snapshot):
+        raise AnnouncementStageError(
+            "У шаблона нет расширенной версии — дополнительные поля недоступны"
         )
-    )
-    if existing is not None:
+    chosen = {extra.brick_id for extra in _draft_details(session, actor, row).extras}
+    if brick_id in chosen:
         raise AnnouncementBrickError(
             "Этот кирпичик уже добавлен в дополнительные поля анонса."
+        )
+    if brick_id not in extra_candidate_brick_ids(snapshot):
+        raise AnnouncementBrickError(
+            "Этот кирпичик не входит в расширенный текст шаблона."
         )
     definition = _active_definition(
         session,
@@ -2416,11 +2417,11 @@ def build_announcement_render_payload(
     """
     Формирует связанные тексты и значения для `template_compiler.render_template`.
 
-    Дополнительные кирпичики добавляются строками в конец текста только этого
-    анонса. Исходный снимок шаблона не переписывается. Если шаблон имеет
-    `extended_content`, рендерятся дополнительные строки вместе с расширенным
-    текстом; иначе расширение достраивается из канонического: он же служит
-    основой, а дополнительные кирпичики дописываются в конец.
+    Poster 2.3.1 (E1): при наличии `extended_content` доп. кирпичики уже
+    стоят на своих местах в расширенном тексте — ничего не дописывается.
+    Исходный снимок шаблона не переписывается. Legacy: у старых черновиков
+    (снимок без `extended_content`) доп. кирпичики дописываются строками в
+    конец канонического текста, чтобы уже сохранённые значения не пропали.
     """
     actor = _require_actor(session, actor_telegram_user_id)
     row = _load_owned_draft(session, actor, draft_id)
@@ -2450,14 +2451,11 @@ def build_announcement_render_payload(
     texts: dict[str, tuple[Any, ...]] = {}
     for text_name, tokens in tokens_by_text.items():
         texts[text_name] = tuple(tokens)
-    if extra_nodes:
-        # Дополнительные кирпичики — отдельные строки в конце выбранного
-        # текста. Ключ `extended_content` появляется тогда и только тогда,
-        # когда дополнительные кирпичики есть: рендер выбирает его по факту
-        # наличия, а не по позиции в исходном шаблоне.
-        base = list(tokens_by_text.get(TEMPLATE_EXTENDED_CONTENT, ()))
-        if not base:
-            base = list(tokens_by_text.get(TEMPLATE_CONTENT, ()))
+    if extra_nodes and not snapshot_has_extended_content(snapshot):
+        # Legacy-ветка: снимок без `extended_content` (черновик создан до
+        # Poster 2.3). Доп. кирпичики — отдельные строки в конце
+        # канонического текста, иначе сохранённые значения исчезли бы.
+        base = list(tokens_by_text.get(TEMPLATE_CONTENT, ()))
         if base:
             base.append(TextNode("\n"))
         for index, node in enumerate(extra_nodes):
@@ -2499,11 +2497,12 @@ def build_announcement_fields(
     today: date | None = None,
 ) -> tuple[AnnouncementFieldState, ...]:
     """
-    Возвращает все кирпичики снимка в порядке первого появления в текстах.
+    Возвращает поля анонса в порядке первого появления в текстах.
 
-    Недостающие поля берутся из того же `build_questions`, что и мастер,
-    поэтому второй алгоритм определения вопросов в Telegram-слое не нужен.
-    Известные значения места отличаются от явно пропущенных.
+    Poster 2.3.1 (E1): поля — кирпичики `content` снимка (как и вопросы) и
+    уже выбранные доп. кирпичики. Кирпичик, который встречается только в
+    `extended_content` и ещё не выбран, полем не считается: он появится в
+    анонсе лишь после выбора в «🧱 Дополнительные поля».
     """
     actor = _require_actor(session, actor_telegram_user_id)
     row = _load_owned_draft(session, actor, draft_id)
@@ -2530,9 +2529,18 @@ def build_announcement_fields(
         city=row.place_city,
         brick_ids_by_code=snapshot_brick_ids_by_code(snapshot),
     )
+    chosen_extras = {extra.brick_id for extra in details.extras}
+    field_ids = [
+        brick_id
+        for brick_id in snapshot.brick_ids
+        if brick_id in question_map
+        or brick_id in known
+        or brick_id in chosen_extras
+        or details.value_for(brick_id) is not None
+    ]
 
     states: list[AnnouncementFieldState] = []
-    for brick_id in snapshot.brick_ids:
+    for brick_id in field_ids:
         definition = payload.definitions_by_id[brick_id]
         question = question_map.get(brick_id)
         value = details.value_for(brick_id)

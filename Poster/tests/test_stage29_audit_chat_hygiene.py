@@ -228,8 +228,12 @@ class ScreenHtmlEscapingTests(unittest.TestCase):
     HTML_TITLE = "Заголовок <b>с тегом</b>"
 
     async def _add_html_titled_extra(self, h) -> int:
-        """Доставляет базовый анонс и добавляет extra с HTML-заголовком."""
-        from brick_store import create_personal_brick
+        """Доставляет базовый анонс и возвращает extra с HTML-заголовком.
+
+        Poster 2.3.1 (E1): кандидат в доп. поля — только кирпичик
+        расширенного текста шаблона, поэтому кирпичик создаётся вместе
+        с шаблоном.
+        """
         from tests.test_stage27b_announcement_ui import (
             _choose_personal,
             _seed_personal_template,
@@ -239,24 +243,21 @@ class ScreenHtmlEscapingTests(unittest.TestCase):
 
         await h.text("/start")
         place_id, _alias = _seed_place(h)
-        template_id, _rev, _bricks = _seed_personal_template(
-            h, specs=[("main", "Основное", "short_text", {})], content="[main]"
+        template_id, _rev, bricks = _seed_personal_template(
+            h,
+            specs=[
+                ("main", "Основное", "short_text", {}),
+                ("html_brick", self.HTML_TITLE, "short_text", {}),
+            ],
+            content="[main]",
+            extended_content="[main]\n[html_brick]",
         )
         await _start_to_template(h, place_id)
         await _choose_personal(h, template_id)
         await h.text("Значение")
         # S3 п.6: доставка — после шага фотографий.
         await _no_photos(h)
-        with h.session_factory() as session:
-            brick = create_personal_brick(
-                session,
-                actor_telegram_user_id=7,
-                code="html_brick",
-                title=self.HTML_TITLE,
-                value_type="short_text",
-                rules={},
-            )
-            return int(brick.id)
+        return int(bricks["html_brick"])
 
     async def _open_extra_prompt(self, h, brick_id: int) -> None:
         """Открывает экран ввода значения extra-кирпичика (с пагинацией)."""

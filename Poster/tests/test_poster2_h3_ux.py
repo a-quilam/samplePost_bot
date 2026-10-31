@@ -87,10 +87,23 @@ def _rows(h) -> list[list[tuple[str, str | None]]]:
     ]
 
 
-async def _delivered(h, *, name: str = "Личный шаблон"):
+async def _delivered(
+    h,
+    *,
+    name: str = "Личный шаблон",
+    specs: list[tuple[str, str, str, dict[str, object]]] | None = None,
+    content: str | None = None,
+    extended_content: str | None = None,
+):
     """Личный анонс, доставленный «Без фотографий»."""
     place_id, _alias_id = _seed_place(h)
-    template_id, _revision, bricks = _seed_personal_template(h, name=name)
+    template_id, _revision, bricks = _seed_personal_template(
+        h,
+        name=name,
+        specs=specs,
+        content=content,
+        extended_content=extended_content,
+    )
     await _start_to_template(h, place_id)
     await _choose_personal(h, template_id)
     await h.text("Значение")
@@ -126,9 +139,7 @@ class DeliveredEditLayoutTests(unittest.TestCase):
             ],
         )
         # Последняя строка: выход в меню.
-        self.assertEqual(
-            [label for label, _data in rows[-1]], ["🏠 В главное меню"], rows
-        )
+        self.assertEqual([label for label, _data in rows[-1]], ["🏠 В меню"], rows)
         # Экран правки ничего не отправляет и не меняет версию.
         self.assertEqual(len(h.posts()), 1)
         self.assertEqual(_details(h, draft.id).revision, draft.revision)
@@ -181,7 +192,17 @@ class DeliveredEditLayoutTests(unittest.TestCase):
     @scenario_test
     async def test_extras_screen_has_no_apply_and_returns_to_list(self, h) -> None:
         await h.text("/start")
-        await _delivered(h)
+        # Poster 2.3.1 (E1): extras доступны только при расширенном тексте
+        # шаблона, поэтому без него экран не открыть.
+        await _delivered(
+            h,
+            specs=[
+                ("main", "Основное", "short_text", {}),
+                ("extra", "Дополнительное", "short_text", {}),
+            ],
+            content="[main]",
+            extended_content="[main]\n[extra]",
+        )
         await _open_edit(h)
         data = _callbacks(h, "aw_extras")
         if not data:
@@ -189,7 +210,7 @@ class DeliveredEditLayoutTests(unittest.TestCase):
         await h.callback(data[0])
         labels = [label for label, _data in h.screen_buttons()]
         self.assertNotIn("🔄 Применить изменения", labels)
-        self.assertIn("🏠 Главное меню", labels)
+        self.assertIn("🏠 В меню", labels)
 
     @scenario_test
     async def test_save_of_sent_announcement_never_promises_removed_button(
@@ -254,7 +275,7 @@ class PlaceEditorLayoutTests(unittest.TestCase):
         await h.text("/admin")
         await h.callback(f"adm_place:{place_id}")
         await h.callback(f"adm_edit_place:{place_id}")
-        assert "✏️ Редактирование места" in h.screen_text()
+        assert "✏️ Изменить место" in h.screen_text()
 
     @scenario_test
     async def test_address_and_url_are_paired_with_trash_only(self, h) -> None:
@@ -282,7 +303,7 @@ class PlaceEditorLayoutTests(unittest.TestCase):
         await self._open_menu(h, place_id)
 
         await h.callback(f"adm_edit_address_delete:{place_id}")
-        self.assertIn("Подтвердите удаление адреса", h.screen_text())
+        self.assertIn("Удалить адрес?", h.screen_text())
         rows = _rows(h)
         self.assertEqual(
             [label for label, _data in rows[0]],
@@ -566,7 +587,7 @@ class ScreenLimitRegressionTests(unittest.TestCase):
         self.assertIn(TRUNCATED_NOTE, screen)
         self.assertGreater(screen.count("A"), 1000)
         # Подсказка про формат осталась целиком: сокращено только значение.
-        self.assertIn("Отправьте новым сообщением ПОЛНЫЙ текст", screen)
+        self.assertIn("Отправьте весь новый текст одним", screen)
         self.assertIn("📋 Кирпичики", [label for label, _ in h.screen_buttons()])
 
     @scenario_test
@@ -629,6 +650,9 @@ class ScreenLimitRegressionTests(unittest.TestCase):
                 ("extra", "Дополнительное", "short_text", {}),
             ],
             content="[main]",
+            # Poster 2.3.1 (E1): кандидат в доп. поля — кирпичик
+            # расширенного текста шаблона.
+            extended_content="[main]\n[extra]",
         )
         await _start_to_template(h, place_id)
         await _choose_personal(h, template_id)

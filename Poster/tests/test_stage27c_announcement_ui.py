@@ -54,6 +54,7 @@ async def _personal_delivered(
     h,
     *,
     content: str | None = None,
+    extended_content: str | None = None,
     specs: list[tuple[str, str, str, dict[str, object]]] | None = None,
 ):
     """Личный шаблон: последний ответ сразу доставляет анонс в этот чат."""
@@ -61,6 +62,7 @@ async def _personal_delivered(
     template_id, _revision, bricks = _seed_personal_template(
         h,
         content=content,
+        extended_content=extended_content,
         specs=specs,
     )
     await _start_to_template(h, place_id)
@@ -277,7 +279,7 @@ class AnnouncementAutoDeliveryPhotoTests(unittest.TestCase):
         # откатывает применённую версию.
         posts_before = len(h.posts())
         await h.callback("main_menu")
-        self.assertIn("Выберите действие", h.screen_text())
+        self.assertIn("Что хотите сделать?", h.screen_text())
         self.assertEqual(len(h.posts()), posts_before)
         self.assertEqual(
             _stored(h, draft.id).publication_photos, ("photo-2", "photo-3")
@@ -308,7 +310,7 @@ class AnnouncementAutoDeliveryPhotoTests(unittest.TestCase):
         self.assertEqual(failed.publication_total, 1)
         self.assertEqual(failed.publication_progress["ids"], [])
         self.assertFalse(failed.publication_can_reset)
-        self.assertIn("Ни одна операция", h.screen_text())
+        self.assertIn("не подтвердил ни одного шага отправки", h.screen_text())
         self.assertIn(
             "Повторить отправку", " ".join(label for label, _data in h.screen_buttons())
         )
@@ -318,7 +320,7 @@ class AnnouncementAutoDeliveryPhotoTests(unittest.TestCase):
         # её адреса сохранены, но не выдаются за id текущей отправки.
         self.assertTrue(failed.previous_message_ids)
         self.assertEqual(failed.delivered_message_ids, ())
-        self.assertIn("В чате остаётся прошлая доставленная версия", h.screen_text())
+        self.assertIn("Предыдущая версия анонса остаётся в чате", h.screen_text())
         # Ввод-фото не удалён: подтверждённой доставки не было.
         self.assertNotIn(rejected.message.message_id, h.deleted_ids())
 
@@ -348,7 +350,7 @@ class AnnouncementAutoDeliveryPhotoTests(unittest.TestCase):
             tuple(f"group-photo-{index}" for index in range(10)),
         )
         # Отказ объяснён на экране, а принятые фото не потеряны.
-        self.assertIn("максимум", h.screen_text())
+        self.assertIn("больше добавить нельзя", h.screen_text())
         self.assertIn("1", h.screen_text())
         # Сообщение, которым прислали 11-е фото, не удалено: автор видит,
         # что именно не принято.
@@ -430,7 +432,7 @@ class AnnouncementAutoDeliveryFailureTests(unittest.TestCase):
         self.assertEqual(failed.publication_status, "failed")
         self.assertEqual(failed.publication_step, 0)
         self.assertTrue(failed.publication_can_reset)
-        self.assertIn("Ни одна операция", h.screen_text())
+        self.assertIn("не подтвердил ни одного шага отправки", h.screen_text())
         self.assertTrue(_callbacks(h, "aw_pub_reset"))
         self.assertEqual(h.posts(), [])
 
@@ -661,7 +663,14 @@ class AnnouncementRedeliveryTests(unittest.TestCase):
             ("main", "Основное", "short_text", {}),
             ("extra0", "Доп 0", "short_text", {}),
         ]
-        draft, bricks = await _personal_delivered(h, specs=specs, content="[main]")
+        draft, bricks = await _personal_delivered(
+            h,
+            specs=specs,
+            content="[main]",
+            # Poster 2.3.1 (E1): кандидат в доп. поля — только кирпичик
+            # расширенного текста шаблона.
+            extended_content="[main]\n[extra0]",
+        )
         first_ids = tuple(_stored(h, draft.id).delivered_message_ids)
         await _open_edit(h)
         await h.callback(_callback(h, "aw_extras"))

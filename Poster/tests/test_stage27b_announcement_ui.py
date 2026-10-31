@@ -157,6 +157,7 @@ def _seed_personal_template(
     name: str = "Личный шаблон",
     specs: list[TemplateSpec] | None = None,
     content: str | None = None,
+    extended_content: str | None = None,
     actor_tg: int = DEFAULT_USER_ID,
 ):
     specs = specs or [("main", "Основное поле", "short_text", {})]
@@ -180,6 +181,7 @@ def _seed_personal_template(
             actor_telegram_user_id=actor_tg,
             name=name,
             content=content,
+            extended_content=extended_content,
         )
         session.commit()
         return template.template_id, template.revision, bricks
@@ -367,7 +369,7 @@ class AnnouncementWizardPlaceTests(unittest.TestCase):
         self.assertIn("совпадение: ДК «Тестовый»", h.screen_text())
         await h.callback(f"aw_place_open:{target_id}")
         self.assertIn("Проверьте место", h.screen_text())
-        self.assertIn("Известные адрес и ссылка", h.screen_text())
+        self.assertIn("Адрес и ссылка из справочника", h.screen_text())
 
         await h.callback("aw_place_back")
         self.assertIn("Результаты поиска", h.screen_text())
@@ -376,7 +378,7 @@ class AnnouncementWizardPlaceTests(unittest.TestCase):
         self.assertTrue(
             any("ДК «Тестовый»" in label for label, _data in h.screen_buttons())
         )
-        self.assertIn("Это не создаёт новое место", h.screen_text())
+        self.assertIn("Новое место при этом не создаётся", h.screen_text())
         await h.callback(_callback(h, "aw_place_name_pick", f":{alias_id}:0"))
         self.assertIn("ДК «Тестовый» (альтернативное)", h.screen_text())
         await _confirm_place(h)
@@ -508,16 +510,16 @@ class AnnouncementWizardQuestionTests(unittest.TestCase):
         await _choose_personal(h, template_id)
 
         self.assertIn("Вопрос 1 из 8", h.screen_text())
-        self.assertIn("Ожидается короткий текст", h.screen_text())
-        self.assertIn("Поле необязательное", h.screen_text())
-        self.assertIn("Значение пока не задано", h.screen_text())
+        self.assertIn("Отправьте короткий текст", h.screen_text())
+        self.assertIn("Это поле можно пропустить", h.screen_text())
+        self.assertIn("Поле пока не заполнено", h.screen_text())
         await h.text("Коротко")
 
         self.assertIn("Вопрос 2 из 8", h.screen_text())
         await h.text("Длинный текст")
 
         self.assertIn("Вопрос 3 из 8", h.screen_text())
-        self.assertIn("Выберите дату календарём", h.screen_text())
+        self.assertIn("Выберите дату в календаре", h.screen_text())
         # U2a: компактный календарь уже на вопросе — быстрые даты и месяцы.
         self.assertTrue(_callback(h, "aw_calday"))
         self.assertTrue(_callback(h, "aw_calmonths"))
@@ -575,7 +577,7 @@ class AnnouncementWizardQuestionTests(unittest.TestCase):
 
         # U2b: обзор запрашивается по callback в состоянии AW_PREVIEW.
         await _preview(h)
-        self.assertIn("Анонс готов", h.screen_text())
+        self.assertIn("Всё заполнено. Анонс собирается", h.screen_text())
         await h.callback(_callback(h, "aw_save"))
         self.assertEqual(h.posts(), posts_after_delivery)
         self.assertIn("Черновик сохранён", h.answer_texts()[-1])
@@ -623,6 +625,10 @@ class AnnouncementWizardExtrasTests(unittest.TestCase):
             name="С дополнительными",
             specs=specs,
             content="[main]",
+            # Poster 2.3.1 (E1): доп. кирпичик доступен только там, где он
+            # уже стоит в расширенном тексте шаблона.
+            extended_content="[main]\n"
+            + "\n".join(f"[extra{number}]" for number in range(8)),
         )
         extra_id = bricks["extra0"]
 
@@ -656,7 +662,7 @@ class AnnouncementWizardExtrasTests(unittest.TestCase):
         self.assertTrue(found, f"Личный кирпичик не найден: {h.screen_buttons()}")
         await h.callback(_callback(h, "aw_exbrick", f":{extra_id}"))
         # H2: секции и позиции больше нет — кирпичик сразу ждёт значение.
-        self.assertIn("Значение пока не задано", h.screen_text())
+        self.assertIn("Поле пока не заполнено", h.screen_text())
         await h.text("Дополнительно")
         self.assertIn("Доп 0", h.screen_text())
         self.assertIn("Дополнительно", h.screen_text())
@@ -771,7 +777,7 @@ class AnnouncementWizardPersistenceTests(unittest.TestCase):
         # строки «Есть изменения» и кнопки применения больше нет.
         self.assertEqual(
             h.screen_text(),
-            "✅ Анонс готов.\n\nСообщение выше можно скопировать или переслать",
+            "✅ Анонс готов.\n\nСообщение выше можно скопировать или переслать.",
         )
         self.assertFalse(_callbacks(h, "aw_apply"))
         self.assertIn("Новое", h.posts()[-1] or "")
@@ -796,7 +802,7 @@ class AnnouncementWizardPersistenceTests(unittest.TestCase):
         await h.restart()
         await h.text("/start")
         await h.callback("aw_start")
-        self.assertIn("Незавершённые анонсы", h.screen_text())
+        self.assertIn("Черновик можно продолжить", h.screen_text())
         self.assertIn("Дом культуры", h.screen_text())
         await h.callback(_callback(h, "aw_open", f":{draft_id}"))
         self.assertIn("✅ Анонс готов.", h.screen_text())
@@ -838,8 +844,8 @@ class AnnouncementWizardPersistenceTests(unittest.TestCase):
         await _no_photos(h)
         self.assertIn("✅ Анонс готов.", h.screen_text())
         await _preview(h)
-        self.assertIn("Предпросмотр сокращён", h.screen_text())
-        self.assertIn("Полные данные сохранены", h.screen_text())
+        self.assertIn("Здесь показана часть текста", h.screen_text())
+        self.assertIn("Полный текст сохранён в черновике", h.screen_text())
         self.assertNotIn(long_value, h.screen_text())
 
         draft = _latest_draft(h)
@@ -876,9 +882,9 @@ class AnnouncementWizardSafetyTests(unittest.TestCase):
         await h.callback(stale_skip)
         # U2b: экран завершения имеет фиксированный текст, поэтому
         # предупреждение об устаревшей кнопке уходит ответом на callback,
-        # а не подменяет экран (иначе «Анонс готов» и «Экран устарел»
+        # а не подменяет экран (иначе «Анонс готов» и «Данные изменились»
         # показывались бы одновременно).
-        self.assertIn("Экран устарел", h.answer_texts()[-1])
+        self.assertIn("Данные изменились", h.answer_texts()[-1])
         self.assertEqual("✅ Анонс готов.", h.screen_text().split("\n\n")[0])
         self.assertIn(
             "✏️ Изменить",
@@ -897,7 +903,7 @@ class AnnouncementWizardSafetyTests(unittest.TestCase):
 
         # Повторное нажатие того же устаревшего callback ничего не меняет.
         await h.callback(stale_skip)
-        self.assertIn("Экран устарел", h.answer_texts()[-1])
+        self.assertIn("Данные изменились", h.answer_texts()[-1])
         with h.session_factory() as session:
             fields = build_announcement_fields(
                 session,
@@ -949,8 +955,8 @@ class AnnouncementWizardSafetyTests(unittest.TestCase):
             )
 
         await _preview(h)
-        self.assertIn("Не удалось собрать предварительный текст", h.screen_text())
-        self.assertIn("Черновик сохранён, данные не потеряны", h.screen_text())
+        self.assertIn("Не удалось собрать текст для просмотра", h.screen_text())
+        self.assertIn("Черновик сохранён, данные на месте", h.screen_text())
         self.assertIn("Обновить", h.screen_text() + str(h.screen_buttons()))
         draft = _latest_draft(h)
         # Анонс уже доставлен: сбой пересборки не откатывает готовый статус.
@@ -961,7 +967,7 @@ class AnnouncementWizardSafetyTests(unittest.TestCase):
         self.assertIn(f":{draft.id}:{draft.revision}", retry)
         await h.callback(retry)
         self.assertIn("Не удалось собрать", h.screen_text())
-        self.assertNotIn("Экран устарел", h.screen_text())
+        self.assertNotIn("Данные изменились", h.screen_text())
 
 
 @unittest.skipIf(
@@ -1001,7 +1007,7 @@ class AnnouncementWizardStandardTemplateTests(unittest.TestCase):
 
         # Назад из первого вопроса показывает выбранный снимок, а не выбор.
         await h.callback(_callback(h, "aw_qback"))
-        self.assertIn("Выбранный шаблон", h.screen_text())
+        self.assertIn("Выбран шаблон", h.screen_text())
         self.assertFalse(_callbacks(h, "aw_template"))
         await h.callback(_callback(h, "aw_cont"))
         for _field in askable:

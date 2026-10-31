@@ -679,14 +679,17 @@ class ExtendedContentRenderTests(AnnouncementDatabaseTestCase):
 
     def setUp(self) -> None:
         super().setUp()
+        # Poster 2.3.1 (E1): доп. кирпичик стоит на своей позиции в
+        # расширенном тексте шаблона. Личный шаблон не видит кирпичики места,
+        # поэтому кандидат — личный кирпичик владельца.
+        self.extra_brick = self.make_personal_brick(self.owner, "доп_места")
         self.template = create_personal_template(
             self.session,
             actor_telegram_user_id=OWNER_TG,
             name="Расширяемый",
             content="Основной текст: [название]",
-            extended_content="Расширенный текст: [название]",
+            extended_content="Расширенный текст: [название]\n[доп_места]",
         )
-        self.extra_brick = self.make_place_brick("доп_места")
         self.draft = self.start_at_questions(template_id=self.template.template_id)
 
     def _preview(self) -> str:
@@ -737,6 +740,7 @@ class ExtendedContentRenderTests(AnnouncementDatabaseTestCase):
             draft_id=draft.draft_id,
         )
         self.assertTrue(payload.use_extended)
+        # E1: значение extras стоит на позиции токена в расширенном тексте.
         self.assertEqual(self._preview(), "Расширенный текст: Концерт\nДополнительно")
 
         # Удаление extras возвращает канонический текст; значение самого

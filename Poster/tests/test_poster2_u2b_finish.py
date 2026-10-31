@@ -110,12 +110,16 @@ async def _delivered(
     value: str = "Значение",
     code: str = "main",
     specs: list[tuple[str, str, str, dict[str, object]]] | None = None,
+    content: str | None = None,
+    extended_content: str | None = None,
 ):
     """Личный анонс, доставленный «Пропустить» на шаге фото."""
     place_id, _alias_id = _seed_place(h)
     if specs is None:
         specs = [(code, "Основное поле", "short_text", {})]
-    template_id, _revision, bricks = _seed_personal_template(h, specs=specs)
+    template_id, _revision, bricks = _seed_personal_template(
+        h, specs=specs, content=content, extended_content=extended_content
+    )
     await _start_to_template(h, place_id)
     await _choose_personal(h, template_id)
     await h.text(value)
@@ -169,7 +173,7 @@ class DeliveredScreenTests(unittest.TestCase):
         # Возврат на экран завершения — через «🏠 В главное меню»: ложного
         # «Назад» на экране правки больше нет.
         await h.callback("main_menu")
-        self.assertIn("Выберите действие", h.screen_text())
+        self.assertIn("Что хотите сделать?", h.screen_text())
 
         # После правки значения экран завершения показывает уже новую
         # версию: применяется сразу, «неприменённых» изменений не остаётся.
@@ -199,12 +203,22 @@ class DeliveredEditScreenTests(unittest.TestCase):
     # выход в главное меню. Ни «Применить изменения», ни «Обзор», ни
     # «Показать вложения», ни ложного «Назад».
     EDIT_ROW = ["📝 Данные", "🖼 Фото (0)"]
-    EDIT_MENU = "🏠 В главное меню"
+    EDIT_MENU = "🏠 В меню"
 
     @scenario_test
     async def test_edit_screen_lists_categories_without_sending_copies(self, h) -> None:
         await h.text("/start")
-        draft, _bricks = await _delivered(h)
+        # Poster 2.3.1 (E1): строка доп. полей есть только когда в
+        # расширенном тексте шаблона стоит ещё не выбранный кирпичик.
+        draft, _bricks = await _delivered(
+            h,
+            specs=[
+                ("main", "Основное поле", "short_text", {}),
+                ("extra_a", "Доп. поле", "short_text", {}),
+            ],
+            content="[main]",
+            extended_content="[main]\n[extra_a]",
+        )
         posts_before = h.posts()
 
         await h.callback(_callback(h, "aw_edit"))
@@ -239,7 +253,17 @@ class DeliveredEditScreenTests(unittest.TestCase):
     async def test_extras_row_disappears_when_nothing_left_to_add(self, h) -> None:
         """Кнопка доп. полей условная: пустой список — не действие."""
         await h.text("/start")
-        draft, _bricks = await _delivered(h)
+        # Poster 2.3.1 (E1): доп. кирпичик доступен как кандидат только
+        # там, где он стоит в расширенном тексте шаблона.
+        draft, _bricks = await _delivered(
+            h,
+            specs=[
+                ("main", "Основное поле", "short_text", {}),
+                ("extra_a", "Доп. поле", "short_text", {}),
+            ],
+            content="[main]",
+            extended_content="[main]\n[extra_a]",
+        )
         await h.callback(_callback(h, "aw_edit"))
         self.assertIn(
             "🧱 Дополнительные поля",
@@ -249,7 +273,7 @@ class DeliveredEditScreenTests(unittest.TestCase):
         # Добавляем все доступные кирпичики и проверяем, что строка исчезла
         # ровно тогда, когда добавлять больше нечего.
         from announcement_store import add_announcement_extra
-        from brick_store import list_available_bricks
+        from announcement_wizard import extra_candidate_brick_ids
         from handlers.announcement_wizard import _available_extra_bricks
 
         with h.session_factory() as session:
@@ -258,22 +282,16 @@ class DeliveredEditScreenTests(unittest.TestCase):
                 actor_telegram_user_id=DEFAULT_USER_ID,
                 draft_id=draft.id,
             )
-            available = list_available_bricks(
-                session,
-                viewer_telegram_user_id=DEFAULT_USER_ID,
-                place_id=details.place_id,
-            )
             snapshot = details.template_snapshot
             assert snapshot is not None, "у черновика должен быть снимок шаблона"
-            used = set(snapshot.brick_ids)
-            candidates = [brick for brick in available if brick.id not in used]
+            candidates = extra_candidate_brick_ids(snapshot)
             self.assertTrue(candidates)
-            for brick in candidates:
+            for brick_id in candidates:
                 add_announcement_extra(
                     session,
                     actor_telegram_user_id=DEFAULT_USER_ID,
                     draft_id=draft.id,
-                    brick_id=brick.id,
+                    brick_id=brick_id,
                 )
             details = get_announcement_draft(
                 session,
@@ -300,7 +318,7 @@ class DeliveredEditScreenTests(unittest.TestCase):
         # Раньше здесь жил «◀️ Назад» на экран завершения (aw_panel).
         self.assertFalse(_callbacks(h, "aw_panel"))
         await h.callback("main_menu")
-        self.assertIn("Выберите действие", h.screen_text())
+        self.assertIn("Что хотите сделать?", h.screen_text())
         self.assertFalse(_callbacks(h, "aw_edit"))
 
     @scenario_test
@@ -336,7 +354,7 @@ class DeliveredMenuTests(unittest.TestCase):
 
         await h.callback("main_menu")
 
-        self.assertIn("Выберите действие", h.screen_text())
+        self.assertIn("Что хотите сделать?", h.screen_text())
         self.assertFalse(_callbacks(h, "aw_edit"), "экран завершения закрыт")
         # Пост не удалён и не переотправлен.
         for message_id in post_ids:
@@ -362,7 +380,7 @@ class DeliveredMenuTests(unittest.TestCase):
         await h.text("/start")
         second, _bricks2 = await _delivered(
             h,
-            value="Второй",
+            value="Другой",
             specs=[("second", "Второе поле", "short_text", {})],
         )
         second_ids = set(_details(h, second.id).delivered_message_ids)
@@ -467,8 +485,8 @@ class DeliveredApplyTests(unittest.TestCase):
         await _delivered(h)
         # Обычный успех: экран не смешивает «Анонс готов» и «Экран устарел».
         self.assertEqual(h.screen_text(), DELIVERED_TEXT)
-        self.assertNotIn("Экран устарел", h.screen_text())
-        self.assertNotIn("Экран устарел", h.answer_texts())
+        self.assertNotIn("Данные изменились.", h.screen_text())
+        self.assertNotIn("Данные изменились.", h.answer_texts())
 
     @scenario_test
     async def test_stale_button_only_warns_about_old_action(self, h) -> None:
@@ -484,7 +502,7 @@ class DeliveredApplyTests(unittest.TestCase):
         await h.text("Другое значение")
 
         await h.callback(stale_edit)
-        self.assertIn("Экран устарел", h.answer_texts()[-1])
+        self.assertIn("Данные изменились.", h.answer_texts()[-1])
         # Экран остаётся экраном завершения: устаревший callback не отправил
         # вторую копию и не открыл чужую версию правки.
         self.assertEqual(h.screen_text(), DELIVERED_TEXT)
@@ -514,6 +532,6 @@ class DeliveredApplyTests(unittest.TestCase):
         posts_after_first = h.posts()
 
         await h.callback(stale_edit)
-        self.assertIn("Экран устарел", h.answer_texts()[-1])
+        self.assertIn("Данные изменились.", h.answer_texts()[-1])
         self.assertEqual(h.screen_text(), first_text)
         self.assertEqual(h.posts(), posts_after_first)

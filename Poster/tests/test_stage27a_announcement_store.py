@@ -36,6 +36,7 @@ from announcement_wizard import (
     AnnouncementStageError,
     AnnouncementValueError,
     WizardStage,
+    snapshot_tokens_by_text,
 )
 from brick_store import create_personal_brick, update_personal_brick
 from models import Place
@@ -54,6 +55,32 @@ from tests.stage27_helpers import (
 )
 
 TODAY = date(2026, 5, 1)
+
+
+def extend_standard_template(case: AnnouncementDatabaseTestCase, *codes: str) -> None:
+    """
+    Расширяет стандартный шаблон места (Poster 2.3.1, E1).
+
+    Доп. кирпичик доступен только там, где он уже стоит в
+    `extended_content`; канонический `content` не меняется, поэтому
+    расширение = текущий `content` + строки с кодами-кандидатами.
+    """
+    template = get_accessible_template(
+        case.session, OWNER_TG, case.standard.template_id
+    )
+    assert template is not None
+    extended = "\n".join(
+        (template.current_version.content, *(f"[{code}]" for code in codes))
+    )
+    update_template_content(
+        case.session,
+        actor_telegram_user_id=OWNER_TG,
+        template_id=template.template_id,
+        expected_revision=template.revision,
+        content=template.current_version.content,
+        extended_content=extended,
+    )
+    case.session.expire_all()
 
 
 def brick_nodes(tokens) -> list[BrickNode]:
@@ -663,10 +690,42 @@ class ExtraTests(AnnouncementDatabaseTestCase):
     def setUp(self) -> None:
         super().setUp()
         self.place_extra = self.make_place_brick("доп_места")
+        self.second_place_extra = self.make_place_brick("доп_места_2")
         self.personal_extra = self.make_personal_brick(self.owner, "доп_личный")
         self.other_personal = self.make_personal_brick(self.other, "чужой_доп")
 
+    def _add_standard_extended(self, extended: str) -> None:
+        """
+        Расширяет стандартный шаблон места (Poster 2.3.1, E1).
+
+        Доп. кирпичик можно добавить только туда, где он уже стоит в
+        `extended_content`; канонический `content` остаётся прежним, поэтому
+        `extended` собирается из него плюс строки с кандидатами.
+        """
+        standard = get_accessible_template(
+            self.session, OWNER_TG, self.standard.template_id
+        )
+        assert standard is not None
+        update_template_content(
+            self.session,
+            actor_telegram_user_id=OWNER_TG,
+            template_id=standard.template_id,
+            expected_revision=standard.revision,
+            content=standard.current_version.content,
+            extended_content=extended,
+        )
+        self.session.expire_all()
+
     def test_add_extras_render_only_this_draft(self) -> None:
+        self._add_standard_extended(
+            "\n".join(
+                (
+                    self.standard.current_version.content,
+                    "[доп_места]",
+                    "[доп_места_2]",
+                )
+            )
+        )
         draft = self.start_at_questions()
         snapshot_before = draft.template_snapshot
         assert snapshot_before is not None
@@ -683,7 +742,7 @@ class ExtraTests(AnnouncementDatabaseTestCase):
             self.session,
             actor_telegram_user_id=OWNER_TG,
             draft_id=draft.draft_id,
-            brick_id=self.personal_extra,
+            brick_id=self.second_place_extra,
             value="Второй",
             expected_revision=first.revision,
         )
@@ -714,20 +773,20 @@ class ExtraTests(AnnouncementDatabaseTestCase):
             actor_telegram_user_id=OWNER_TG,
             draft_id=second_extra.draft_id,
         )
-        # Дополнительные кирпичики — строки в конце расширенного текста.
+        # E1: расширенный текст не переписывается — доп. кирпичики уже стоят
+        # на своих местах, ничего не дописывается в конец.
         self.assertTrue(payload.use_extended)
         extended_nodes = brick_nodes(payload.tokens_by_text[TEMPLATE_EXTENDED_CONTENT])
         self.assertEqual(
-            [node.code for node in extended_nodes[-2:]], ["доп_места", "доп_личный"]
+            [node.code for node in extended_nodes[-2:]], ["доп_места", "доп_места_2"]
         )
-        # Основа расширенного текста — тексты снимка плюс строки extras.
-        base_nodes = brick_nodes(snapshot_before.texts[TEMPLATE_CONTENT])
-        self.assertEqual(
-            extended_nodes[: len(base_nodes)],
-            base_nodes,
+        # Токены расширенного текста — ровно снимок шаблона.
+        snapshot_extended = brick_nodes(
+            snapshot_tokens_by_text(snapshot_before)[TEMPLATE_EXTENDED_CONTENT]
         )
+        self.assertEqual(extended_nodes, snapshot_extended)
         self.assertEqual(payload.values_by_id[self.place_extra], "Первый")
-        self.assertEqual(payload.values_by_id[self.personal_extra], "Второй")
+        self.assertEqual(payload.values_by_id[self.second_place_extra], "Второй")
 
         other_payload = build_announcement_render_payload(
             self.session,
@@ -737,14 +796,17 @@ class ExtraTests(AnnouncementDatabaseTestCase):
         other_nodes = brick_nodes(
             other_payload.tokens_by_text[TEMPLATE_EXTENDED_CONTENT]
         )
-        self.assertEqual(other_nodes[-1].code, "доп_места")
-        self.assertNotIn(self.personal_extra, other_payload.values_by_id)
+        self.assertEqual(other_nodes, snapshot_extended)
+        self.assertNotIn(self.second_place_extra, other_payload.values_by_id)
         self.assertEqual(other_payload.values_by_id[self.place_extra], "Чужой анонс")
 
     def test_add_rejects_snapshot_duplicate_and_inaccessible_bricks(self) -> None:
+        self._add_standard_extended(
+            "\n".join((self.standard.current_version.content, "[доп_места]"))
+        )
         draft = self.start_at_questions()
         assert draft.template_snapshot is not None
-        in_snapshot = draft.template_snapshot.brick_ids[0]
+        in_content = draft.template_snapshot.brick_ids[0]
         with self.assertRaises(AnnouncementBrickError):
             add_announcement_extra(
                 self.session,
@@ -760,12 +822,12 @@ class ExtraTests(AnnouncementDatabaseTestCase):
                 brick_id=self.other_personal,
             )
         with self.assertRaises(AnnouncementBrickError):
-            # Кирпичик уже входит в выбранный шаблон.
+            # E1: кирпичик канонического `content` — не кандидат в доп. поля.
             add_announcement_extra(
                 self.session,
                 actor_telegram_user_id=OWNER_TG,
                 draft_id=draft.draft_id,
-                brick_id=in_snapshot,
+                brick_id=in_content,
             )
 
         added = add_announcement_extra(
@@ -785,6 +847,9 @@ class ExtraTests(AnnouncementDatabaseTestCase):
             )
 
     def test_remove_extra_keeps_value_semantics(self) -> None:
+        self._add_standard_extended(
+            "\n".join((self.standard.current_version.content, "[доп_места]"))
+        )
         draft = self.start_at_questions()
         added = add_announcement_extra(
             self.session,
@@ -824,11 +889,15 @@ class ExtraTests(AnnouncementDatabaseTestCase):
             actor_telegram_user_id=OWNER_TG,
             draft_id=draft.draft_id,
         )
+        # Расширенный текст снимка остаётся доступным, но не выбирается:
+        # рендерится канонический `content`.
         self.assertFalse(payload.use_extended)
-        self.assertNotIn(TEMPLATE_EXTENDED_CONTENT, payload.tokens_by_text)
         self.assertNotIn(self.place_extra, payload.values_by_id)
 
     def test_archived_extra_is_rejected(self) -> None:
+        self._add_standard_extended(
+            "\n".join((self.standard.current_version.content, "[доп_места]"))
+        )
         draft = self.start_at_questions()
         self.session.execute(
             text("UPDATE bricks SET status='archived' WHERE id=:brick_id"),
@@ -856,6 +925,8 @@ class RestartAndAccessTests(AnnouncementDatabaseTestCase):
     """Рестарт, optimistic locking и запрет доступа по чужому ID."""
 
     def test_state_survives_new_session(self) -> None:
+        extra_brick = self.make_place_brick("после_старта")
+        extend_standard_template(self, "после_старта")
         draft = self.start_at_questions()
         saved = save_announcement_value(
             self.session,
@@ -870,7 +941,7 @@ class RestartAndAccessTests(AnnouncementDatabaseTestCase):
             self.session,
             actor_telegram_user_id=OWNER_TG,
             draft_id=draft.draft_id,
-            brick_id=self.make_place_brick("после_старта"),
+            brick_id=extra_brick,
             value="доп",
             expected_revision=saved.revision,
         )
@@ -899,10 +970,13 @@ class RestartAndAccessTests(AnnouncementDatabaseTestCase):
         self.assertEqual(stored.extras[0].code, "после_старта")
         self.assertIsNotNone(stored.template_snapshot)
         assert stored.template_snapshot is not None
-        # Эталон §6.1.1: 8 кирпичиков вместо прежних 9.
-        self.assertEqual(len(stored.template_snapshot.bindings), 8)
+        # Эталон §6.1.1: 8 кирпичиков вместо прежних 9, плюс кандидат
+        # доп. поля из `extended_content` (Poster 2.3.1, E1).
+        self.assertEqual(len(stored.template_snapshot.bindings), 9)
 
     def test_stale_revision_cannot_overwrite(self) -> None:
+        conflict_extra = self.make_place_brick("конфликт")
+        extend_standard_template(self, "конфликт")
         draft = self.start_at_questions()
         first = save_announcement_value(
             self.session,
@@ -939,7 +1013,7 @@ class RestartAndAccessTests(AnnouncementDatabaseTestCase):
                 self.session,
                 actor_telegram_user_id=OWNER_TG,
                 draft_id=draft.draft_id,
-                brick_id=self.make_place_brick("конфликт"),
+                brick_id=conflict_extra,
                 expected_revision=draft.revision,
             )
         self.assertEqual(
@@ -952,12 +1026,14 @@ class RestartAndAccessTests(AnnouncementDatabaseTestCase):
         )
 
     def test_other_user_cannot_read_or_mutate_draft(self) -> None:
+        own_extra = self.make_place_brick("чужой_доступ")
+        extend_standard_template(self, "чужой_доступ")
         draft = self.start_at_questions()
         added = add_announcement_extra(
             self.session,
             actor_telegram_user_id=OWNER_TG,
             draft_id=draft.draft_id,
-            brick_id=self.make_place_brick("чужой_доступ"),
+            brick_id=own_extra,
             expected_revision=draft.revision,
         )
         extra_id = added.extras[0].extra_id

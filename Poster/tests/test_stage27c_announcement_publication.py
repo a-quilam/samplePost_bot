@@ -579,18 +579,48 @@ class AnnouncementPublicationContentTests(AnnouncementDatabaseTestCase):
                 value_type=value_type,
                 rules=rules,
             ).id
+        # Poster 2.3.1 (E1): доп. кирпичик доступен только там, где он уже
+        # стоит в `extended_content` шаблона. Кирпичики extras создаются до
+        # шаблона, чтобы попасть в его расширенный текст.
+        extras = [
+            ("экстра_заголовок", "ЭКСТРА-ЗАГОЛОВОК"),
+            ("экстра_тело", "ЭКСТРА-ТЕЛО"),
+            ("экстра_подвал", "ЭКСТРА-ПОДВАЛ"),
+        ]
+        extra_ids: dict[str, int] = {}
+        for code, _value in extras:
+            extra_ids[code] = create_personal_brick(
+                self.session,
+                actor_telegram_user_id=OWNER_TG,
+                code=code,
+                title=code,
+                value_type="short_text",
+            ).id
+        content = "\n".join(
+            p
+            for p in (
+                "ЗАГОЛОВОК",
+                " ".join(f"[{code}]" for code, _t, _r, _v in specs),
+                "ПОДВАЛ",
+            )
+            if p
+        )
         template = create_personal_template(
             self.session,
             actor_telegram_user_id=OWNER_TG,
             name="Все типы и extras",
-            content="\n".join(
-                p
-                for p in (
+            content=content,
+            # Расширенный текст задаёт позиции extras: два до «ПОДВАЛ»,
+            # один после него.
+            extended_content="\n".join(
+                (
                     "ЗАГОЛОВОК",
                     " ".join(f"[{code}]" for code, _t, _r, _v in specs),
+                    "[экстра_заголовок]",
+                    "[экстра_тело]",
                     "ПОДВАЛ",
+                    "[экстра_подвал]",
                 )
-                if p
             ),
         )
         draft = self.start_at_questions(template_id=template.template_id)
@@ -607,26 +637,14 @@ class AnnouncementPublicationContentTests(AnnouncementDatabaseTestCase):
             )
             revision = saved.revision
 
-        # H2: доп. кирпичики дописываются строками в конец текста в порядке
-        # добавления — секций и позиций больше нет.
-        extras = [
-            ("экстра_заголовок", "ЭКСТРА-ЗАГОЛОВОК"),
-            ("экстра_тело", "ЭКСТРА-ТЕЛО"),
-            ("экстра_подвал", "ЭКСТРА-ПОДВАЛ"),
-        ]
+        # H2 + E1: extras рендерятся на своих позициях в расширенном тексте,
+        # а не дописываются в конец.
         for code, value in extras:
-            brick_id = create_personal_brick(
-                self.session,
-                actor_telegram_user_id=OWNER_TG,
-                code=code,
-                title=code,
-                value_type="short_text",
-            ).id
             added = add_announcement_extra(
                 self.session,
                 actor_telegram_user_id=OWNER_TG,
                 draft_id=draft.draft_id,
-                brick_id=brick_id,
+                brick_id=extra_ids[code],
                 value=value,
                 expected_revision=revision,
             )
@@ -652,7 +670,7 @@ class AnnouncementPublicationContentTests(AnnouncementDatabaseTestCase):
         self.assertIn("ЭКСТРА-ПОДВАЛ", publication.text)
         self.assertLess(
             publication.text.index("ПОДВАЛ"),
-            publication.text.index("ЭКСТРА-ЗАГОЛОВОК"),
+            publication.text.index("ЭКСТРА-ПОДВАЛ"),
         )
         self.assertLess(
             publication.text.index("ЭКСТРА-ЗАГОЛОВОК"),

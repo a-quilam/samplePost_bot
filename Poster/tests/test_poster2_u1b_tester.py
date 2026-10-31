@@ -589,6 +589,9 @@ class LongValueScreenTests(unittest.TestCase):
                 ("extra", "Дополнительное", "long_text", {}),
             ],
             content="[main]",
+            # Poster 2.3.1 (E1): кандидат в доп. поля — кирпичик
+            # расширенного текста шаблона.
+            extended_content="[main]\n[extra]",
         )
         await _start_to_template(h, place_id)
         await _choose_personal(h, template_id)

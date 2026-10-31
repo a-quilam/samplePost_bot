@@ -243,8 +243,14 @@ class FormattingScreenTests(unittest.TestCase):
         template_id, _revision, bricks = _seed_personal_template(
             h,
             name="Доп. поле",
-            specs=[("main", "Основное", "short_text", {})],
+            specs=[
+                ("main", "Основное", "short_text", {}),
+                ("extra", "Дополнительное", "short_text", {}),
+            ],
             content="[main]",
+            # Poster 2.3.1 (E1): кандидат в доп. поля — кирпичик
+            # расширенного текста шаблона.
+            extended_content="[main]\n[extra]",
         )
         await _start_to_template(h, place_id)
         await _choose_personal(h, template_id)
@@ -254,7 +260,7 @@ class FormattingScreenTests(unittest.TestCase):
 
         await h.callback(_callback(h, "aw_extras"))
         await h.callback(_callback(h, "aw_exadd"))
-        await h.callback(_callback(h, "aw_exbrick"))
+        await h.callback(_callback(h, "aw_exbrick", f":{bricks['extra']}"))
         # H2: секций и позиций больше нет.
         await h.text("Доп", entities=[ent(MessageEntity.SPOILER, 0, 3)])
         self.assertEqual(
