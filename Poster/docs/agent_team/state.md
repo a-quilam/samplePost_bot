@@ -1482,3 +1482,9 @@ Push: нет
 - Граница этапа: make check PYTHON=.venv/bin/python → ruff All checks passed; mypy Success (178 файлов); unittest Ran 1968 tests OK.
 - Коммиты: a7a4e99 (тексты владельца), a40c07d (E1), 86c13b3 (E2), 8d2a6b8 (T1), 8d16918 (E4), 2ca7a79 (тест-литералы). Push: да (см. следующий пункт). Служебные правки владельца (.opencode/**, AGENTS.md, opencode.jsonc, orchestra_protocol.md) не коммитятся.
 - Метрики этапа: вызовы — Tester 1 (1 продолжение), Developer 1 сессия (2 продолжения: T1, E2, E4), Reviewer 1 (достиг steps-лимита, отчёт получен); permission.rejected: 0; повторных ревизий: 0; дефектов после ревизии: 0.
+
+**Финал 2.3.1 (2026-10-31):**
+- Push: e7bea69..38d5e59 → origin/main; CI run 41233984306 — success (Python 3.13 и 3.14).
+- Эксплуатационный backup: `Poster/post_bot.db.backup-20261031T193021556872Z-p615002` (Backup API, integrity_check=ok, FK-нарушений 0, таблиц 25, SHA-256 b0bab271…; оставлен рядом с БД по решению владельца; каталог backups/ не используется).
+- Миграции: не требуются (extended_content уже в схеме, миграция 24).
+- Деплой: systemctl --user restart poster-bot.service в 22:56:58 MSK — active, NRestarts=0, «Application started», ошибок/409-конфликтов в журнале нет; процесс в VPN-namespace (прямая проверка сокетов из сессии невозможна — проверено по журналу).
