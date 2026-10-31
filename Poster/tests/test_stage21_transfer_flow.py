@@ -227,6 +227,32 @@ def user_state_snapshot(h, telegram_user_id: int) -> list[tuple]:
     return [(row.screen_message_id, row.payload) for row in rows]
 
 
+RESUME_PAYLOAD_KEY = "announcement_resume"
+
+
+def payload_without_resume(payload: str | None) -> dict | None:
+    """
+    Payload без служебного resume-снимка конструктора (Poster 2.3 H1).
+
+    Снимок «экран ждёт ввода» живёт в том же `user_states.payload` и
+    намеренно снимается при уходе в другой раздел. Сравнение «до/после»
+    поэтому смотрит на остальное состояние: WIP и прочие ключи не должны
+    меняться.
+    """
+    import json
+
+    if not payload:
+        return None
+    try:
+        parsed = json.loads(payload)
+    except (TypeError, ValueError):
+        return {"raw": payload}
+    if not isinstance(parsed, dict):
+        return {"raw": payload}
+    parsed.pop(RESUME_PAYLOAD_KEY, None)
+    return parsed or None
+
+
 def screen_callback(h, prefix: str) -> str:
     matches = [
         data for _, data in h.screen_buttons() if data and data.startswith(prefix)
@@ -839,7 +865,18 @@ class SafetyAndAuditFlowTests(unittest.TestCase):
             ]
         self.assertIn({"text": "Незавершённый пост про передачу"}, payloads)
         self.assertIn({"text": "Описание про передачу"}, payloads)
-        self.assertEqual(user_state_snapshot(h, INITIATOR_TG), before)
+        after = user_state_snapshot(h, INITIATOR_TG)
+        self.assertEqual(
+            [(rid, payload_without_resume(payload)) for rid, payload in after],
+            [(rid, payload_without_resume(payload)) for rid, payload in before],
+        )
+        # Poster 2.3 H1: уход в другой раздел снимает приём ввода — обычный
+        # текст больше не должен продолжать чужой черновик.
+        self.assertNotIn(
+            RESUME_PAYLOAD_KEY,
+            after[0][1] or "",
+            "resume-снимок снят при переходе в «Управление»",
+        )
 
     @scenario_test
     async def test_long_address_saved_and_displayed_as_explicit_preview(self, h):

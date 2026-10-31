@@ -152,6 +152,18 @@ CONVERSATION_NAME = "announcement_wizard"
 
 AW_PLACE, AW_TEMPLATE, AW_QUESTIONS, AW_EXTRAS, AW_PREVIEW = range(5)
 
+# Poster 2.3 H1: ключ UI-снимка в `user_states.payload`. PTB хранит
+# состояние ConversationHandler только в памяти, поэтому после рестарта
+# службы следующий текст уходил в глобальную подсказку главного меню, а
+# введённое значение терялось. Снимок — минимальный: какой черновик активен
+# и в каком режиме ввода находится человек. Данные черновика, как и прежде,
+# живут в `announcement_drafts`; здесь только навигация.
+RESUME_PAYLOAD_KEY = "announcement_resume"
+RESUME_MODE_TEXT = "text"
+RESUME_MODE_PHOTO = "photo"
+# Режимы, в которых текст продолжает шаг, и этапы черновика для каждого.
+RESUME_TEXT_STAGES = frozenset({WizardStage.QUESTIONS, WizardStage.EXTRAS})
+
 PLACE_PAGE_SIZE = 8
 TEMPLATE_PAGE_SIZE = 6
 EXTRA_PAGE_SIZE = 8
@@ -233,6 +245,8 @@ def _fresh_ui() -> dict[str, Any]:
         "editing": False,
         "photos_page": 0,
         "photo_add": False,
+        # H1: шаг фото ждёт ввода — сохраняется в resume-снимке.
+        "photo_step": False,
         "place": {
             "phase": "home",
             "query": "",
@@ -269,6 +283,289 @@ def _clear_active(ui: dict[str, Any]) -> None:
     ui["active_source"] = None
     ui["editing"] = False
     ui["photo_add"] = False
+    # H1: шаг фото — тоже режим ввода. Снимается на любом экране без ввода,
+    # иначе снимок «ждём фото» пережил бы переход к обзору.
+    ui["photo_step"] = False
+
+
+# —— Poster 2.3 H1: авто-resume активного черновика ————————————————————
+
+
+def _resume_snapshot(ui: dict[str, Any]) -> dict[str, Any] | None:
+    """
+    Минимальный снимок «экран ждёт ввода» для `user_states.payload`.
+
+    None — экран ничего не ждёт (меню, списки, обзор, доставка): после
+    рестарта службы текст должен уйти в обычную подсказку, а не в черновик.
+    Данных черновика и секретов здесь нет — только `draft_id`, режим и
+    идентификатор кирпичика; значения живут в `announcement_drafts`.
+    """
+    draft_id = ui.get("draft_id")
+    source = ui.get("active_source")
+    brick_id = ui.get("active_brick_id")
+    if brick_id is not None and source in {"question", "extra"} and draft_id:
+        return {
+            "mode": RESUME_MODE_TEXT,
+            "draft_id": int(draft_id),
+            "brick_id": int(brick_id),
+            "source": str(source),
+        }
+    if ui.get("photo_step") and draft_id:
+        return {"mode": RESUME_MODE_PHOTO, "draft_id": int(draft_id)}
+    return None
+
+
+def _remember_resume(
+    user_id: int,
+    user_data: dict[str, Any],
+    chat_id: int,
+    ui: dict[str, Any],
+) -> None:
+    """
+    Сохраняет ref экрана И режим ввода одной записью в `user_states`.
+
+    Заменяет `screen.save_screen_ref` на пути отрисовки: раньше снимок
+    делался без resume-ключа, теперь режим ввода обновляется там же — не
+    появляется ни второй записи, ни расхождения между ref и снимком.
+    Сбой БД не ломает отрисовку: экран уже нарисован.
+    """
+    payload = screen.load_payload(user_id) or {}
+    snapshot = _resume_snapshot(ui)
+    current = payload.get(RESUME_PAYLOAD_KEY)
+    if snapshot is None:
+        payload.pop(RESUME_PAYLOAD_KEY, None)
+        if current is not None:
+            logger.debug("Resume-снимок снят: user_id=%s", user_id)
+    else:
+        payload[RESUME_PAYLOAD_KEY] = snapshot
+        if current != snapshot:
+            logger.debug(
+                "Resume-снимок обновлён: user_id=%s draft_id=%s фаза=%s",
+                user_id,
+                snapshot.get("draft_id"),
+                snapshot["mode"],
+            )
+    screen.save_state(user_id, user_data, chat_id, payload or None)
+
+
+def _clear_resume(
+    user_id: int,
+    user_data: dict[str, Any],
+    chat_id: int,
+) -> None:
+    """
+    Снимает resume-снимок при явном выходе из конструктора.
+
+    Закрытый конструктор (`/cancel`, возврат в меню, другой раздел) не
+    должен «оживать» от обычного текста: черновик остаётся в «📂 Мои
+    анонсы», но ввод продолжается только явным открытием. Ref экрана
+    сохраняется: screen_message_id не теряется вместе со снимком.
+    """
+    payload = screen.load_payload(user_id)
+    if not payload or RESUME_PAYLOAD_KEY not in payload:
+        return
+    if screen.screen_ref(user_data) is None:
+        screen.hydrate_screen_ref(user_data, user_id)
+    payload.pop(RESUME_PAYLOAD_KEY, None)
+    screen.save_state(user_id, user_data, chat_id, payload or None)
+
+
+def drop_resume_snapshot(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """
+    Снимает авто-resume при явном выходе из конструктора (Poster 2.3 H1).
+
+    Нужен глобальным экранам меню (`handlers/main_menu.py`): `/cancel`,
+    `/start`, `/help` и «🏠 В меню» после рестарта службы обрабатываются там,
+    где состояния ConversationHandler уже нет. Без этого вызова снимок
+    «экран ждёт ввода» пережил бы выход, и следующий текст записался бы в
+    значение шага, затерев сохранённое. Обёртка скрывает внутренние
+    аргументы `_clear_resume` от меню.
+    """
+    _clear_resume(_user_id(update), ctx.data(context), ctx.chat(update).id)
+
+
+def _other_session_active(user_id: int) -> bool:
+    """
+    Идёт ли другой сценарий, который сам ждёт ввод.
+
+    «Места», кабинет, кирпичики и шаблоны регистрируются ПОСЛЕ конструктора
+    и глобального меню: без этой проверки resume перехватил бы их текст.
+    """
+    from admin_state import has_admin_session
+    from brick_state import has_brick_draft
+    from place_state import has_place_session
+    from template_state import has_template_session
+
+    return (
+        has_place_session(user_id)
+        or has_admin_session(user_id)
+        or has_brick_draft(user_id)
+        or has_template_session(user_id)
+    )
+
+
+def _resume_target(user_id: int, snapshot: dict[str, Any]):
+    """
+    Проверяет снимок по АКТУАЛЬНОМУ состоянию черновика.
+
+    Возвращает `(details, ui)` — готовое навигационное состояние для
+    продолжения шага, либо None. Проверка в `check_update` (до выбора
+    обработчика): если resume невозможен, update обязан уйти в обычную
+    подсказку главного меню, а не пропасть.
+    """
+    mode = snapshot.get("mode")
+    draft_id = snapshot.get("draft_id")
+    if mode not in {RESUME_MODE_TEXT, RESUME_MODE_PHOTO} or not isinstance(
+        draft_id, int
+    ):
+        return None
+    try:
+        details = _session_details(user_id, draft_id)
+    except (AnnouncementNotFoundError, AnnouncementActorError, AnnouncementError):
+        logger.warning(
+            "Resume невозможен: user_id=%s draft_id=%s фаза=%s — черновик "
+            "не найден или недоступен.",
+            user_id,
+            draft_id,
+            mode,
+        )
+        return None
+
+    ui = _fresh_ui()
+    _set_details(ui, details)
+    if mode == RESUME_MODE_TEXT:
+        if details.stage not in RESUME_TEXT_STAGES:
+            logger.info(
+                "Resume не нужен: user_id=%s draft_id=%s фаза=%s — этап %s.",
+                user_id,
+                draft_id,
+                mode,
+                details.stage,
+            )
+            return None
+        brick_id = snapshot.get("brick_id")
+        source = snapshot.get("source")
+        if not isinstance(brick_id, int) or source not in {"question", "extra"}:
+            return None
+        if source == "question":
+            fields = _askable_fields(_load_fields(user_id, draft_id))
+            if _find_field(fields, brick_id) is None:
+                logger.info(
+                    "Resume не нужен: user_id=%s draft_id=%s — кирпичик %s "
+                    "больше не спрашивается.",
+                    user_id,
+                    draft_id,
+                    brick_id,
+                )
+                return None
+        elif all(extra.brick_id != brick_id for extra in details.extras):
+            return None
+        ui["active_brick_id"] = brick_id
+        ui["active_source"] = source
+        return details, ui
+
+    photos_allowed = details.stage == WizardStage.PREVIEW or (
+        details.publication_sent and details.stage == WizardStage.COMPLETED
+    )
+    if not photos_allowed:
+        logger.info(
+            "Resume не нужен: user_id=%s draft_id=%s фаза=%s — этап %s.",
+            user_id,
+            draft_id,
+            mode,
+            details.stage,
+        )
+        return None
+    ui["photo_step"] = True
+    return details, ui
+
+
+def _load_resume(user_id: int) -> dict[str, Any] | None:
+    """Resume-снимок из `user_states.payload` (None — ввода не ждём)."""
+    payload = screen.load_payload(user_id)
+    if not payload:
+        return None
+    snapshot = payload.get(RESUME_PAYLOAD_KEY)
+    return snapshot if isinstance(snapshot, dict) else None
+
+
+class AnnouncementResumeHandler(MessageHandler):
+    """
+    Текст/фото, продолжающие шаг активного черновика после рестарта службы.
+
+    PTB хранит состояние ConversationHandler только в памяти, поэтому после
+    перезапуска процесса следующий текст попадал в глобальную подсказку
+    главного меню, а введённое значение терялось (журнал 30.10, 23:48/23:51).
+    Обработчик регистрируется ПОСЛЕ диалога конструктора в той же группе:
+    пока состояние диалога живо, он не вызывается вовсе. Resume включается
+    только когда:
+
+    - чат личный (в группе анонс не продолжается);
+    - в БД есть авто-снимок «экран ждёт ввода» по активному черновику;
+    - не идёт другой сценарий ввода («Места», кабинет, кирпичики, шаблоны).
+
+    Записи, не подходящие под условия, получают прежнюю подсказку меню.
+    """
+
+    def check_update(self, update):
+        matched = super().check_update(update)
+        if not matched:
+            return None
+        if not _is_private_chat(update):
+            return None
+        user = getattr(update, "effective_user", None)
+        if user is None:
+            return None
+        # Сначала дешёвая проверка снимка: у большинства обычных сообщений
+        # его нет, и запросы о чужих сценариях не нужны.
+        if _load_resume(user.id) is None:
+            return None
+        if _other_session_active(user.id):
+            return None
+        return matched
+
+
+async def handle_resume_input(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> int:
+    """
+    Продолжает активный шаг черновика после потери состояния диалога.
+
+    Значение сохраняется обычным путём шага (CAS, entities, лимиты) — здесь
+    только восстанавливается навигация. Если снимок устарел (черновик
+    удалён, этап сменился, кирпичик больше не спрашивается), снимок
+    снимается, а пользователь видит прежнюю подсказку меню: текст не
+    пропадает и не уходит в чужой шаг.
+    """
+    user_id = _user_id(update)
+    snapshot = _load_resume(user_id)
+    target = _resume_target(user_id, snapshot) if snapshot is not None else None
+    if target is None:
+        _clear_resume(user_id, ctx.data(context), ctx.chat(update).id)
+        logger.info(
+            "Resume после рестарта не выполнен: user_id=%s — обычная подсказка.",
+            user_id,
+        )
+        from handlers.main_menu import outside_dialog_hint
+
+        await outside_dialog_hint(update, context)
+        return ConversationHandler.END
+    details, ui = target
+    ctx.data(context)["announcement_ui"] = ui
+    logger.info(
+        "Resume после рестарта: user_id=%s draft_id=%s фаза=%s.",
+        user_id,
+        details.draft_id,
+        (snapshot or {}).get("mode"),
+    )
+    message = update.effective_message
+    if message is not None and message.photo:
+        state: int = await handle_photo(update, context)
+    else:
+        state = await handle_text(update, context)
+    # Диалог продолжается: следующий ввод обслуживает сам конструктор.
+    remember_conversation_state(update, context, state)
+    return state
 
 
 def _short(value: object, limit: int = 60) -> str:
@@ -323,7 +620,10 @@ async def _render(
     if screen.screen_ref(user_data) is None:
         screen.hydrate_screen_ref(user_data, user_id)
     await screen.render_screen(context, user_data, ctx.chat(update).id, text, keyboard)
-    screen.save_screen_ref(user_id, user_data, ctx.chat(update).id)
+    # Poster 2.3 H1: ref экрана и режим ввода фиксируются одной записью.
+    # Снимок нужен, чтобы после рестарта службы следующий текст продолжил шаг,
+    # а не провалился в подсказку главного меню.
+    _remember_resume(user_id, user_data, ctx.chat(update).id, _ui(context))
 
 
 async def _reanchor(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -3560,6 +3860,9 @@ async def _render_photos(
     ui = _ui(context)
     _set_details(ui, details)
     _clear_active(ui)
+    # H1: экран коллекции тоже принимает фото — режим ввода сохраняется,
+    # и после рестарта снимок продолжает шаг, а не теряется.
+    ui["photo_step"] = True
     photos = list(details.photos)
     total = len(photos)
     if page is None:
@@ -5025,8 +5328,12 @@ async def _close_photo_batch(
 
 
 async def _exit_to_main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    user_id = _user_id(update)
     _clear_ui(context)
-    _clear_other_sessions(_user_id(update))
+    # H1: явный выход закрывает приём ввода — обычный текст больше не
+    # должен «оживлять» черновик.
+    _clear_resume(user_id, ctx.data(context), ctx.chat(update).id)
+    _clear_other_sessions(user_id)
     from handlers.main_menu import render_main_menu
 
     await render_main_menu(update, context)
@@ -5034,8 +5341,12 @@ async def _exit_to_main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
 
 async def _close_wizard(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    user_id = _user_id(update)
     _clear_ui(context)
-    _clear_other_sessions(_user_id(update))
+    _clear_other_sessions(user_id)
+    # H1: `/cancel` закрывает конструктор; черновик остаётся в «📂 Мои
+    # анонсы», но текст после отмены в него уже не попадает.
+    _clear_resume(user_id, ctx.data(context), ctx.chat(update).id)
     await _reanchor(update, context)
     await _render(
         update,
@@ -5124,6 +5435,8 @@ async def _command_to_section(
 ) -> int:
     _clear_ui(context)
     _clear_other_sessions(_user_id(update))
+    # H1: переход в другой раздел закрывает приём ввода конструктора.
+    _clear_resume(_user_id(update), ctx.data(context), ctx.chat(update).id)
     if target == "drafts":
         # Единый список анонсов вместо легаси-черновиков (S5).
         return await open_my_announcements(update, context)
@@ -6344,6 +6657,8 @@ async def open_my_announcements(
     await _answer(update)
     _end_foreign_conversations(update, context)
     _clear_other_sessions(_user_id(update))
+    # H1: список черновиков — экран без ввода: снимок «ждём значение» снят.
+    _clear_resume(_user_id(update), ctx.data(context), ctx.chat(update).id)
     await _reanchor(update, context)
     ctx.data(context)["announcement_ui"] = _fresh_ui()
     return await _render_home(update, context)
@@ -6543,6 +6858,13 @@ def announcement_wizard_handlers() -> list[BaseHandler]:
     )
     return [
         conversation,
+        # Poster 2.3 H1: после потери состояния диалога (рестарт службы)
+        # текст/фото продолжают активный шаг. Стоит ПОСЛЕ диалога: пока его
+        # состояние живо, обработчик не вызывается, а вне диалога он
+        # пропускает всё, кроме личного чата с настоящим черновиком.
+        AnnouncementResumeHandler(
+            (filters.TEXT | filters.PHOTO) & ~filters.COMMAND, handle_resume_input
+        ),
         CallbackQueryHandler(outside_wizard_callback, pattern=r"^aw_"),
     ]
 

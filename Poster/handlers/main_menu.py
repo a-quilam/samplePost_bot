@@ -48,6 +48,22 @@ from utils.ui_texts import tr
 logger = logging.getLogger(__name__)
 
 
+def _drop_resume(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """
+    Явный выход из конструктора снимает авто-resume (Poster 2.3 H1).
+
+    После рестарта службы у PTB уже нет состояния ConversationHandler,
+    поэтому `/cancel`, `/start`, `/help` и «🏠 В меню» обрабатываются здесь.
+    Без снятия снимок «экран ждёт ввода» пережил бы выход, и следующий
+    обычный текст записался бы в значение шага, затерев сохранённое.
+    Импорт локальный: обратная зависимость main_menu ↔ announcement_wizard
+    не должна ломать загрузку модулей.
+    """
+    from handlers.announcement_wizard import drop_resume_snapshot
+
+    drop_resume_snapshot(update, context)
+
+
 def main_menu_keyboard() -> InlineKeyboardMarkup:
     """
     Inline-клавиатура главного меню Poster 2.0 — ровно пять кнопок.
@@ -165,6 +181,10 @@ async def render_main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     await screen.drop_legacy_reply_keyboard(update, context)
     user_data = ctx.data(context)
     user_id = ctx.user(update).id
+    # Poster 2.3 H1: меню — экран без ввода. Снимок «экран ждёт значения»
+    # снимается и здесь: после рестарта службы меню рисуют глобальные
+    # обработчики, где состояния диалога конструктора уже нет.
+    _drop_resume(update, context)
     # Главное меню — другая ветка сценария: незавершённый выбор места,
     # конструктор личного кирпичика и административный ввод не должны
     # перехватывать следующий текст. WIP-пост при этом не трогается.
@@ -241,6 +261,9 @@ async def render_help(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     """Справка на экране управления (с возвратом в главное меню)."""
     # навигация сообщением ниже экрана → новый экран рядом с вводом
     await screen.reanchor_screen(update, context)
+    # Poster 2.3 H1: справка — экран без ввода; выход из конструктора
+    # закрывает приём значений даже если состояние диалога потеряно.
+    _drop_resume(update, context)
     clear_place_session(ctx.user(update).id)
     clear_admin_session(ctx.user(update).id)
     clear_brick_session(ctx.user(update).id)
@@ -344,6 +367,10 @@ async def cancel_without_dialog(
     """/cancel без активного диалога: отмена места/кабинета или подсказка."""
     # навигация сообщением ниже экрана → новый экран рядом с вводом
     await screen.reanchor_screen(update, context)
+    # Poster 2.3 H1: отмена закрывает приём ввода конструктора. Отдельный
+    # вызов нужен для post-restart-пути: там состояния диалога уже нет, и
+    # только здесь снимается снимок «экран ждёт значения».
+    _drop_resume(update, context)
     user_id = ctx.user(update).id
     place_active = has_place_session(user_id)
     admin_active = has_admin_session(user_id)

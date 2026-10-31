@@ -21,10 +21,13 @@ Telegram виде.
 
 import re
 from collections.abc import Sequence
+from datetime import datetime
 from html import escape as _escape
 from html import unescape as _unescape
 
 from telegram import MessageEntity
+
+from utils.parsers import APP_TZ
 
 
 class FormattedText(str):
@@ -176,8 +179,18 @@ def _wrap(entity: MessageEntity, inner: str, raw_text: str) -> str:
     """
     Тег для конкретного типа entity. raw_text — исходный текст entity
     (нужен URL как href). Вспомогательные типы без разметки Telegram
-    (mention, hashtag, email, date_time, ...) возвращают просто текст —
-    содержимое сохраняется.
+    (mention, hashtag, email, ...) возвращают просто текст — содержимое
+    сохраняется.
+
+    `date_time` (Bot API 10.0, PTB 22.8) деградирует в ЧИТАЕМЫЙ текст:
+    Telegram не документирует `<tg-time>` как допустимый тег для
+    parse_mode=HTML при отправке (`<tg-time unix="…" format="…">` есть
+    только в обратном направлении — `Message.text_html`, то есть в
+    сериализации уже полученной entity). Отправлять его «наугад» нельзя:
+    неизвестный тег ломает разметку всего сообщения. Поэтому фиксируем
+    предсказуемую деградацию: unix_time → локализованные дата/время по
+    `date_time_format`, при неразбираемом формате — ISO; без unix_time
+    остаётся исходный видимый текст.
     """
     kind = entity.type
     if kind == MessageEntity.BOLD:
@@ -213,7 +226,115 @@ def _wrap(entity: MessageEntity, inner: str, raw_text: str) -> str:
     if kind == MessageEntity.CUSTOM_EMOJI and entity.custom_emoji_id:
         emoji_id = escape_html(str(entity.custom_emoji_id))
         return f'<tg-emoji emoji-id="{emoji_id}">{inner}</tg-emoji>'
+    if kind == MessageEntity.DATE_TIME:
+        readable = format_date_time(entity.unix_time, entity.date_time_format)
+        return escape_html(readable) if readable else inner
     return inner
+
+
+# —— `date_time` entity → читаемый текст ———————————————————————————————
+
+# Все допустимые флаги Bot API (`date-time entity formatting`).
+_DATE_TIME_FLAGS = frozenset("rwdDtT")
+_DATE_TIME_DEFAULT_FORMAT = "dt"
+
+_WEEKDAYS_RU = (
+    "понедельник",
+    "вторник",
+    "среда",
+    "четверг",
+    "пятница",
+    "суббота",
+    "воскресенье",
+)
+_MONTHS_RU = (
+    "января",
+    "февраля",
+    "марта",
+    "апреля",
+    "мая",
+    "июня",
+    "июля",
+    "августа",
+    "сентября",
+    "октября",
+    "ноября",
+    "декабря",
+)
+
+
+def format_date_time(
+    unix_time: datetime | None,
+    date_time_format: str | None,
+    *,
+    now: datetime | None = None,
+) -> str | None:
+    """
+    Читаемое представление `date_time`-entity без тега `<tg-time>`.
+
+    Возвращает None, если времени нет (тогда остаётся исходный текст).
+    Формат разбирается по флагам Bot API: дата (`d`/`D`), время
+    (`t`/`T`), день недели (`w`), относительность (`r`). Неизвестная
+    строка формата — ISO-фолбэк локализованного времени: сообщение не
+    ломается и ничего не теряет.
+
+    Тег `<tg-time>` здесь сознательно НЕ используется: Telegram принимает
+    его только в обратном направлении (`Message.text_html`), а при
+    отправке в parse_mode=HTML он не документирован и ломает разметку.
+    """
+    if unix_time is None:
+        return None
+    try:
+        moment = (
+            unix_time.replace(tzinfo=APP_TZ)
+            if unix_time.tzinfo is None
+            else unix_time.astimezone(APP_TZ)
+        )
+    except (OverflowError, ValueError, OSError):
+        return None
+    fmt = (date_time_format or _DATE_TIME_DEFAULT_FORMAT).strip()
+    if not fmt or any(char not in _DATE_TIME_FLAGS for char in fmt):
+        return moment.isoformat(sep=" ", timespec="minutes")
+    if "r" in fmt:
+        return _relative_date_time(moment, now)
+    parts: list[str] = []
+    if "w" in fmt:
+        parts.append(_WEEKDAYS_RU[moment.weekday()])
+    if "d" in fmt:
+        parts.append(f"{moment.day:02d}.{moment.month:02d}.{moment.year}")
+    elif "D" in fmt:
+        parts.append(f"{moment.day} {_MONTHS_RU[moment.month - 1]} {moment.year}")
+    if "t" in fmt:
+        parts.append(f"{moment.hour:02d}:{moment.minute:02d}")
+    elif "T" in fmt:
+        parts.append(f"{moment.hour:02d}:{moment.minute:02d}:{moment.second:02d}")
+    if not parts:
+        return moment.isoformat(sep=" ", timespec="minutes")
+    return ", ".join(parts)
+
+
+def _relative_date_time(moment: datetime, now: datetime | None) -> str:
+    """Относительная формулировка (`r`): «сегодня в 19:00», «через 2 дня»."""
+    current = now.astimezone(APP_TZ) if now is not None else datetime.now(APP_TZ)
+    delta = moment - current
+    seconds = int(delta.total_seconds())
+    day_shift = (moment.date() - current.date()).days
+    if day_shift == 0:
+        return f"сегодня в {moment.hour:02d}:{moment.minute:02d}"
+    if day_shift == 1:
+        return f"завтра в {moment.hour:02d}:{moment.minute:02d}"
+    if day_shift == -1:
+        return f"вчера в {moment.hour:02d}:{moment.minute:02d}"
+    if abs(seconds) < 60:
+        return "сейчас" if seconds >= 0 else "минуту назад"
+    minutes = abs(seconds) // 60
+    if minutes < 60:
+        return f"через {minutes} мин" if seconds > 0 else f"{minutes} мин назад"
+    hours = minutes // 60
+    if hours < 24:
+        return f"через {hours} ч" if seconds > 0 else f"{hours} ч назад"
+    days = abs(day_shift)
+    return f"через {days} дн" if day_shift > 0 else f"{days} дн назад"
 
 
 # —— Allow-list HTML значения (U1b, defense-in-depth) ————————————————————
@@ -238,6 +359,7 @@ _ALLOWED_TAGS = frozenset(
         "tg-spoiler",
         "span",
         "tg-emoji",
+        "tg-time",
     }
 )
 
@@ -249,12 +371,19 @@ _ALLOWED_ATTRIBUTES = {
     "blockquote": frozenset({"expandable"}),
     "pre": frozenset({"expandable"}),
     "tg-emoji": frozenset({"emoji-id"}),
+    # `<tg-time unix="…" format="…">` — как его сериализует PTB; без
+    # атрибутов тег остаётся безопасным текстом-обёрткой.
+    "tg-time": frozenset({"unix", "format"}),
 }
 # Булевы атрибуты Telegram: достаточно самого факта наличия.
 _FLAG_ATTRIBUTES = frozenset({"expandable"})
 # Разрешённые class: спойлер и язык блока кода (`language-python`).
 _LANGUAGE_CLASS_RE = re.compile(r"language-[A-Za-z0-9_+#-]{1,32}")
 _ALLOWED_HREF_PREFIXES = ("http://", "https://", "tg://")
+# Значения атрибутов `<tg-time>`: unix — целое неотрицательное (до 20 цифр,
+# чтобы не принимать мусор), format — только документированные флаги Bot API.
+_UNIX_ATTRIBUTE_RE = re.compile(r"[0-9]{1,20}")
+_TIME_FORMAT_RE = re.compile(r"[rwdDtT]{1,16}")
 
 _OPEN_TAG_RE = re.compile(r"<([a-zA-Z][a-zA-Z0-9-]*)([^<>]*)>")
 _CLOSE_TAG_RE = re.compile(r"<\s*/\s*([a-zA-Z][a-zA-Z0-9-]*)\s*>")
@@ -322,6 +451,18 @@ def sanitize_html(value: object) -> SafeHtml:
     return SafeHtml("".join(out))
 
 
+def _attribute_sort_key(name: str) -> tuple[int, str]:
+    """
+    Порядок атрибутов как у PTB: `unix` раньше `format` в `<tg-time>`.
+
+    Раньше атрибуты сортировались по алфавиту (`format` раньше `unix`),
+    поэтому санитизированный `<tg-time>` не совпадал с сериализацией PTB
+    байт-в-байт, и повторная проверка давала другой текст. Порядок из
+    `Message.text_html` (`unix`, затем `format`) сохраняется.
+    """
+    return (0, name) if name == "unix" else (1, name)
+
+
 def _safe_attributes(name: str, raw: str) -> str:
     """Собирает разрешённые атрибуты тега; прочие отбрасываются."""
     allowed = _ALLOWED_ATTRIBUTES.get(name)
@@ -334,7 +475,7 @@ def _safe_attributes(name: str, raw: str) -> str:
         for match in _ATTR_RE.finditer(raw)
     }
     parts: list[str] = []
-    for key in sorted(set(found) | _bare_flags(name, raw)):
+    for key in sorted(set(found) | _bare_flags(name, raw), key=_attribute_sort_key):
         if key not in allowed:
             continue
         value = _unescape(found.get(key) or "")
@@ -356,6 +497,14 @@ def _safe_attributes(name: str, raw: str) -> str:
             if not value.isdigit():
                 continue
             parts.append(f' emoji-id="{value}"')
+        elif key == "unix":
+            if not _UNIX_ATTRIBUTE_RE.fullmatch(value):
+                continue
+            parts.append(f' unix="{value}"')
+        elif key == "format":
+            if not _TIME_FORMAT_RE.fullmatch(value):
+                continue
+            parts.append(f' format="{value}"')
     return "".join(parts)
 
 
