@@ -1147,20 +1147,19 @@ def _place_keyboard(
     viewer_telegram_user_id: int | None = None,
 ) -> InlineKeyboardMarkup:
     rows: list[list[InlineKeyboardButton]] = []
+    # Poster 2.3.1 E4: действия карточки собираются парами по смыслу —
+    # правка места рядом с его шаблоном. Тексты кнопок не сокращаются:
+    # длинную строку Telegram переносит сам.
     rows.append(
         [
             InlineKeyboardButton(
                 tr("buttons.admin.redaktirovat_mesto"),
                 callback_data=f"adm_edit_place:{details.place_id}",
-            )
-        ]
-    )
-    rows.append(
-        [
+            ),
             InlineKeyboardButton(
                 tr("buttons.admin.standartnyy_shablon"),
                 callback_data=f"tp_std:{details.place_id}",
-            )
+            ),
         ]
     )
     if viewer_telegram_user_id is not None:
@@ -1170,6 +1169,8 @@ def _place_keyboard(
             )
         except ProposalPermissionError:
             pending_proposals = 0
+        open_conflicts = count_open_conflicts_for_place(session, details.place_id)
+        # E4: счётчики-действия рядом: предложения и конфликты — одна тема.
         rows.append(
             [
                 InlineKeyboardButton(
@@ -1178,67 +1179,55 @@ def _place_keyboard(
                         pending_proposals=pending_proposals,
                     ),
                     callback_data=f"adm_bprop_place:{details.place_id}",
-                )
-            ]
-        )
-        open_conflicts = count_open_conflicts_for_place(session, details.place_id)
-        rows.append(
-            [
+                ),
                 InlineKeyboardButton(
                     tr("buttons.admin.konflikty_kodov", open_conflicts=open_conflicts),
                     callback_data=f"adm_bconflicts:{details.place_id}",
-                )
+                ),
             ]
         )
     active = get_active_place_admin(session, details.place_id)
+    # E4: админ-действия собираются списком и укладываются в строки по две.
+    admin_buttons: list[InlineKeyboardButton] = []
     if active is not None and viewer_telegram_user_id == active.user.telegram_user_id:
-        rows.append(
-            [
-                InlineKeyboardButton(
-                    tr("buttons.admin.peredat_adminku"),
-                    callback_data=f"adm_transfer:{details.place_id}",
-                )
-            ]
+        admin_buttons.append(
+            InlineKeyboardButton(
+                tr("buttons.admin.peredat_adminku"),
+                callback_data=f"adm_transfer:{details.place_id}",
+            )
         )
     if access_kind == "superadmin":
         if active is None:
-            rows.append(
-                [
-                    InlineKeyboardButton(
-                        tr("buttons.admin.naznachit_administratora"),
-                        callback_data=f"adm_assign:{details.place_id}",
-                    )
-                ]
+            admin_buttons.append(
+                InlineKeyboardButton(
+                    tr("buttons.admin.naznachit_administratora"),
+                    callback_data=f"adm_assign:{details.place_id}",
+                )
             )
         else:
-            rows.append(
-                [
-                    InlineKeyboardButton(
-                        tr("buttons.admin.zamenit_administratora"),
-                        callback_data=f"adm_replace:{details.place_id}",
-                    )
-                ]
+            admin_buttons.append(
+                InlineKeyboardButton(
+                    tr("buttons.admin.zamenit_administratora"),
+                    callback_data=f"adm_replace:{details.place_id}",
+                )
             )
-            rows.append(
-                [
-                    InlineKeyboardButton(
-                        tr("buttons.admin.snyat_administratora"),
-                        callback_data=f"adm_revoke:{details.place_id}",
-                    )
-                ]
+            admin_buttons.append(
+                InlineKeyboardButton(
+                    tr("buttons.admin.snyat_administratora"),
+                    callback_data=f"adm_revoke:{details.place_id}",
+                )
             )
+    for start in range(0, len(admin_buttons), 2):
+        rows.append(admin_buttons[start : start + 2])
+    # E4: навигация — тоже пара.
     rows.append(
         [
             InlineKeyboardButton(
                 tr("buttons.admin.k_spisku_mest"), callback_data="adm_places"
-            )
-        ]
-    )
-    rows.append(
-        [
+            ),
             InlineKeyboardButton(
                 tr("buttons.admin.glavnoe_menyu"), callback_data="main_menu"
-            )
+            ),
         ]
     )
     return InlineKeyboardMarkup(rows)
