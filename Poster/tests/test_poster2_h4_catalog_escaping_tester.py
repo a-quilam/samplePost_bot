@@ -36,8 +36,10 @@ except Exception as exc:  # noqa: BLE001 — причина попадает в 
 EVIL = '<b>x</b>&"y"'
 
 # Разметка, которую каталог вправе использовать в `_html`-ключах.
-TRUSTED_TAGS = re.compile(r"</?(b|strong|i|em|u|ins|s|strike|del|code|pre|"
-                          r"blockquote|a|tg-spoiler|span|tg-emoji|tg-time)\b")
+TRUSTED_TAGS = re.compile(
+    r"</?(b|strong|i|em|u|ins|s|strike|del|code|pre|"
+    r"blockquote|a|tg-spoiler|span|tg-emoji|tg-time)\b"
+)
 
 
 class CatalogEscapingUnitTests(unittest.TestCase):
