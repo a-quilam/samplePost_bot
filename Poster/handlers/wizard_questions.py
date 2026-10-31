@@ -154,6 +154,9 @@ def truncate_html(
     меняются.
     """
     if limit <= 0:
+        # Внутренняя ошибка разработчика: вызывающий передал неверный бюджет.
+        # Пользовательский текст каталога, но не экран — оставлено литералом
+        # намеренно (см. docs/ui_texts.md, «Что осталось намеренно»).
         raise ValueError("Лимит видимого текста должен быть положительным")
     raw_budget = max_raw if max_raw is not None else limit * DISPLAY_HTML_RATIO
     if utf16_len(visible_html_text(html)) <= limit and utf16_len(html) <= raw_budget:

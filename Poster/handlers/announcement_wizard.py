@@ -171,18 +171,18 @@ MAX_PREVIEW_FIELDS = 12
 MAX_PREVIEW_EXTRAS = 6
 
 STAGE_LABELS = {
-    WizardStage.PLACE.value: "место",
-    WizardStage.TEMPLATE.value: "шаблон",
-    WizardStage.QUESTIONS.value: "вопросы",
-    WizardStage.EXTRAS.value: "доп. поля",
-    WizardStage.PREVIEW.value: "обзор",
-    WizardStage.COMPLETED.value: "опубликован",
+    WizardStage.PLACE.value: tr("wizard.module.mesto"),
+    WizardStage.TEMPLATE.value: tr("wizard.module.shablon"),
+    WizardStage.QUESTIONS.value: tr("wizard.module.voprosy"),
+    WizardStage.EXTRAS.value: tr("wizard.module.dop_polya"),
+    WizardStage.PREVIEW.value: tr("wizard.module.obzor"),
+    WizardStage.COMPLETED.value: tr("wizard.module.opublikovan"),
 }
 
 SCOPE_LABELS = {
-    BRICK_SCOPE_SYSTEM: "системный",
-    BRICK_SCOPE_PLACE: "места",
-    BRICK_SCOPE_PERSONAL: "личный",
+    BRICK_SCOPE_SYSTEM: tr("wizard.module.sistemnyy"),
+    BRICK_SCOPE_PLACE: tr("wizard.module.mesta"),
+    BRICK_SCOPE_PERSONAL: tr("wizard.module.lichnyy"),
 }
 
 STALE_TEXT = tr("errors.stale.wizard")
@@ -579,7 +579,7 @@ def _place_lines(details: object) -> list[str]:
     name = getattr(details, "place_display_name", None)
     if name is None or not str(name).strip():
         return []
-    return [f"Место: {_h(name)}"]
+    return [tr_safe("wizard.place_lines.mesto", name=_h(name))]
 
 
 async def _answer(
@@ -886,14 +886,16 @@ def _edit_blocked(details) -> bool:
 def _draft_status_label(draft) -> str:
     status = getattr(draft, "publication_status", None)
     if status == PUBLICATION_STATUS_SENDING:
-        return "отправка"
+        return tr("wizard.draft_status_label.otpravka")
     if status == PUBLICATION_STATUS_PARTIAL:
-        return "частично отправлен"
+        return tr("wizard.draft_status_label.chastichno_otpravlen")
     if status == PUBLICATION_STATUS_FAILED:
-        return "ошибка отправки"
+        return tr("wizard.draft_status_label.oshibka_otpravki")
     if status == PUBLICATION_STATUS_SENT:
-        return "готовый анонс отправлен"
-    return STAGE_LABELS.get(str(getattr(draft, "stage", "")), "черновик")
+        return tr("wizard.draft_status_label.gotovyy_anons_otpravlen")
+    return STAGE_LABELS.get(
+        str(getattr(draft, "stage", "")), tr("wizard.draft_status_label.chernovik")
+    )
 
 
 def _draft_display_name(draft) -> str:
@@ -911,7 +913,11 @@ def _draft_display_name(draft) -> str:
         name = getattr(snapshot, "source_name", None)
     if not name:
         origin = getattr(draft, "origin", None)
-        name = "Анонс по личному шаблону" if origin == "personal" else "Анонс"
+        name = (
+            tr("wizard.draft_display_name.anons_lichnomu_shablonu")
+            if origin == "personal"
+            else tr("wizard.draft_display_name.anons")
+        )
     return str(name)
 
 
@@ -932,29 +938,25 @@ def _home_content(user_id: int, page: int) -> tuple[str, InlineKeyboardMarkup, i
     lines = [
         tr("buttons.main.announcements"),
         "",
-        "Незавершённые анонсы можно продолжить с того же шага, завершённые "
-        "остаются в истории и не удаляются при создании новых. Готовый анонс "
-        "приходит в этот личный чат отдельным сообщением — ни в каналы, ни "
-        "другим людям он не отправляется.",
+        tr("wizard.home.nezavershennye_anonsy_mozhno"),
     ]
     if shown:
-        lines.extend(["", "Ваши анонсы:"])
+        lines.extend(["", tr("wizard.home.vashi_anonsy")])
         for number, draft in enumerate(shown, start=1):
             stage = _draft_status_label(draft)
             lines.append(f"{number}. {_h(_draft_display_name(draft))} — {stage}")
     elif drafts:
-        lines.extend(["", "На этой странице анонсов нет."])
+        lines.extend(["", tr("wizard.home.na_etoy_stranice_anonsov")])
     else:
         lines.extend(
             [
                 "",
-                "Анонсов пока нет. Начните с кнопки «📍 Создать для площадки» "
-                "или «📝 Создать по личному шаблону».",
+                tr("wizard.home.anonsov_poka_net_nachnite"),
             ]
         )
 
     buttons: list[list[InlineKeyboardButton]] = [
-        [InlineKeyboardButton("➕ Новый анонс", callback_data="aw_new")]
+        [InlineKeyboardButton(tr("buttons.wizard.novyy_anons"), callback_data="aw_new")]
     ]
     for index, draft in enumerate(shown):
         stage = _draft_status_label(draft)
@@ -972,18 +974,25 @@ def _home_content(user_id: int, page: int) -> tuple[str, InlineKeyboardMarkup, i
     if page > 0:
         nav.append(
             InlineKeyboardButton(
-                "◀️ Страница", callback_data=f"aw_home_page:{page - 1}"
+                tr("buttons.wizard.stranica"), callback_data=f"aw_home_page:{page - 1}"
             )
         )
     if start + len(shown) < total:
         nav.append(
             InlineKeyboardButton(
-                "Страница ▶️", callback_data=f"aw_home_page:{page + 1}"
+                tr("buttons.wizard.stranica_2"),
+                callback_data=f"aw_home_page:{page + 1}",
             )
         )
     if nav:
         buttons.append(nav)
-    buttons.append([InlineKeyboardButton("🏠 Главное меню", callback_data="main_menu")])
+    buttons.append(
+        [
+            InlineKeyboardButton(
+                tr("buttons.admin.glavnoe_menyu"), callback_data="main_menu"
+            )
+        ]
+    )
     return "\n".join(lines), InlineKeyboardMarkup(buttons), page
 
 
@@ -1006,11 +1015,7 @@ async def _render_home(
 
 
 def _place_hub_content() -> tuple[str, InlineKeyboardMarkup]:
-    text = (
-        "📍 Шаг 1. Выберите место\n\n"
-        "Поиск учитывает канонические и альтернативные названия. "
-        "Новое место здесь не создаётся."
-    )
+    text = tr("wizard.place_hub.shag_1_vyberite_mesto")
     keyboard = InlineKeyboardMarkup(
         [
             [
@@ -1112,9 +1117,9 @@ async def _render_all_places(
         tr("buttons.places.all"),
         "",
         (
-            f"Всего: {total}. Страница {page + 1}."
+            tr("wizard.render_all_places.vsego_stranica", total=total, value=page + 1)
             if total
-            else "В справочнике пока нет мест."
+            else tr("admin.places.v_spravochnike_poka_net")
         ),
     ]
     rows = _place_buttons(
@@ -1159,22 +1164,28 @@ async def _render_search_results(
     state["page"] = page
     shown = results[page * PLACE_PAGE_SIZE : (page + 1) * PLACE_PAGE_SIZE]
     lines = [
-        "🔎 Результаты поиска",
+        tr("wizard.render_search_results.rezultaty_poiska"),
         "",
-        f"Запрос: {_h(query)}",
-        f"Найдено мест: {total}.",
+        tr_safe("wizard.render_search_results.zapros", query=_h(query)),
+        tr("wizard.render_search_results.naydeno_mest", total=total),
     ]
     for result in shown:
         title = _h(place_title(result.canonical_name, result.city))
         if result.matched_name != result.canonical_name:
-            lines.append(f"• {title} — совпадение: " f"{_h(result.matched_name)}")
+            lines.append(
+                tr_safe(
+                    "wizard.render_search_results.sovpadenie",
+                    title=title,
+                    matched_name=_h(result.matched_name),
+                )
+            )
         else:
             lines.append(f"• {title}")
     if not results:
         lines.extend(
             [
                 "",
-                "Ничего не найдено. Измените запрос или посмотрите все места.",
+                tr("wizard.render_search_results.nichego_naydeno_izmenite_zapros"),
             ]
         )
     rows = [
@@ -1198,7 +1209,11 @@ async def _render_search_results(
     if nav:
         rows.append(nav)
     rows.append(
-        [InlineKeyboardButton("🔎 Изменить запрос", callback_data="aw_place_search")]
+        [
+            InlineKeyboardButton(
+                tr("buttons.wizard.izmenit_zapros"), callback_data="aw_place_search"
+            )
+        ]
     )
     rows.append(
         [InlineKeyboardButton(tr("buttons.places.all"), callback_data="aw_place_all:0")]
@@ -1220,11 +1235,7 @@ async def _render_search_prompt(
 ) -> int:
     ui = _ui(context)
     ui["place"]["phase"] = "search_input"
-    text = (
-        "🔎 Поиск места\n\n"
-        "Отправьте название или его часть одним сообщением. Поиск работает "
-        "по каноническим и альтернативным названиям."
-    )
+    text = tr("wizard.render_search_prompt.poisk_mesta_otpravte_nazvanie")
     body = f"{notice}\n\n{text}" if notice else text
     await _render(
         update,
@@ -1245,24 +1256,45 @@ async def _render_search_prompt(
 
 def _place_card_text(details, selected_name_id: int | None) -> str:
     lines = [
-        "📍 Проверьте место",
+        tr("wizard.place_card.proverte_mesto"),
         "",
-        f"Название: {_h(details.canonical_name)}",
-        f"Город: {_h(details.city) if details.city else '—'}",
-        f"Адрес: {_h(details.address) if details.address else 'не указан'}",
-        f"Ссылка: {_h(details.url) if details.url else 'не указана'}",
+        tr_safe(
+            "wizard.place_card.nazvanie", canonical_name=_h(details.canonical_name)
+        ),
+        tr_safe(
+            "wizard.place_card.gorod", city=_h(details.city) if details.city else "—"
+        ),
+        tr_safe(
+            "wizard.place_card.adres",
+            address=(
+                _h(details.address)
+                if details.address
+                else tr("wizard.place_card.ne_ukazan")
+            ),
+        ),
+        tr_safe(
+            "wizard.place_card.ssylka",
+            url=(
+                _h(details.url)
+                if details.url
+                else tr("wizard.preview_summary_lines.ne_ukazana")
+            ),
+        ),
         "",
-        "Названия:",
+        tr("wizard.place_card.nazvaniya"),
     ]
     for name in details.names:
         marker = "✅" if name.id == selected_name_id else "•"
-        suffix = " (каноническое)" if name.is_canonical else " (альтернативное)"
+        suffix = (
+            tr("wizard.place_card.kanonicheskoe")
+            if name.is_canonical
+            else tr("wizard.place_card.alternativnoe")
+        )
         lines.append(f"{marker} {_h(name.name)}{suffix}")
     lines.extend(
         [
             "",
-            "Известные адрес и ссылка будут взяты из справочника без повторных "
-            "вопросов.",
+            tr("wizard.place_card.izvestnye_adres_ssylka_budut"),
         ]
     )
     return "\n".join(lines)
@@ -1285,7 +1317,7 @@ async def _render_place_card(
     if details is None:
         state["phase"] = "hub"
         return await _render_place_hub(
-            update, context, notice="Место больше не доступно."
+            update, context, notice=tr("wizard.render_place_card.mesto_bolshe_dostupno")
         )
     if name_id is None:
         name_id = details.canonical_name_id
@@ -1300,7 +1332,7 @@ async def _render_place_card(
     rows = [
         [
             InlineKeyboardButton(
-                "✅ Подтвердить",
+                tr("buttons.admin.podtverdit"),
                 callback_data=(f"aw_place_confirm:{details.place_id}:{int(name_id)}"),
             )
         ]
@@ -1309,7 +1341,7 @@ async def _render_place_card(
         rows.append(
             [
                 InlineKeyboardButton(
-                    "🔤 Выбрать название",
+                    tr("buttons.wizard.vybrat_nazvanie"),
                     callback_data=f"aw_place_names:{details.place_id}:0",
                 )
             ]
@@ -1337,24 +1369,25 @@ async def _render_place_names(
         details = get_place_details(session, int(place_id))
     if details is None:
         return await _render_place_hub(
-            update, context, notice="Место больше не доступно."
+            update, context, notice=tr("wizard.render_place_card.mesto_bolshe_dostupno")
         )
     page = _clamped_page(max(0, page), len(details.names), 8)
     state["phase"] = "names"
     selected = state.get("name_id") or details.canonical_name_id
     names = details.names[page * 8 : (page + 1) * 8]
     lines = [
-        "🔤 Название места",
+        tr("wizard.render_place_names.nazvanie_mesta"),
         "",
-        f"Место: {_h(details.canonical_name)}",
+        tr_safe(
+            "wizard.render_place_names.mesto", canonical_name=_h(details.canonical_name)
+        ),
         "",
-        "Выберите каноническое или альтернативное название. Это не создаёт "
-        "новое место.",
+        tr("wizard.render_place_names.vyberite_kanonicheskoe"),
     ]
     rows: list[list[InlineKeyboardButton]] = []
     for name in names:
         marker = "✅" if name.id == selected else "•"
-        suffix = "" if name.is_canonical else " (альт.)"
+        suffix = "" if name.is_canonical else tr("wizard.render_place_names.alt")
         rows.append(
             [
                 InlineKeyboardButton(
@@ -1436,9 +1469,11 @@ async def _open_draft(
     except (AnnouncementNotFoundError, AnnouncementActorError, AnnouncementError):
         ui = _fresh_ui()
         ctx.data(context)["announcement_ui"] = ui
-        await _answer(update, "Черновик не найден или недоступен.", alert=True)
+        await _answer(
+            update, tr("alerts.wizard.chernovik_nayden_nedostupen"), alert=True
+        )
         return await _render_home(
-            update, context, notice="Черновик не найден или недоступен."
+            update, context, notice=tr("alerts.wizard.chernovik_nayden_nedostupen")
         )
 
     ui = _fresh_ui()
@@ -1537,49 +1572,57 @@ async def _confirm_place(
     except AnnouncementActorError:
         await _answer(
             update,
-            "Профиль ещё не зарегистрирован. Отправьте /start и повторите.",
+            tr("alerts.wizard.profil_zaregistrirovan_otpravte"),
             alert=True,
         )
         return ConversationHandler.END
 
     _set_details(ui, details)
     state["phase"] = "confirmed"
-    await _answer(update, "Место подтверждено.")
+    await _answer(update, tr("alerts.wizard.mesto_podtverzhdeno"))
     return await _render_template_screen(update, context, details)
 
 
 def _template_description(details) -> str:
     version = details.current_version
     count = len(version.bindings)
-    kind = "расширенный" if version.extended_content is not None else "обычный"
-    return f"{kind} текст; кирпичиков: {count}"
+    kind = (
+        tr("wizard.template_description.rasshirennyy")
+        if version.extended_content is not None
+        else tr("wizard.template_description.obychnyy")
+    )
+    return tr("wizard.template_description.tekst_kirpichikov", kind=kind, count=count)
 
 
 def _selected_template_text(details) -> str:
     snapshot = details.template_snapshot
     assert snapshot is not None
-    kind = "стандартный" if snapshot.source_kind == "standard" else "личный"
-    name = snapshot.source_name or (
-        "Стандартный шаблон места"
+    kind = (
+        tr("wizard.selected_template.standartnyy")
         if snapshot.source_kind == "standard"
-        else "Личный шаблон"
+        else tr("wizard.module.lichnyy")
+    )
+    name = snapshot.source_name or (
+        tr("wizard.selected_template.standartnyy_shablon_mesta")
+        if snapshot.source_kind == "standard"
+        else tr("wizard.selected_template.lichnyy_shablon")
     )
     texts = [
         label
         for label, key in (
-            ("обычный", TEMPLATE_CONTENT),
-            ("расширенный", TEMPLATE_EXTENDED_CONTENT),
+            (tr("wizard.template_description.obychnyy"), TEMPLATE_CONTENT),
+            (tr("wizard.template_description.rasshirennyy"), TEMPLATE_EXTENDED_CONTENT),
         )
         if snapshot.texts.get(key, "").strip()
     ]
-    part = ", ".join(texts) if texts else "без текста"
-    return (
-        f"🧩 Выбранный шаблон: {_h(name)}\n"
-        f"Тип: {kind}; версия снимка: {snapshot.source_template_version}.\n"
-        f"Тексты: {part}; уникальных кирпичиков: "
-        f"{len(snapshot.brick_ids)}.\n\n"
-        "Снимок уже сохранён. Изменения исходного шаблона не влияют на этот "
-        "анонс; повторный выбор шаблона недоступен."
+    part = ", ".join(texts) if texts else tr("wizard.selected_template.bez_teksta")
+    return tr_safe(
+        "wizard.selected_template.vybrannyy_shablon_tip_versiya",
+        name=_h(name),
+        kind=kind,
+        source_template_version=snapshot.source_template_version,
+        part=part,
+        count_brick_ids=len(snapshot.brick_ids),
     )
 
 
@@ -1600,7 +1643,7 @@ async def _render_template_screen(
             [
                 [
                     InlineKeyboardButton(
-                        "➡️ Продолжить",
+                        tr("buttons.wizard.prodolzhit"),
                         callback_data=(
                             f"aw_cont:{details.draft_id}:{details.revision}"
                         ),
@@ -1608,10 +1651,15 @@ async def _render_template_screen(
                 ],
                 [
                     InlineKeyboardButton(
-                        "📝 К списку черновиков", callback_data="aw_home"
+                        tr("buttons.wizard.k_spisku_chernovikov"),
+                        callback_data="aw_home",
                     )
                 ],
-                [InlineKeyboardButton("🏠 Главное меню", callback_data="main_menu")],
+                [
+                    InlineKeyboardButton(
+                        tr("buttons.admin.glavnoe_menyu"), callback_data="main_menu"
+                    )
+                ],
             ]
         )
         _set_template_phase(ui)
@@ -1636,18 +1684,18 @@ async def _render_template_screen(
     shown = personal[page * TEMPLATE_PAGE_SIZE : (page + 1) * TEMPLATE_PAGE_SIZE]
 
     lines = [
-        "🧩 Шаг 2. Выберите шаблон",
+        tr("wizard.render_template.shag_2_vyberite_shablon"),
         "",
         *_place_lines(details),
         "",
-        "Стандартный шаблон места:",
+        tr("wizard.render_template.standartnyy_shablon_mesta"),
         (
             f"• {_h(standard.display_name)} — {_h(_template_description(standard))}"
             if standard is not None
-            else "• не настроен"
+            else tr("wizard.render_template.ne_nastroen")
         ),
         "",
-        "Личные шаблоны:",
+        tr("wizard.render_template.lichnye_shablony"),
     ]
     if shown:
         for number, template in enumerate(shown, start=page * TEMPLATE_PAGE_SIZE + 1):
@@ -1656,11 +1704,11 @@ async def _render_template_screen(
                 f"{_h(_template_description(template))}"
             )
     else:
-        lines.append("• нет личных шаблонов")
+        lines.append(tr("wizard.render_template.net_lichnyh_shablonov"))
     lines.extend(
         [
             "",
-            "Шаблон фиксируется независимым снимком. Позже его нельзя заменить.",
+            tr("wizard.render_template.shablon_fiksiruetsya_nezavisimym"),
         ]
     )
 
@@ -1711,9 +1759,19 @@ async def _render_template_screen(
     if nav:
         rows.append(nav)
     rows.append(
-        [InlineKeyboardButton("📝 К списку черновиков", callback_data="aw_home")]
+        [
+            InlineKeyboardButton(
+                tr("buttons.wizard.k_spisku_chernovikov"), callback_data="aw_home"
+            )
+        ]
     )
-    rows.append([InlineKeyboardButton("🏠 Главное меню", callback_data="main_menu")])
+    rows.append(
+        [
+            InlineKeyboardButton(
+                tr("buttons.admin.glavnoe_menyu"), callback_data="main_menu"
+            )
+        ]
+    )
     text = "\n".join(lines)
     body = f"{notice}\n\n{text}" if notice else text
     await _render(update, context, body, InlineKeyboardMarkup(rows))
@@ -1756,7 +1814,7 @@ async def _select_template(
                 return await _stale(
                     update,
                     context,
-                    "Этот шаблон недоступен. Выберите шаблон из списка.",
+                    tr("wizard.select_template.etot_shablon_nedostupen_vyberite"),
                 )
             updated = choose_announcement_template(
                 session,
@@ -1772,7 +1830,7 @@ async def _select_template(
         await _answer(update, str(exc), alert=True)
         return await _resume_current(update, context, notice=str(exc))
     _set_details(ui, updated)
-    await _answer(update, "Шаблон выбран, снимок сохранён.")
+    await _answer(update, tr("alerts.wizard.shablon_vybran_snimok_sohranen"))
     return await _enter_questions(update, context, updated)
 
 
@@ -1870,7 +1928,7 @@ async def _render_question(
             rows.append(
                 [
                     InlineKeyboardButton(
-                        "✅ Готово",
+                        tr("buttons.wizard.gotovo"),
                         callback_data=(
                             f"aw_choice_done:{details.draft_id}:"
                             f"{details.revision}:{field.brick_id}"
@@ -1899,7 +1957,7 @@ async def _render_question(
         rows.append(
             [
                 InlineKeyboardButton(
-                    "➡️ Далее",
+                    tr("buttons.wizard.dalee"),
                     callback_data=(
                         f"aw_qnext:{details.draft_id}:"
                         f"{details.revision}:{field.brick_id}"
@@ -1911,7 +1969,7 @@ async def _render_question(
         rows.append(
             [
                 InlineKeyboardButton(
-                    "✏️ Изменить ответ",
+                    tr("buttons.wizard.izmenit_otvet"),
                     callback_data=(
                         f"aw_qedit:{details.draft_id}:"
                         f"{details.revision}:{field.brick_id}"
@@ -2162,14 +2220,17 @@ async def _save_question_value(
             # Причину уже показал `_finish_and_deliver` (лимит, ошибка
             # сборки, отправка): перекрывать её нельзя.
             return AW_PREVIEW
-        await _answer(update, f"Значение «{_short(field.title, 50)}» сохранено.")
+        await _answer(
+            update,
+            tr("alerts.wizard.znachenie_sohraneno", title=_short(field.title, 50)),
+        )
         return AW_PREVIEW
     return await _advance_question(
         update,
         context,
         updated,
         index + 1,
-        notice=f"Значение «{_short(field.title, 50)}» сохранено.",
+        notice=tr("alerts.wizard.znachenie_sohraneno", title=_short(field.title, 50)),
     )
 
 
@@ -2197,10 +2258,9 @@ async def _render_question_manager(
     if not fields:
         return await _enter_extras(update, context, details, notice=notice)
     lines = [
-        "🧱 Поля анонса",
+        tr("wizard.render_question_manager.polya_anonsa"),
         "",
-        "Выберите поле, чтобы изменить или заполнить значение. "
-        "Необязательные поля можно пропускать.",
+        tr("wizard.render_question_manager.vyberite_pole_chtoby_izmenit"),
     ]
     rows: list[list[InlineKeyboardButton]] = []
     for index, field in enumerate(fields, start=1):
@@ -2219,7 +2279,7 @@ async def _render_question_manager(
     rows.append(
         [
             InlineKeyboardButton(
-                "➕ Дополнительный кирпичик",
+                tr("buttons.wizard.dopolnitelnyy_kirpichik"),
                 callback_data=(f"aw_extras:{details.draft_id}:{details.revision}"),
             )
         ]
@@ -2227,7 +2287,7 @@ async def _render_question_manager(
     rows.append(
         [
             InlineKeyboardButton(
-                "👁 Обзор анонса",
+                tr("buttons.wizard.obzor_anonsa"),
                 callback_data=(f"aw_preview:{details.draft_id}:{details.revision}"),
             )
         ]
@@ -2355,9 +2415,9 @@ async def _handle_choice(
             raw_value,
             stay_prompt=multiple,
             notice=(
-                "Выбор сохранён. Можно отметить ещё варианты."
+                tr("wizard.handle_choice.vybor_sohranen_mozhno_otmetit")
                 if multiple
-                else "Значение дополнительного кирпичика сохранено."
+                else tr("wizard.handle_choice.znachenie_dopolnitelnogo")
             ),
         )
     if multiple:
@@ -2386,7 +2446,7 @@ async def _handle_choice(
             updated,
             fields,
             new_found[0],
-            notice="Выбор сохранён. Можно отметить ещё варианты.",
+            notice=tr("wizard.handle_choice.vybor_sohranen_mozhno_otmetit"),
         )
     return await _save_question_value(
         update, context, details, field, raw_value, index=index
@@ -2407,14 +2467,14 @@ async def _handle_choice_done(
     if not field.rules.get("multiple"):
         return await _stale(update, context)
     if field.status == FIELD_STATUS_MISSING:
-        await _answer(update, "Отметьте хотя бы один вариант.", alert=True)
+        await _answer(update, tr("alerts.wizard.otmette_hotya_by_odin"), alert=True)
         return await _resume_current(update, context)
     if source == "extra":
         return await _enter_extras(
             update,
             context,
             details,
-            notice="Значение дополнительного кирпичика сохранено.",
+            notice=tr("wizard.handle_choice.znachenie_dopolnitelnogo"),
         )
     return await _advance_question(update, context, details, index + 1)
 
@@ -2552,10 +2612,15 @@ async def _render_calendar_range_days(
         field,
         index,
         source,
-        title=(f"📅 {calendar_view.format_range(*value_range)}\n\nВыберите дату:"),
+        title=(
+            tr(
+                "wizard.render_calendar_range_days.vyberite_datu",
+                format_range=calendar_view.format_range(*value_range),
+            )
+        ),
         days=calendar_view.days_between(*value_range),
         back_callback=f"aw_calquick:{prefix}",
-        back_label="◀️ К быстрым датам",
+        back_label=tr("wizard.render_calendar_range_days.k_bystrym_datam"),
     )
 
 
@@ -2584,7 +2649,7 @@ async def _render_calendar_months(
             field,
             index,
             source,
-            error="Для выбора месяца нет доступных дат. Введите дату текстом.",
+            error=tr("wizard.render_calendar_months.dlya_vybora_mesyaca_net"),
         )
     rows = keyboard_layouts.rows_of(
         (
@@ -2599,14 +2664,15 @@ async def _render_calendar_months(
     rows.append(
         [
             InlineKeyboardButton(
-                "◀️ К быстрым датам", callback_data=f"aw_calquick:{prefix}"
+                tr("wizard.render_calendar_range_days.k_bystrym_datam"),
+                callback_data=f"aw_calquick:{prefix}",
             )
         ]
     )
     await _render(
         update,
         context,
-        "📅 Выберите месяц:",
+        tr("wizard.render_calendar_months.vyberite_mesyac"),
         InlineKeyboardMarkup(rows),
     )
     return AW_QUESTIONS
@@ -2667,19 +2733,27 @@ async def _render_calendar_month(
         ),
     )
     rows.append(
-        [InlineKeyboardButton("📅 Месяцы", callback_data=f"aw_calmonths:{prefix}")]
+        [
+            InlineKeyboardButton(
+                tr("buttons.wizard.mesyacy"), callback_data=f"aw_calmonths:{prefix}"
+            )
+        ]
     )
     rows.append(
         [
             InlineKeyboardButton(
-                "◀️ К быстрым датам", callback_data=f"aw_calquick:{prefix}"
+                tr("wizard.render_calendar_range_days.k_bystrym_datam"),
+                callback_data=f"aw_calquick:{prefix}",
             )
         ]
     )
     await _render(
         update,
         context,
-        f"📅 {calendar_view.format_month(key)}\n\nВыберите день:",
+        tr(
+            "wizard.render_calendar_month.vyberite_den",
+            format_month=calendar_view.format_month(key),
+        ),
         InlineKeyboardMarkup(rows),
     )
     return AW_QUESTIONS
@@ -2699,7 +2773,7 @@ async def _save_calendar_day(
         return await _stale(
             update,
             context,
-            "Эта дата вне допустимого диапазона. Выберите дату заново.",
+            tr("wizard.save_calendar_day.eta_data_vne_dopustimogo"),
         )
     raw = day.strftime("%d.%m.%Y")
     if source == "extra":
@@ -2710,7 +2784,7 @@ async def _save_calendar_day(
             details,
             extra,
             raw,
-            notice=f"Дата {raw} сохранена.",
+            notice=tr("wizard.save_calendar_day.data_sohranena", raw=raw),
         )
     return await _save_question_value(
         update,
@@ -2779,18 +2853,25 @@ async def _render_extras(
                 field = _extra_field_state(details, extra, definition)
                 value = _full_value_text(field)
                 if field.status == FIELD_STATUS_MISSING:
-                    value_text = "значение не задано"
+                    value_text = tr("wizard.build.znachenie_zadano")
                 elif field.status == FIELD_STATUS_SKIPPED:
                     value_text = tr("wizard.status.skipped")
                 else:
-                    value_text = value or "пусто"
+                    value_text = value or tr("wizard.build.pusto")
                 # H3 (требование D): строка списка — тоже показ значения.
                 # Раньше огромное значение обрывалось «…» без пометки; теперь
                 # у него бюджет на весь экран и честная пометка о сокращении.
                 shown = current_value.clip_html(
                     escape_html(value_text), limit=limits[number - 1]
                 )
-                lines.append(f"{number}. {_h(extra.title)}; значение: {shown}")
+                lines.append(
+                    tr_safe(
+                        "wizard.build.znachenie",
+                        number=number,
+                        title=_h(extra.title),
+                        shown=shown,
+                    )
+                )
         else:
             lines.extend(["", tr("wizard.extras.empty")])
         return "\n".join(lines)
@@ -2829,7 +2910,13 @@ async def _render_extras(
                 )
             ]
         )
-    rows.append([InlineKeyboardButton("🏠 Главное меню", callback_data="main_menu")])
+    rows.append(
+        [
+            InlineKeyboardButton(
+                tr("buttons.admin.glavnoe_menyu"), callback_data="main_menu"
+            )
+        ]
+    )
     text = f"{notice}\n\n{screen_text}" if notice else screen_text
     await _render(update, context, text, InlineKeyboardMarkup(rows))
     return AW_EXTRAS
@@ -2939,10 +3026,9 @@ async def _render_available_bricks(
     ui["extras_page"] = page
     shown = bricks[page * EXTRA_PAGE_SIZE : (page + 1) * EXTRA_PAGE_SIZE]
     lines = [
-        "➕ Дополнительный кирпичик",
+        tr("buttons.wizard.dopolnitelnyy_kirpichik"),
         "",
-        "Выберите доступное определение. Чужие личные кирпичики и поля "
-        "других мест здесь не показываются.",
+        tr("wizard.render_available_bricks.vyberite_dostupnoe_opredelenie"),
     ]
     if shown:
         for number, brick in enumerate(shown, start=page * EXTRA_PAGE_SIZE + 1):
@@ -2952,7 +3038,7 @@ async def _render_available_bricks(
                 f"{SCOPE_LABELS.get(brick.scope, brick.scope)}"
             )
     else:
-        lines.extend(["", "Доступных дополнительных определений нет."])
+        lines.extend(["", tr("wizard.render_available_bricks.dostupnyh_dopolnitelnyh")])
     rows: list[list[InlineKeyboardButton]] = [
         [
             InlineKeyboardButton(
@@ -3062,7 +3148,7 @@ def _extra_value_text(
         # Заголовок кирпичика задаёт человеком и уходит в parse_mode=HTML
         # экран — экранируем (аудит: неэкранированный HTML ломал экран).
         f"➕ {_h(field.title)}",
-        "Кирпичик добавляет строку в конец текста этого анонса.",
+        tr("wizard.extra_value.kirpichik_dobavlyaet_stroku_konec"),
     ]
     description = wizard_questions.description_html(field.description)
     if description:
@@ -3138,7 +3224,7 @@ async def _render_extra_value_prompt(
             rows.append(
                 [
                     InlineKeyboardButton(
-                        "✅ Готово",
+                        tr("buttons.wizard.gotovo"),
                         callback_data=(
                             f"aw_choice_done:{details.draft_id}:"
                             f"{details.revision}:{field.brick_id}"
@@ -3168,7 +3254,7 @@ async def _render_extra_value_prompt(
     rows.append(
         [
             InlineKeyboardButton(
-                "◀️ К дополнительным полям",
+                tr("buttons.wizard.k_dopolnitelnym_polyam"),
                 callback_data=(f"aw_exbackval:{details.draft_id}:{details.revision}"),
             )
         ]
@@ -3232,7 +3318,10 @@ async def _save_extra_value(
     )
     if current_extra is None:
         return await _render_extras(
-            update, context, updated, notice="Кирпичик больше недоступен."
+            update,
+            context,
+            updated,
+            notice=tr("wizard.save_extra_value.kirpichik_bolshe_nedostupen"),
         )
     if stay_prompt:
         _clear_active(ui)
@@ -3250,7 +3339,9 @@ async def _save_extra_value(
         # «Применить изменения» больше нет.
         await _apply_immediately(update, context, updated)
         updated = _reload_details(update, updated)
-        notice = notice or "Значение сохранено, анонс обновлён в чате."
+        notice = notice or tr(
+            "wizard.save_extra_value.znachenie_sohraneno_anons_obnovlen"
+        )
     return await _render_extras(update, context, updated, notice=notice)
 
 
@@ -3275,7 +3366,7 @@ async def _add_extra(
     extra = next((item for item in updated.extras if item.brick_id == brick_id), None)
     if extra is None:
         return await _render_extras(
-            update, context, updated, notice="Кирпичик не добавлен."
+            update, context, updated, notice=tr("wizard.add_extra.kirpichik_dobavlen")
         )
     ui = _ui(context)
     _set_details(ui, updated)
@@ -3284,19 +3375,19 @@ async def _add_extra(
         context,
         updated,
         extra,
-        notice="Кирпичик добавлен. Задайте значение или пропустите его.",
+        notice=tr("wizard.add_extra.kirpichik_dobavlen_zadayte"),
     )
 
 
 def _preview_template_name(details) -> str:
     snapshot = details.template_snapshot
     if snapshot is None:
-        return "не выбран"
+        return tr("wizard.preview_template_name.ne_vybran")
     if snapshot.source_name:
         return snapshot.source_name
     if snapshot.source_kind == "standard":
-        return "Стандартный шаблон места"
-    return "Личный шаблон"
+        return tr("wizard.selected_template.standartnyy_shablon_mesta")
+    return tr("wizard.selected_template.lichnyy_shablon")
 
 
 def _preview_summary_lines(
@@ -3315,61 +3406,112 @@ def _preview_summary_lines(
         elif field.status == FIELD_STATUS_KNOWN:
             value = _field_value_text(field)
             filled.append(
-                f"• {_h(field.title)}: {_h(_short(value, FIELD_DISPLAY_LIMIT))} "
-                "(из справочника)"
+                tr_safe(
+                    "wizard.preview_summary_lines.iz_spravochnika",
+                    title=_h(field.title),
+                    short=_h(_short(value, FIELD_DISPLAY_LIMIT)),
+                )
             )
         elif field.status == FIELD_STATUS_SKIPPED:
             skipped.append(f"• {_h(field.title)}")
         elif field.status == FIELD_STATUS_MISSING:
             missing.append(f"• {_h(field.title)}")
     lines = [
-        "👁 Обзор анонса",
+        tr("buttons.wizard.obzor_anonsa"),
         "",
         *_place_lines(details),
-        f"Город: {_h(details.place_city) if details.place_city else '—'}",
-        f"Адрес: {_h(details.place_address) if details.place_address else 'не указан'}",
-        f"Ссылка: {_h(details.place_url) if details.place_url else 'не указана'}",
-        f"Шаблон: {_h(_preview_template_name(details))}",
-        f"Фотографии: {len(details.photos)} " "(отдельные вложения, не часть шаблона)",
+        tr_safe(
+            "wizard.preview_summary_lines.gorod",
+            place_city=_h(details.place_city) if details.place_city else "—",
+        ),
+        tr_safe(
+            "wizard.preview_summary_lines.adres",
+            place_address=(
+                _h(details.place_address)
+                if details.place_address
+                else tr("wizard.place_card.ne_ukazan")
+            ),
+        ),
+        tr_safe(
+            "wizard.preview_summary_lines.ssylka",
+            place_url=(
+                _h(details.place_url)
+                if details.place_url
+                else tr("wizard.preview_summary_lines.ne_ukazana")
+            ),
+        ),
+        tr_safe(
+            "wizard.preview_summary_lines.shablon",
+            preview_template_name=_h(_preview_template_name(details)),
+        ),
+        tr(
+            "wizard.preview_summary_lines.fotografii_otdelnye_vlozheniya",
+            count_photos=len(details.photos),
+        ),
     ]
     if details.template_snapshot is not None:
         lines.append(
-            "Версия снимка: " f"{details.template_snapshot.source_template_version}."
+            tr(
+                "wizard.preview_summary_lines.versiya_snimka",
+                source_template_version=details.template_snapshot.source_template_version,
+            )
         )
     lines.append("")
     if filled:
-        lines.append("Заполненные значения:")
+        lines.append(tr("wizard.preview_summary_lines.zapolnennye_znacheniya"))
         lines.extend(filled[:MAX_PREVIEW_FIELDS])
         if len(filled) > MAX_PREVIEW_FIELDS:
-            lines.append(f"…и ещё {len(filled) - MAX_PREVIEW_FIELDS} значений.")
+            lines.append(
+                tr(
+                    "wizard.preview_summary_lines.i_znacheniy",
+                    value=len(filled) - MAX_PREVIEW_FIELDS,
+                )
+            )
     else:
-        lines.append("Заполненных значений пока нет.")
+        lines.append(tr("wizard.preview_summary_lines.zapolnennyh_znacheniy_poka_net"))
     if skipped:
-        lines.extend(["", "Пропущенные поля:"])
+        lines.extend(["", tr("wizard.preview_summary_lines.propuschennye_polya")])
         lines.extend(skipped[:MAX_PREVIEW_FIELDS])
         if len(skipped) > MAX_PREVIEW_FIELDS:
-            lines.append(f"…и ещё {len(skipped) - MAX_PREVIEW_FIELDS} полей.")
+            lines.append(
+                tr(
+                    "wizard.preview_summary_lines.i_poley",
+                    value=len(skipped) - MAX_PREVIEW_FIELDS,
+                )
+            )
     if missing:
-        lines.extend(["", "Не заполнены:"])
+        lines.extend(["", tr("wizard.preview_summary_lines.ne_zapolneny")])
         lines.extend(missing[:MAX_PREVIEW_FIELDS])
         if len(missing) > MAX_PREVIEW_FIELDS:
-            lines.append(f"…и ещё {len(missing) - MAX_PREVIEW_FIELDS} полей.")
+            lines.append(
+                tr(
+                    "wizard.preview_summary_lines.i_poley",
+                    value=len(missing) - MAX_PREVIEW_FIELDS,
+                )
+            )
 
     extras = _extras_with_definitions(details, telegram_user_id)
     if extras:
-        lines.extend(["", "Дополнительные кирпичики:"])
+        lines.extend(["", tr("wizard.preview_summary_lines.dopolnitelnye_kirpichiki")])
         for extra, definition in extras[:MAX_PREVIEW_EXTRAS]:
             field = _extra_field_state(details, extra, definition)
             if field.status == FIELD_STATUS_VALID:
                 value = _short(_field_value_text(field), FIELD_DISPLAY_LIMIT)
-                value_text = f"значение: {_h(value)}"
+                value_text = tr_safe(
+                    "wizard.preview_summary_lines.znachenie", h=_h(value)
+                )
             elif field.status == FIELD_STATUS_SKIPPED:
-                value_text = "значение пропущено"
+                value_text = tr("wizard.preview_summary_lines.znachenie_propuscheno")
             else:
-                value_text = "значение не задано"
+                value_text = tr("wizard.build.znachenie_zadano")
             lines.append(f"• {_h(extra.title)} — {value_text}")
         if len(extras) > MAX_PREVIEW_EXTRAS:
-            lines.append(f"…и ещё {len(extras) - MAX_PREVIEW_EXTRAS}.")
+            lines.append(
+                tr(
+                    "wizard.preview_summary_lines.i",
+                    value=len(extras) - MAX_PREVIEW_EXTRAS,
+                )
+            )
     return lines
 
 
@@ -3381,28 +3523,31 @@ def _preview_block(preview: AnnouncementPreview) -> list[str]:
         ]
         if preview.warnings:
             lines.append(_h(preview.warnings[0]))
-        lines.extend(["", "📄 Предпросмотр:"])
+        lines.extend(["", tr("wizard.preview_block.predprosmotr")])
         visible = preview.visible_text
         if len(visible) > PREVIEW_VISIBLE_LIMIT:
             shortened = visible[:PREVIEW_VISIBLE_LIMIT].rstrip() + "…"
             lines.append(_h(shortened))
-            lines.append("Предпросмотр сокращён. Полные данные сохранены в черновике.")
+            lines.append(tr("wizard.preview_block.predprosmotr_sokraschen_polnye"))
         else:
             lines.append(preview.html)
         return lines
 
-    lines = ["", "⚠️ Анонс пока не готов."]
+    lines = ["", tr("wizard.preview_block.anons_poka_gotov")]
     for issue in preview.issues:
         lines.append(f"• {_h(issue)}")
     if preview.missing:
         titles = ", ".join(_h(question.title) for question in preview.missing[:5])
         suffix = "…" if len(preview.missing) > 5 else ""
         lines.append(
-            f"Что заполнить: {titles}{suffix}. Можно также заполнить любое "
-            "поле из шаблона."
+            tr(
+                "wizard.preview_block.chto_zapolnit_mozhno_takzhe",
+                titles=titles,
+                suffix=suffix,
+            )
         )
     if preview.visible_text:
-        lines.extend(["", "Черновой фрагмент (анонс ещё не готов):"])
+        lines.extend(["", tr("wizard.preview_block.chernovoy_fragment_anons_gotov")])
         fragment = preview.visible_text[:PREVIEW_VISIBLE_LIMIT].rstrip()
         if len(preview.visible_text) > PREVIEW_VISIBLE_LIMIT:
             fragment += "…"
@@ -3421,9 +3566,13 @@ def _preview_keyboard(
         [
             InlineKeyboardButton(
                 (
-                    "💾 Сохранить и выйти"
+                    tr("buttons.wizard.sohranit_vyyti")
                     if delivered
-                    else ("✅ Черновик сохранён" if saved else "✅ Сохранить черновик")
+                    else (
+                        tr("buttons.wizard.chernovik_sohranen")
+                        if saved
+                        else tr("buttons.wizard.sohranit_chernovik")
+                    )
                 ),
                 callback_data=f"aw_save:{draft_id}:{revision}",
             )
@@ -3432,7 +3581,7 @@ def _preview_keyboard(
     rows.append(
         [
             InlineKeyboardButton(
-                "✏️ Изменить поля",
+                tr("buttons.wizard.izmenit_polya"),
                 callback_data=f"aw_qmanage:{draft_id}:{revision}",
             )
         ],
@@ -3440,7 +3589,7 @@ def _preview_keyboard(
     rows.append(
         [
             InlineKeyboardButton(
-                "➕ Дополнительные кирпичики",
+                tr("buttons.wizard.dopolnitelnye_kirpichiki"),
                 callback_data=f"aw_extras:{draft_id}:{revision}",
             )
         ]
@@ -3448,7 +3597,7 @@ def _preview_keyboard(
     rows.append(
         [
             InlineKeyboardButton(
-                f"📷 Фотографии ({len(details.photos)})",
+                tr("buttons.wizard.fotografii", count_photos=len(details.photos)),
                 callback_data=f"aw_photos:{draft_id}:{revision}:0",
             )
         ]
@@ -3457,7 +3606,7 @@ def _preview_keyboard(
         rows.append(
             [
                 InlineKeyboardButton(
-                    "👁 Предпросмотр с фото",
+                    tr("buttons.wizard.predprosmotr_foto"),
                     callback_data=f"aw_media_preview:{draft_id}:{revision}",
                 )
             ]
@@ -3473,7 +3622,7 @@ def _preview_keyboard(
         rows.append(
             [
                 InlineKeyboardButton(
-                    "📨 Отправить в этот чат",
+                    tr("buttons.wizard.otpravit_etot_chat"),
                     callback_data=f"aw_send:{draft_id}:{revision}",
                 )
             ]
@@ -3482,7 +3631,7 @@ def _preview_keyboard(
         rows.append(
             [
                 InlineKeyboardButton(
-                    "◀️ К управлению",
+                    tr("buttons.wizard.k_upravleniyu"),
                     callback_data=f"aw_panel:{draft_id}:{revision}",
                 )
             ]
@@ -3491,12 +3640,18 @@ def _preview_keyboard(
         rows.append(
             [
                 InlineKeyboardButton(
-                    "🔄 Обновить",
+                    tr("buttons.wizard.obnovit"),
                     callback_data=f"aw_preview:{draft_id}:{revision}",
                 )
             ]
         )
-    rows.append([InlineKeyboardButton("🏠 Главное меню", callback_data="main_menu")])
+    rows.append(
+        [
+            InlineKeyboardButton(
+                tr("buttons.admin.glavnoe_menyu"), callback_data="main_menu"
+            )
+        ]
+    )
     return InlineKeyboardMarkup(rows)
 
 
@@ -3532,7 +3687,7 @@ async def _render_preview(
             notice = (
                 APPLY_FAILED_TEXT
                 if pending
-                else "✅ Черновик сохранён. Отправленный анонс не менялся."
+                else tr("wizard.render_preview.chernovik_sohranen_otpravlennyy")
             )
         return await _render_delivered(
             update, context, details, notice=notice, pending=pending
@@ -3586,12 +3741,8 @@ async def _render_preview_error(
     if details is not None:
         _set_details(ui, details)
     _clear_active(ui)
-    text = (
-        "👁 Обзор анонса\n\n"
-        "⚠️ Не удалось собрать предварительный текст.\n\n"
-        f"Причина: {_h(reason)}\n\n"
-        "Исправьте значения или дополнительные кирпичики и обновите обзор. "
-        "Черновик сохранён, данные не потеряны."
+    text = tr_safe(
+        "wizard.render_preview_error.obzor_anonsa_udalos_sobrat", reason=_h(reason)
     )
     rows = []
     if details is not None:
@@ -3599,7 +3750,7 @@ async def _render_preview_error(
         rows.append(
             [
                 InlineKeyboardButton(
-                    "🔄 Обновить",
+                    tr("buttons.wizard.obnovit"),
                     callback_data=(
                         f"{retry_action}:{details.draft_id}:{details.revision}"
                     ),
@@ -3609,7 +3760,7 @@ async def _render_preview_error(
         rows.append(
             [
                 InlineKeyboardButton(
-                    "✏️ Изменить поля",
+                    tr("buttons.wizard.izmenit_polya"),
                     callback_data=(f"aw_qmanage:{details.draft_id}:{details.revision}"),
                 )
             ]
@@ -3617,12 +3768,18 @@ async def _render_preview_error(
         rows.append(
             [
                 InlineKeyboardButton(
-                    "➕ Дополнительные кирпичики",
+                    tr("buttons.wizard.dopolnitelnye_kirpichiki"),
                     callback_data=(f"aw_extras:{details.draft_id}:{details.revision}"),
                 )
             ]
         )
-    rows.append([InlineKeyboardButton("🏠 Главное меню", callback_data="main_menu")])
+    rows.append(
+        [
+            InlineKeyboardButton(
+                tr("buttons.admin.glavnoe_menyu"), callback_data="main_menu"
+            )
+        ]
+    )
     await _render(update, context, text, InlineKeyboardMarkup(rows))
     return AW_PREVIEW
 
@@ -3656,30 +3813,45 @@ async def _render_length_problem(
     }
     longest = _longest_fields(preview, limit=3)
     lines = [
-        "⚠️ Анонс не помещается в сообщение",
+        tr("wizard.render_length_problem.anons_pomeschaetsya_soobschenie"),
         "",
-        f"Длина: {check.length} из {check.limit} символов "
-        f"(превышение {check.excess}).",
+        tr(
+            "wizard.render_length_problem.dlina_simvolov_prevyshenie",
+            length=check.length,
+            limit=check.limit,
+            excess=check.excess,
+        ),
         (
-            "С фотографиями текст идёт подписью к последнему снимку: "
-            f"допустимо {check.limit} символа."
+            tr(
+                "wizard.render_length_problem.s_fotografiyami_tekst_idet",
+                limit=check.limit,
+            )
             if check.has_photos
-            else f"Без фотографий допустимо {check.limit} символов."
+            else tr(
+                "wizard.render_length_problem.bez_fotografiy_dopustimo_simvolov",
+                limit=check.limit,
+            )
         ),
         "",
-        "Данные и фотографии сохранены, ваше сообщение не удалено. "
-        "Сократите текст — анонс соберётся заново сам.",
+        tr("wizard.render_length_problem.dannye_fotografii_sohraneny_vashe"),
     ]
     if longest:
-        lines.extend(["", "Самые длинные кирпичики:"])
+        lines.extend(["", tr("wizard.render_length_problem.samye_dlinnye_kirpichiki")])
         for field, length in longest:
-            lines.append(f"• {_h(_short(field.title, 60))} — {length} симв.")
+            lines.append(
+                tr_safe(
+                    "wizard.render_length_problem.simv",
+                    title=_h(_short(field.title, 60)),
+                    length=length,
+                )
+            )
     lines.extend(
         [
             "",
-            "Автосокращения нет: текст не режется и не уходит второй частью. "
-            "Можно также отказаться от фотографий — тогда снова доступно "
-            f"{announcement_text_limit(has_photos=False)} символов.",
+            tr(
+                "wizard.render_length_problem.avtosokrascheniya_net_tekst",
+                announcement_text_limit=announcement_text_limit(has_photos=False),
+            ),
         ]
     )
     rows: list[list[InlineKeyboardButton]] = []
@@ -3698,7 +3870,7 @@ async def _render_length_problem(
     rows.append(
         [
             InlineKeyboardButton(
-                "✏️ Изменить другой кирпичик",
+                tr("buttons.wizard.izmenit_drugoy_kirpichik"),
                 callback_data=(f"aw_qmanage:{details.draft_id}:{details.revision}"),
             )
         ]
@@ -3707,14 +3879,20 @@ async def _render_length_problem(
         rows.append(
             [
                 InlineKeyboardButton(
-                    "🚫 Без фотографий",
+                    tr("buttons.wizard.bez_fotografiy"),
                     callback_data=(
                         f"aw_photo_drop:{details.draft_id}:{details.revision}"
                     ),
                 )
             ]
         )
-    rows.append([InlineKeyboardButton("🏠 Главное меню", callback_data="main_menu")])
+    rows.append(
+        [
+            InlineKeyboardButton(
+                tr("buttons.admin.glavnoe_menyu"), callback_data="main_menu"
+            )
+        ]
+    )
     await _render(update, context, "\n".join(lines), InlineKeyboardMarkup(rows))
     return AW_PREVIEW
 
@@ -3821,7 +3999,7 @@ async def _resume_current(
         return await _render_home(
             update,
             context,
-            notice="Черновик не найден или больше недоступен.",
+            notice=tr("wizard.resume_current.chernovik_nayden_bolshe_nedostupen"),
         )
     _set_details(ui, details)
     stage = details.stage
@@ -3873,10 +4051,8 @@ async def _render_photos(
     lines = [
         tr("wizard.photos.title"),
         "",
-        f"Добавлено: {total}. Фото необязательны и не входят в шаблон: "
-        "они отправляются отдельными вложениями.",
-        "Можно отправить одиночные снимки или альбомы несколько раз подряд. "
-        "Одинаковые file_id не дублируются.",
+        tr("wizard.render_photos.dobavleno_foto_neobyazatelny", total=total),
+        tr("wizard.render_photos.mozhno_otpravit_odinochnye_snimki"),
     ]
     if notice:
         lines.insert(1, notice)
@@ -3884,8 +4060,7 @@ async def _render_photos(
         lines.extend(
             [
                 "",
-                "Удалить все фотографии из этого анонса? Текст и значения "
-                "кирпичиков останутся без изменений.",
+                tr("wizard.render_photos.udalit_vse_fotografii_etogo"),
             ]
         )
         await _render(
@@ -3896,7 +4071,7 @@ async def _render_photos(
                 [
                     [
                         InlineKeyboardButton(
-                            "🗑 Да, удалить все",
+                            tr("buttons.wizard.da_udalit_vse"),
                             callback_data=(
                                 f"aw_photo_clear_yes:{details.draft_id}:"
                                 f"{details.revision}"
@@ -3905,7 +4080,7 @@ async def _render_photos(
                     ],
                     [
                         InlineKeyboardButton(
-                            "◀️ Отмена",
+                            tr("buttons.admin.otmena_2"),
                             callback_data=(
                                 f"aw_photos:{details.draft_id}:"
                                 f"{details.revision}:{page}"
@@ -3914,7 +4089,7 @@ async def _render_photos(
                     ],
                     [
                         InlineKeyboardButton(
-                            "🏠 Главное меню", callback_data="main_menu"
+                            tr("buttons.admin.glavnoe_menyu"), callback_data="main_menu"
                         )
                     ],
                 ]
@@ -3924,33 +4099,34 @@ async def _render_photos(
 
     if total:
         start = page * PHOTO_PAGE_SIZE
-        lines.extend(["", f"Страница {page + 1} из {pages}:"])
+        lines.extend(
+            ["", tr("wizard.render_photos.stranica", value=page + 1, pages=pages)]
+        )
         for number, _file_id in enumerate(
             photos[start : start + PHOTO_PAGE_SIZE], start=start + 1
         ):
-            lines.append(f"{number}. Фото добавлено")
+            lines.append(tr("wizard.render_photos.foto_dobavleno", number=number))
         lines.append("")
-        lines.append("Чтобы заменить фото, удалите его и добавьте новое.")
+        lines.append(tr("wizard.render_photos.chtoby_zamenit_foto_udalite"))
     else:
         lines.extend(
             [
                 "",
-                "Фотографий пока нет — анонс придёт без вложений.",
+                tr("wizard.render_photos.fotografiy_poka_net_anons"),
             ]
         )
     if details.publication_sent:
         lines.extend(
             [
                 "",
-                "Изменения применяются сразу: после каждого действия анонс "
-                "собирается заново и заменяет прошлую версию в чате.",
+                tr("wizard.render_photos.izmeneniya_primenyayutsya_srazu"),
             ]
         )
     if _edit_blocked(details):
         lines.extend(
             [
                 "",
-                "⚠️ Отправка уже начата: коллекция фотографий заморожена.",
+                tr("wizard.render_photos.otpravka_nachata_kollekciya"),
             ]
         )
 
@@ -3959,7 +4135,7 @@ async def _render_photos(
         rows.append(
             [
                 InlineKeyboardButton(
-                    "📤 Добавить фото",
+                    tr("buttons.wizard.dobavit_foto"),
                     callback_data=(
                         f"aw_photo_add:{details.draft_id}:{details.revision}"
                     ),
@@ -3973,7 +4149,7 @@ async def _render_photos(
             rows.append(
                 [
                     InlineKeyboardButton(
-                        f"🗑 Удалить фото {index + 1}",
+                        tr("buttons.wizard.udalit_foto", value=index + 1),
                         callback_data=(
                             f"aw_photo_del:{details.draft_id}:"
                             f"{details.revision}:{index}"
@@ -3987,7 +4163,7 @@ async def _render_photos(
         rows.append(
             [
                 InlineKeyboardButton(
-                    "👁 Показать вложения",
+                    tr("buttons.wizard.pokazat_vlozheniya"),
                     callback_data=(
                         f"aw_photo_show:{details.draft_id}:{details.revision}"
                     ),
@@ -4019,7 +4195,7 @@ async def _render_photos(
         rows.append(
             [
                 InlineKeyboardButton(
-                    "🗑 Удалить все фото",
+                    tr("buttons.wizard.udalit_vse_foto"),
                     callback_data=(
                         f"aw_photo_clear:{details.draft_id}:{details.revision}"
                     ),
@@ -4038,13 +4214,17 @@ async def _render_photos(
         rows.append(
             [
                 InlineKeyboardButton(
-                    "◀️ К обзору",
+                    tr("buttons.wizard.k_obzoru"),
                     callback_data=(f"aw_preview:{details.draft_id}:{details.revision}"),
                 )
             ]
         )
         rows.append(
-            [InlineKeyboardButton("🏠 Главное меню", callback_data="main_menu")]
+            [
+                InlineKeyboardButton(
+                    tr("buttons.admin.glavnoe_menyu"), callback_data="main_menu"
+                )
+            ]
         )
     await _render(update, context, "\n".join(lines), InlineKeyboardMarkup(rows))
     return AW_PREVIEW
@@ -4075,12 +4255,22 @@ async def _show_media_preview(
                 today=app_today(),
             )
     except (AnnouncementError, TemplateError, TemplateCompileError, BrickError) as exc:
-        return False, f"Не удалось собрать предпросмотр: {_short(exc, 300)}"
+        return False, tr(
+            "wizard.show_media_preview.ne_udalos_sobrat_predprosmotr",
+            exc=_short(exc, 300),
+        )
     if not preview.ready:
-        reason = preview.issues[0] if preview.issues else "анонс не готов"
-        return False, f"Предпросмотр недоступен: {_short(reason, 300)}"
+        reason = (
+            preview.issues[0]
+            if preview.issues
+            else tr("wizard.show_media_preview.anons_gotov")
+        )
+        return False, tr(
+            "wizard.show_media_preview.predprosmotr_nedostupen",
+            reason=_short(reason, 300),
+        )
     if not preview.draft.photos:
-        return False, "В анонсе нет фотографий."
+        return False, tr("wizard.show_media_preview.v_anonse_net_fotografiy")
     user_data = ctx.data(context)
     # Контейнер продолжения: частичная отправка запоминается для очистки.
     progress: dict = {}
@@ -4099,12 +4289,11 @@ async def _show_media_preview(
             old = [int(mid) for mid in (user_data.get("preview_messages") or [])]
             screen.track_preview(user_data, old + partial)
         logger.exception("Не удалось показать предпросмотр вложений: %s", exc)
-        return False, "Не удалось показать предпросмотр. Данные сохранены."
+        return False, tr("wizard.show_media_preview.ne_udalos_pokazat_predprosmotr")
     await screen.replace_preview(context, ctx.chat(update).id, user_data, message_ids)
     return (
         True,
-        "👁 Отправлен временный предпросмотр. Он не является публикацией "
-        "и будет удалён после отправки или смены фото.",
+        tr("wizard.show_media_preview.otpravlen_vremennyy_predprosmotr"),
     )
 
 
@@ -4127,10 +4316,13 @@ async def _render_publish_status(
     step = details.publication_step
     total = details.publication_total
     lines = [
-        "📨 Отправка готового анонса в этот чат",
+        tr("wizard.render_publish_status.otpravka_gotovogo_anonsa_etot"),
         "",
         *_place_lines(details),
-        f"Фотографий: {len(details.publication_photos)}.",
+        tr(
+            "wizard.render_publish_status.fotografiy",
+            count_publication_photos=len(details.publication_photos),
+        ),
     ]
     if notice:
         lines.insert(1, notice)
@@ -4138,61 +4330,66 @@ async def _render_publish_status(
         lines.extend(
             [
                 "",
-                "⏳ Отправка не завершена (возможно, процесс был перезапущен). "
-                "Продолжение использует замороженный текст и фото и не "
-                "перезапускает всю последовательность.",
+                tr("wizard.render_publish_status.otpravka_zavershena_vozmozhno"),
             ]
         )
     elif status == PUBLICATION_STATUS_PARTIAL:
         lines.extend(
             [
                 "",
-                "⚠️ Анонс отправлен частично. Уже подтверждённые сообщения "
-                "не отправляются повторно; можно дослать только оставшееся.",
+                tr("wizard.render_publish_status.anons_otpravlen_chastichno"),
             ]
         )
     elif status == PUBLICATION_STATUS_FAILED:
         lines.extend(
             [
                 "",
-                "❌ Telegram не подтвердил отправку. Ни одна операция не "
-                "считается подтверждённой.",
+                tr("wizard.render_publish_status.telegram_podtverdil_otpravku_ni"),
             ]
         )
     if total:
-        lines.append(f"Подтверждено операций: {min(step, total)} из {total}.")
+        lines.append(
+            tr(
+                "wizard.render_publish_status.podtverzhdeno_operaciy",
+                min=min(step, total),
+                total=total,
+            )
+        )
     else:
         lines.append(
-            "Сохранённого прогресса нет: первая операция могла быть принята "
-            "Telegram до сбоя, поэтому повтор может создать дубль."
+            tr("wizard.render_publish_status.sohranennogo_progressa_net_pervay")
         )
     if details.previous_message_ids:
         lines.extend(
             [
                 "",
-                "В чате остаётся прошлая доставленная версия анонса: она не "
-                "удаляется, пока новая не подтверждена полностью.",
+                tr("wizard.render_publish_status.v_chate_ostaetsya_proshlaya"),
             ]
         )
     if details.publication_error:
-        lines.extend(["", f"Причина: {_h(details.publication_error)}"])
+        lines.extend(
+            [
+                "",
+                tr_safe(
+                    "wizard.render_publish_status.prichina",
+                    publication_error=_h(details.publication_error),
+                ),
+            ]
+        )
     lines.extend(
         [
             "",
-            "Текст, значения кирпичиков и фотографии зафиксированы на момент "
-            "начала отправки. Если Telegram принял последнюю часть, но ответ "
-            "потерялся, повтор может создать дубль — это ограничение "
-            "Telegram API. Адреса подтверждённых сообщений сохранены.",
+            tr("wizard.render_publish_status.tekst_znacheniya_kirpichikov"),
         ]
     )
     rows: list[list[InlineKeyboardButton]] = []
     label = (
-        "🔄 Продолжить отправку"
+        tr("wizard.render_publish_status.prodolzhit_otpravku")
         if status == PUBLICATION_STATUS_SENDING
         else (
-            "🔁 Дослать оставшееся"
+            tr("wizard.render_publish_status.doslat_ostavsheesya")
             if status == PUBLICATION_STATUS_PARTIAL
-            else "🔁 Повторить отправку"
+            else tr("wizard.render_publish_status.povtorit_otpravku")
         )
     )
     rows.append(
@@ -4207,15 +4404,27 @@ async def _render_publish_status(
         rows.append(
             [
                 InlineKeyboardButton(
-                    "↩️ Вернуться к редактированию",
+                    tr("buttons.wizard.vernutsya_redaktirovaniyu"),
                     callback_data=(
                         f"aw_pub_reset:{details.draft_id}:{details.revision}"
                     ),
                 )
             ]
         )
-    rows.append([InlineKeyboardButton("📝 Мои анонсы", callback_data="aw_start")])
-    rows.append([InlineKeyboardButton("🏠 Главное меню", callback_data="main_menu")])
+    rows.append(
+        [
+            InlineKeyboardButton(
+                tr("buttons.wizard.moi_anonsy"), callback_data="aw_start"
+            )
+        ]
+    )
+    rows.append(
+        [
+            InlineKeyboardButton(
+                tr("buttons.admin.glavnoe_menyu"), callback_data="main_menu"
+            )
+        ]
+    )
     await _render(update, context, "\n".join(lines), InlineKeyboardMarkup(rows))
     return AW_PREVIEW
 
@@ -4329,12 +4538,19 @@ async def _finish_and_deliver(
     ) as exc:
         return await _render_preview_error(update, context, details, str(exc))
     if not preview.ready:
-        reason = preview.issues[0] if preview.issues else "анонс не готов"
+        reason = (
+            preview.issues[0]
+            if preview.issues
+            else tr("wizard.show_media_preview.anons_gotov")
+        )
         return await _render_preview_error(
             update,
             context,
             preview.draft,
-            f"{reason}. Заполните поля и попробуйте снова.",
+            tr(
+                "wizard.finish_and_deliver.zapolnite_polya_poprobuyte_snova",
+                reason=reason,
+            ),
         )
     # S4 §5.2: лимит проверяется ДО доставки. Превышение не лечится
     # автосокращением и не режется на части: показывается проблемный экран,
@@ -4355,7 +4571,8 @@ async def _finish_and_deliver(
                 update,
                 context,
                 details,
-                notice=notice or "✅ Эта версия анонса уже отправлена.",
+                notice=notice
+                or tr("wizard.finish_and_deliver.eta_versiya_anonsa_otpravlena"),
             )
     # S4 п.5 / U5: верхний блок (медиа или текст) уже стоит в чате. Если его
     # payload совпадает с текущим и прошлую версию заменять не нужно, он и есть
@@ -4539,11 +4756,7 @@ DELIVERED_PENDING_TEXT = tr("wizard.finished.pending")
 # честно говорим об этом и не отсылаем к несуществующей кнопке. Повтор
 # доступен двумя путями — ещё одна правка (она применится сразу) или экран
 # повтора отправки, который появляется после неудачной попытки.
-APPLY_FAILED_TEXT = (
-    "⚠️ Черновик сохранён, но изменения в чат не ушли: применить их сразу "
-    "не удалось. Внесите изменение заново или используйте "
-    "«Повторить отправку», когда она появится."
-)
+APPLY_FAILED_TEXT = tr("wizard.module.chernovik_sohranen_no_izmeneniya")
 
 # U2b: компактный экран редактирования готового анонса — только категории.
 DELIVERED_EDIT_TEXT = tr("wizard.finished.edit_text")
@@ -4745,7 +4958,7 @@ async def _render_private_chat_refusal(
         _set_details(ui, details)
     _clear_active(ui)
     lines = [
-        "⚠️ Готовый анонс не отправлен",
+        tr("wizard.render_private_chat.gotovyy_anons_otpravlen"),
         "",
         PRIVATE_CHAT_ONLY,
     ]
@@ -4754,7 +4967,7 @@ async def _render_private_chat_refusal(
             [
                 "",
                 *_place_lines(details),
-                "Данные и фотографии сохранены в черновике.",
+                tr("wizard.render_private_chat.dannye_fotografii_sohraneny"),
             ]
         )
     rows: list[list[InlineKeyboardButton]] = []
@@ -4762,13 +4975,25 @@ async def _render_private_chat_refusal(
         rows.append(
             [
                 InlineKeyboardButton(
-                    "👁 Обзор анонса",
+                    tr("buttons.wizard.obzor_anonsa"),
                     callback_data=f"aw_preview:{details.draft_id}:{details.revision}",
                 )
             ]
         )
-    rows.append([InlineKeyboardButton("📝 Мои анонсы", callback_data="aw_start")])
-    rows.append([InlineKeyboardButton("🏠 Главное меню", callback_data="main_menu")])
+    rows.append(
+        [
+            InlineKeyboardButton(
+                tr("buttons.wizard.moi_anonsy"), callback_data="aw_start"
+            )
+        ]
+    )
+    rows.append(
+        [
+            InlineKeyboardButton(
+                tr("buttons.admin.glavnoe_menyu"), callback_data="main_menu"
+            )
+        ]
+    )
     await _render(update, context, "\n".join(lines), InlineKeyboardMarkup(rows))
     return AW_PREVIEW
 
@@ -4882,7 +5107,7 @@ async def _run_announcement_publication(
             update,
             context,
             details,
-            notice="❌ Отправку не удалось подтвердить. Проверьте статус.",
+            notice=tr("wizard.run_announcement.otpravku_udalos_podtverdit"),
         )
 
     try:
@@ -4916,10 +5141,7 @@ async def _run_announcement_publication(
             update,
             context,
             details,
-            notice=(
-                "⚠️ Telegram подтвердил отправку, но статус не сохранился. "
-                "Не повторяйте отправку вслепую; обновите экран."
-            ),
+            notice=(tr("wizard.run_announcement.telegram_podtverdil_otpravku_no")),
         )
     await screen.cleanup_preview(context, chat_id, ctx.data(context))
     # Прошлую доставленную версию удаляем только после успешной новой
@@ -4957,7 +5179,7 @@ async def _run_announcement_publication(
         update,
         context,
         details,
-        notice="✅ Анонс отправлен в этот чат. Можно изменить данные.",
+        notice=tr("wizard.run_announcement.anons_otpravlen_etot_chat"),
     )
 
 
@@ -4972,7 +5194,7 @@ async def _handle_place_search_text(
         return await _render_search_prompt(
             update,
             context,
-            notice="Введите непустой запрос.",
+            notice=tr("wizard.handle_place_search.vvedite_nepustoy_zapros"),
         )
     ui["place"]["query"] = query
     ui["place"]["page"] = 0
@@ -4989,7 +5211,7 @@ async def _reject_choice_text(
     index: int,
     source: str,
 ) -> int:
-    message = "Выберите вариант кнопкой, текстовый ввод здесь не используется."
+    message = tr("wizard.reject_choice.vyberite_variant_knopkoy_tekstovyy")
     screen.track_failed_input(
         ctx.data(context), f"aw:{field.brick_id}", update.effective_message
     )
@@ -5076,7 +5298,7 @@ async def _handle_active_text(
         extra,
         raw,
         drop_input=True,
-        notice="Значение дополнительного кирпичика сохранено.",
+        notice=tr("wizard.handle_choice.znachenie_dopolnitelnogo"),
     )
 
 
@@ -5091,7 +5313,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int
     return await _resume_current(
         update,
         context,
-        notice="Выберите действие кнопками на экране.",
+        notice=tr("wizard.handle.vyberite_deystvie_knopkami_ekrane"),
     )
 
 
@@ -5149,14 +5371,18 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> in
     if not draft_id or photo is None:
         await _reanchor(update, context)
         return await _resume_current(
-            update, context, notice="Не удалось прочитать фотографию."
+            update,
+            context,
+            notice=tr("wizard.handle_photo.ne_udalos_prochitat_fotografiyu"),
         )
     try:
         details = _session_details(_user_id(update), int(draft_id))
     except (AnnouncementNotFoundError, AnnouncementActorError, AnnouncementError):
         ctx.data(context)["announcement_ui"] = _fresh_ui()
         return await _render_home(
-            update, context, notice="Черновик не найден или больше недоступен."
+            update,
+            context,
+            notice=tr("wizard.resume_current.chernovik_nayden_bolshe_nedostupen"),
         )
     photos_allowed = details.stage == WizardStage.PREVIEW or (
         details.publication_sent and details.stage == WizardStage.COMPLETED
@@ -5166,20 +5392,14 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> in
         return await _resume_current(
             update,
             context,
-            notice=(
-                "Фотографии добавляются на этапе обзора. Анонс и значения "
-                "сохранены — завершите текущие шаги."
-            ),
+            notice=(tr("wizard.handle_photo.fotografii_dobavlyayutsya_etape")),
         )
     if _edit_blocked(details):
         return await _render_publish_status(
             update,
             context,
             details,
-            notice=(
-                "Отправка уже начата: новые фотографии не принимаются. "
-                "Анонс и прогресс сохранены."
-            ),
+            notice=(tr("wizard.handle_photo.otpravka_nachata_novye_fotografii")),
         )
     if details.publication_sent:
         # Уже доставленный анонс: H3 применяет каждый снимок сразу (новой
@@ -5381,8 +5601,7 @@ async def _close_wizard(update: Update, context: ContextTypes.DEFAULT_TYPE) -> i
     await _render(
         update,
         context,
-        "Конструктор анонса закрыт. Сохранённый черновик не удалён — "
-        "продолжить можно в «📂 Мои анонсы».",
+        tr("wizard.close_wizard.konstruktor_anonsa_zakryt"),
         _main_menu_keyboard(),
     )
     await screen.drop_user_input(update, context)
@@ -5437,26 +5656,28 @@ async def handle_navigation_callback(
     if data == "create_post":
         # Старого мастера больше нет (S5): устаревшая кнопка не запускает
         # ничего, а ведёт в меню перерисовкой существующего экрана.
-        await _answer(update, "Кнопка устарела: выберите раздел в меню.", alert=True)
+        await _answer(
+            update, tr("alerts.wizard.knopka_ustarela_vyberite_razdel"), alert=True
+        )
         return await _exit_to_main_menu(update, context)
     if data == "restore_wip":
         await _answer(
             update,
-            "Незавершённые анонсы открываются в «📂 Мои анонсы».",
+            tr("alerts.wizard.nezavershennye_anonsy"),
             alert=True,
         )
         return await _exit_to_main_menu(update, context)
     if data == "aw_start":
         await _answer(update)
         return await _render_home(update, context)
-    await _answer(update, "Кнопка устарела.", alert=True)
+    await _answer(update, tr("alerts.wizard.knopka_ustarela"), alert=True)
     return await _resume_current(update, context, notice=STALE_TEXT)
 
 
 async def handle_unexpected_callback(
     update: Update, context: ContextTypes.DEFAULT_TYPE
 ) -> int:
-    await _answer(update, "Кнопка устарела.", alert=True)
+    await _answer(update, tr("alerts.wizard.knopka_ustarela"), alert=True)
     return await _resume_current(update, context, notice=STALE_TEXT)
 
 
@@ -5764,7 +5985,7 @@ async def _legacy_calendar_redirect(
     source: str,
 ) -> int:
     """Мягкий переход со старого экрана календаря на актуальный первый."""
-    await _answer(update, "Календарь обновлён.")
+    await _answer(update, tr("alerts.wizard.kalendar_obnovlen"))
     return await _render_calendar_value(update, context, details, field, index, source)
 
 
@@ -5992,7 +6213,7 @@ async def handle_extras_callback(
             return await _stale(
                 update,
                 context,
-                "Этот кирпичик недоступен. Выберите из списка.",
+                tr("wizard.handle_extras_callback.etot_kirpichik_nedostupen_vyberi"),
             )
         await _answer(update)
         # Poster 2.3 H2: выбор секции/позиции из интерфейса удалён —
@@ -6033,8 +6254,11 @@ async def handle_extras_callback(
         except AnnouncementError as exc:
             await _answer(update, str(exc), alert=True)
             return await _resume_current(update, context, notice=str(exc))
-        await _answer(update, "Дополнительный кирпичик удалён.")
-        notice = f"Удалён кирпичик «{_short(extra.title, 50)}»."
+        await _answer(update, tr("alerts.wizard.dopolnitelnyy_kirpichik_udalen"))
+        notice = tr(
+            "wizard.handle_extras_callback.udalen_kirpichik",
+            title=_short(extra.title, 50),
+        )
         if updated.publication_sent:
             # H3 (требование A): удаление применяется сразу, как и ввод.
             # Последнее удалённое поле возвращает анонс к каноническому
@@ -6079,7 +6303,7 @@ async def handle_extras_callback(
             details,
             extra,
             "",
-            notice="Значение дополнительного кирпичика пропущено.",
+            notice=tr("wizard.handle_extras_callback.znachenie_dopolnitelnogo"),
         )
     if action == "aw_exbackval" and len(parts) == 3:
         if not all(item.isdigit() for item in parts[1:]):
@@ -6128,12 +6352,12 @@ async def handle_preview_callback(
             return await _stale(update, context)
         _ui_data, details = guarded
         if _edit_blocked(details):
-            await _answer(update, "Отправка уже начата.", alert=True)
+            await _answer(update, tr("alerts.wizard.otpravka_nachata"), alert=True)
             return await _render_publish_status(update, context, details)
         if details.publication_sent:
             # Анонс уже доставлен: «сохранить» здесь означает выйти, не
             # трогая отправленную версию. Этап и снимок не меняются.
-            await _answer(update, "Сохранено.")
+            await _answer(update, tr("alerts.wizard.sohraneno"))
             pending = _has_pending_changes(update, details)
             return await _render_delivered(
                 update,
@@ -6145,7 +6369,7 @@ async def handle_preview_callback(
                     # оставшиеся изменения означают сорвавшееся применение.
                     APPLY_FAILED_TEXT
                     if pending
-                    else "✅ Черновик сохранён. Отправленный анонс не менялся."
+                    else tr("wizard.render_preview.chernovik_sohranen_otpravlennyy")
                 ),
                 pending=pending,
             )
@@ -6154,12 +6378,12 @@ async def handle_preview_callback(
         except AnnouncementError as exc:
             await _answer(update, str(exc), alert=True)
             return await _resume_current(update, context, notice=str(exc))
-        await _answer(update, "Черновик сохранён.")
+        await _answer(update, tr("alerts.wizard.chernovik_sohranen"))
         return await _render_preview(
             update,
             context,
             updated,
-            notice="✅ Черновик сохранён. Анонс в чат не отправлялся.",
+            notice=tr("wizard.handle_preview_callback.chernovik_sohranen_anons_chat"),
             saved=True,
         )
     if action == "aw_send" and len(parts) == 3:
@@ -6168,9 +6392,9 @@ async def handle_preview_callback(
             return await _stale(update, context)
         _ui_data, details = guarded
         if _edit_blocked(details):
-            await _answer(update, "Отправка уже начата.", alert=True)
+            await _answer(update, tr("alerts.wizard.otpravka_nachata"), alert=True)
             return await _render_publish_status(update, context, details)
-        await _answer(update, "Отправляю анонс…")
+        await _answer(update, tr("alerts.wizard.otpravlyayu_anons"))
         return await _finish_and_deliver(update, context, details)
     if action == "aw_apply" and len(parts) == 3:
         guarded = _guided()
@@ -6178,9 +6402,9 @@ async def handle_preview_callback(
             return await _stale(update, context)
         _ui_data, details = guarded
         if _edit_blocked(details):
-            await _answer(update, "Отправка уже начата.", alert=True)
+            await _answer(update, tr("alerts.wizard.otpravka_nachata"), alert=True)
             return await _render_publish_status(update, context, details)
-        await _answer(update, "Применяю изменения…")
+        await _answer(update, tr("alerts.wizard.primenyayu_izmeneniya"))
         return await _finish_and_deliver(update, context, details)
     if action == "aw_preview" and len(parts) == 3:
         guarded = _guided()
@@ -6197,7 +6421,7 @@ async def handle_preview_callback(
             return await _stale(update, context)
         _ui_data, details = guarded
         if _edit_blocked(details):
-            await _answer(update, "Отправка уже начата.", alert=True)
+            await _answer(update, tr("alerts.wizard.otpravka_nachata"), alert=True)
             return await _render_publish_status(update, context, details)
         await _answer(update)
         return await _render_delivered_edit(update, context, details)
@@ -6219,7 +6443,7 @@ async def handle_preview_callback(
             return await _stale(update, context)
         _ui_data, details = guarded
         if _edit_blocked(details):
-            await _answer(update, "Отправка уже начата.", alert=True)
+            await _answer(update, tr("alerts.wizard.otpravka_nachata"), alert=True)
             return await _render_publish_status(update, context, details)
         return await handle_question_callback(update, context)
     if action == "aw_extras" and len(parts) == 3:
@@ -6228,7 +6452,7 @@ async def handle_preview_callback(
             return await _stale(update, context)
         _ui_data, details = guarded
         if _edit_blocked(details):
-            await _answer(update, "Отправка уже начата.", alert=True)
+            await _answer(update, tr("alerts.wizard.otpravka_nachata"), alert=True)
             return await _render_publish_status(update, context, details)
         await _answer(update)
         return await _enter_extras(update, context, details)
@@ -6254,7 +6478,7 @@ async def handle_preview_callback(
             return await _stale(update, context)
         _ui_data, details = guarded
         if _edit_blocked(details):
-            await _answer(update, "Отправка уже начата.", alert=True)
+            await _answer(update, tr("alerts.wizard.otpravka_nachata"), alert=True)
             return await _render_publish_status(update, context, details)
         await _answer(update)
         return await _back_from_photo_step(update, context, details)
@@ -6268,14 +6492,14 @@ async def handle_preview_callback(
             return await _stale(update, context)
         _ui_data, details = guarded
         if _edit_blocked(details):
-            await _answer(update, "Отправка уже начата.", alert=True)
+            await _answer(update, tr("alerts.wizard.otpravka_nachata"), alert=True)
             return await _render_publish_status(update, context, details)
-        await _answer(update, "Продолжаем без фотографий.")
+        await _answer(update, tr("alerts.wizard.prodolzhaem_bez_fotografiy"))
         return await _finish_and_deliver(
             update,
             context,
             details,
-            notice="📷 Анонс останется без вложений.",
+            notice=tr("wizard.handle_preview_callback.anons_ostanetsya_bez_vlozheniy"),
         )
     if action == "aw_photo_drop" and len(parts) == 3:
         # Проблемный экран §5.2 п.4: отказ от фотографий возвращает лимит
@@ -6289,7 +6513,7 @@ async def handle_preview_callback(
             return await _stale(update, context)
         _ui_data, details = guarded
         if _edit_blocked(details):
-            await _answer(update, "Отправка уже начата.", alert=True)
+            await _answer(update, tr("alerts.wizard.otpravka_nachata"), alert=True)
             return await _render_publish_status(update, context, details)
         try:
             with SessionLocal() as session:
@@ -6304,15 +6528,13 @@ async def handle_preview_callback(
             return await _render_publish_status(update, context, details)
         _set_details(_ui(context), updated)
         _ui(context).pop("length_problem", None)
-        await _answer(update, "Лимит снова 4096 символов.")
+        await _answer(update, tr("alerts.wizard.limit_snova_4096_simvolov"))
         return await _finish_and_deliver(
             update,
             context,
             updated,
             notice=(
-                "🚫 Отправляем без фотографий: лимит снова 4096 символов. "
-                "Снимки убраны из черновика — вернуть их можно через "
-                "«📷 Фотографии»."
+                tr("wizard.handle_preview_callback.otpravlyaem_bez_fotografiy_limi")
             ),
         )
     if action == "aw_photo_add" and len(parts) == 3:
@@ -6321,7 +6543,7 @@ async def handle_preview_callback(
             return await _stale(update, context)
         _ui_data, details = guarded
         if _edit_blocked(details):
-            await _answer(update, "Отправка уже начата.", alert=True)
+            await _answer(update, tr("alerts.wizard.otpravka_nachata"), alert=True)
             return await _render_publish_status(update, context, details)
         await _answer(update)
         return await wizard_photos.render_photo_step(
@@ -6329,8 +6551,7 @@ async def handle_preview_callback(
             context,
             details,
             notice=(
-                "Отправьте одну фотографию или альбом — анонс готовится "
-                "сразу после получения всей партии."
+                tr("wizard.handle_preview_callback.otpravte_odnu_fotografiyu_albom")
             ),
             announcement_is_empty=_announcement_is_empty(update, details),
         )
@@ -6342,7 +6563,9 @@ async def handle_preview_callback(
             return await _stale(update, context)
         _ui_data, details = guarded
         if _edit_blocked(details):
-            await _answer(update, "Коллекция фото заморожена.", alert=True)
+            await _answer(
+                update, tr("alerts.wizard.kollekciya_foto_zamorozhena"), alert=True
+            )
             return await _render_publish_status(update, context, details)
         index = int(parts[3])
         try:
@@ -6357,7 +6580,12 @@ async def handle_preview_callback(
         except AnnouncementError as exc:
             await _answer(update, str(exc), alert=True)
             return await _render_photos(
-                update, context, details, notice=f"Фото не удалено: {_short(exc, 300)}"
+                update,
+                context,
+                details,
+                notice=tr(
+                    "wizard.handle_preview_callback.foto_udaleno", exc=_short(exc, 300)
+                ),
             )
         if updated.publication_sent:
             # H3: удаление фото у доставленного анонса тоже применяется
@@ -6366,13 +6594,13 @@ async def handle_preview_callback(
             fresh = await _apply_immediately(update, context, updated)
             updated = fresh or _reload_details(update, updated)
         _set_details(_ui(context), updated)
-        await _answer(update, "Фото удалено.")
+        await _answer(update, tr("alerts.wizard.foto_udaleno"))
         await screen.cleanup_preview(context, ctx.chat(update).id, ctx.data(context))
         return await _render_photos(
             update,
             context,
             updated,
-            notice="✅ Фото удалено. Чтобы заменить его, добавьте новое.",
+            notice=tr("wizard.handle_preview_callback.foto_udaleno_chtoby_zamenit"),
             page=index // PHOTO_PAGE_SIZE,
         )
     if action == "aw_photo_clear" and len(parts) == 3:
@@ -6381,7 +6609,9 @@ async def handle_preview_callback(
             return await _stale(update, context)
         _ui_data, details = guarded
         if _edit_blocked(details):
-            await _answer(update, "Коллекция фото заморожена.", alert=True)
+            await _answer(
+                update, tr("alerts.wizard.kollekciya_foto_zamorozhena"), alert=True
+            )
             return await _render_publish_status(update, context, details)
         await _answer(update)
         return await _render_photos(update, context, details, clear_confirm=True)
@@ -6391,7 +6621,9 @@ async def handle_preview_callback(
             return await _stale(update, context)
         _ui_data, details = guarded
         if _edit_blocked(details):
-            await _answer(update, "Коллекция фото заморожена.", alert=True)
+            await _answer(
+                update, tr("alerts.wizard.kollekciya_foto_zamorozhena"), alert=True
+            )
             return await _render_publish_status(update, context, details)
         try:
             with SessionLocal() as session:
@@ -6404,7 +6636,12 @@ async def handle_preview_callback(
         except AnnouncementError as exc:
             await _answer(update, str(exc), alert=True)
             return await _render_photos(
-                update, context, details, notice=f"Фото не удалены: {_short(exc, 300)}"
+                update,
+                context,
+                details,
+                notice=tr(
+                    "wizard.handle_preview_callback.foto_udaleny", exc=_short(exc, 300)
+                ),
             )
         if updated.publication_sent:
             # H3: очистка коллекции применяется сразу, как и удаление одного
@@ -6412,10 +6649,13 @@ async def handle_preview_callback(
             fresh = await _apply_immediately(update, context, updated)
             updated = fresh or _reload_details(update, updated)
         _set_details(_ui(context), updated)
-        await _answer(update, "Все фотографии удалены.")
+        await _answer(update, tr("alerts.wizard.vse_fotografii_udaleny"))
         await screen.cleanup_preview(context, ctx.chat(update).id, ctx.data(context))
         return await _render_photos(
-            update, context, updated, notice="✅ Все фотографии удалены."
+            update,
+            context,
+            updated,
+            notice=tr("wizard.handle_preview_callback.vse_fotografii_udaleny"),
         )
     if action == "aw_photo_show" and len(parts) == 3:
         guarded = _guided()
@@ -6423,7 +6663,7 @@ async def handle_preview_callback(
             return await _stale(update, context)
         _ui_data, details = guarded
         if _edit_blocked(details):
-            await _answer(update, "Отправка уже начата.", alert=True)
+            await _answer(update, tr("alerts.wizard.otpravka_nachata"), alert=True)
             return await _render_publish_status(update, context, details)
         await _answer(update)
         ok, notice = await _show_media_preview(update, context, details)
@@ -6439,7 +6679,7 @@ async def handle_preview_callback(
             return await _stale(update, context)
         _ui_data, details = guarded
         if _edit_blocked(details):
-            await _answer(update, "Отправка уже начата.", alert=True)
+            await _answer(update, tr("alerts.wizard.otpravka_nachata"), alert=True)
             return await _render_publish_status(update, context, details)
         await _answer(update)
         ok, notice = await _show_media_preview(update, context, details)
@@ -6479,7 +6719,7 @@ async def handle_preview_callback(
             return await _resume_current(update, context, notice=str(exc))
         stale_live_ids = tuple(publication.draft.live_message_ids)
         _set_details(_ui(context), publication.draft)
-        await _answer(update, "Продолжаю отправку…")
+        await _answer(update, tr("alerts.wizard.prodolzhayu_otpravku"))
         return await _run_announcement_publication(
             update, context, publication, stale_live_ids=stale_live_ids
         )
@@ -6500,15 +6740,12 @@ async def handle_preview_callback(
             await _answer(update, str(exc), alert=True)
             return await _render_publish_status(update, context, details)
         _set_details(_ui(context), updated)
-        await _answer(update, "Можно снова редактировать анонс.")
+        await _answer(update, tr("alerts.wizard.mozhno_snova_redaktirovat_anons"))
         return await _render_preview(
             update,
             context,
             updated,
-            notice=(
-                "↩️ Публикация не начиналась: можно изменить поля, extras "
-                "или фотографии."
-            ),
+            notice=(tr("wizard.handle_preview_callback.publikaciya_nachinalas_mozhno")),
         )
 
     if action == "aw_new":
@@ -6592,7 +6829,9 @@ async def start_place_announcement_pick(
                 expected_template_revision=standard.revision,
             )
     except AnnouncementNotFoundError:
-        await _answer(update, "Площадка или её шаблон больше недоступны.", alert=True)
+        await _answer(
+            update, tr("alerts.wizard.ploschadka_ee_shablon_bolshe"), alert=True
+        )
         return await _render_home(update, context)
     except (AnnouncementError, TemplateError) as exc:
         await _answer(update, str(exc), alert=True)
@@ -6632,7 +6871,7 @@ async def start_personal_announcement_pick(
             )
     except AnnouncementNotFoundError:
         await _answer(
-            update, "Личный шаблон не найден или больше недоступен.", alert=True
+            update, tr("alerts.wizard.lichnyy_shablon_nayden_bolshe"), alert=True
         )
         return await _render_my_announcements(update, context)
     except (AnnouncementError, TemplateError) as exc:
@@ -6730,8 +6969,7 @@ async def handle_unknown_command(
     await _render(
         update,
         context,
-        "Конструктор анонса активен. Используйте кнопки экрана или /cancel, "
-        "чтобы закрыть его без удаления черновика.",
+        tr("wizard.handle_unknown_command.konstruktor_anonsa_aktiven"),
         _main_menu_keyboard(),
     )
 

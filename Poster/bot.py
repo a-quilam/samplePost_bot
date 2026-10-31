@@ -23,6 +23,7 @@ from handlers.templates import templates_handlers
 from handlers.user_tracking import track_user
 from log_config import setup_logging
 from utils import tg_context as ctx
+from utils.ui_texts import tr
 
 logger = logging.getLogger(__name__)
 
@@ -30,7 +31,7 @@ logger = logging.getLogger(__name__)
 async def unknown_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Неизвестная команда — подсказываем /help."""
     await ctx.message(update).reply_text(
-        "Неизвестная команда. Наберите /help — список команд."
+        tr("screen.unknown_command.neizvestnaya_komanda_naberite_help")
     )
 
 

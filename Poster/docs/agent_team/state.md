@@ -151,6 +151,20 @@ handlers/{announcement_wizard,admin,templates,bricks,wizard_live}.py,
 config/ui_texts.yaml, utils/ui_texts.py, docs/ui_texts.md, tests (~17
 файлов, новый test_poster2_h3_ux.py — 20).
 
+**H4 часть 1 принята (2026-10-31): полнота каталога текстов.** Каталог
+154 → 1092 ключей (YAML ↔ DEFAULTS синхронны, CLI ok/0 ошибок); все
+пользовательские литералы handlers/** и utils/** (включая bot.py,
+calendar_view, current_value) перенесены в tr/tr_safe с ключами;
+намеренно оставлены: logging, исключения-контракты, BUILTIN-шаблоны,
+callback_data, ui_humor, язык разбора дат. Независимая проверка: 5/5
+pass (AST-инвентарь против HEAD — 0 неперенесённых; аудит экранирования
+1520 вызовов — 0 нарушений; полный discover 1946+ OK; текст 1:1).
+Ревизор: approved (граничные места сверены против HEAD — exact match;
+двойного экранирования нет; 4 динамических ключа подтверждены;
+warning_block — рекомендация вне этапа). Новый тест
+test_poster2_h4_catalog_escaping_tester.py (8). Тестов: 1954 OK,
+ruff/black/mypy чисто.
+
 Единый документ состояния, который ведёт `poster-manager` после каждого
 завершённого этапа. Владелец читает его, чтобы понять, где остановилась
 команда. Новый большой этап начинается только по отдельному сообщению

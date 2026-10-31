@@ -100,7 +100,7 @@ from template_types import (
 from user_store import get_or_create_user
 from utils import current_value
 from utils.tg_html import escape_html
-from utils.ui_texts import tr
+from utils.ui_texts import tr, tr_safe
 
 logger = logging.getLogger(__name__)
 
@@ -175,21 +175,21 @@ _CREATE_PHASES = frozenset(
 
 PHASES = frozenset({PHASE_HUB, PHASE_PICK}) | _TEMPLATE_PHASES | _CREATE_PHASES
 
-_TEXT_INPUT_ERROR = "Текст не принят. Исправьте его и отправьте полным текстом."
+_TEXT_INPUT_ERROR = tr("templates.module.tekst_prinyat_ispravte_ego")
 
 STALE_TEXT = tr("errors.stale.templates")
-DENIED_TEXT = "Шаблон недоступен."
+DENIED_TEXT = tr("templates.module.shablon_nedostupen")
 
 TEXT_GENITIVE = {
-    TEMPLATE_CONTENT: "текста",
-    TEMPLATE_EXTENDED_CONTENT: "расширенного текста",
+    TEMPLATE_CONTENT: tr("templates.module.teksta"),
+    TEMPLATE_EXTENDED_CONTENT: tr("templates.module.rasshirennogo_teksta"),
 }
 # Отличает «второй текст не трогаем» от `None` = «расширения нет».
 _UNSET_TEXT = object()
 SCOPE_TITLES = {
-    BRICK_SCOPE_SYSTEM: "системный",
-    BRICK_SCOPE_PLACE: "место",
-    BRICK_SCOPE_PERSONAL: "личный",
+    BRICK_SCOPE_SYSTEM: tr("wizard.module.sistemnyy"),
+    BRICK_SCOPE_PLACE: tr("wizard.module.mesto"),
+    BRICK_SCOPE_PERSONAL: tr("wizard.module.lichnyy"),
 }
 ERROR_KINDS = frozenset(
     {
@@ -231,7 +231,7 @@ def _clip(value: object, limit: int = ERROR_TEXT_LIMIT) -> str:
     text = _h(value)
     if len(text) <= limit:
         return text
-    return text[:limit] + "\n… (сообщение сокращено; подробности в журнале)"
+    return text[:limit] + tr("templates.clip.soobschenie_sokrascheno")
 
 
 def _value_block(
@@ -251,11 +251,13 @@ def _value_block(
     два «полных» блока вместе не влезают в 4096.
     """
     if not isinstance(value, str):
-        return current_value.current_value_block(label, "— нет —", limit=limit)
+        return current_value.current_value_block(
+            label, tr("templates.value_block.otsutstvuet"), limit=limit
+        )
     if value == "":
-        shown = "— пусто —"
+        shown = tr("templates.value_block.pusto")
     elif not value.strip():
-        shown = "— только пробелы —"
+        shown = tr("templates.value_block.tolko_probely")
     else:
         shown = _h(value)
     return current_value.current_value_block(label, shown, limit=limit)
@@ -505,15 +507,20 @@ def _hub_content(
 ) -> tuple[str, InlineKeyboardMarkup]:
     total = len(templates)
     if total == 0:
-        text = (
-            "📄 Мои шаблоны\n\n"
-            "У вас пока нет личных шаблонов. Шаблон определяет, как будет "
-            "выглядеть текст анонса. Его можно использовать для разных мест."
-        )
+        text = tr("templates.hub.moi_shablony_u_poka")
         keyboard = InlineKeyboardMarkup(
             [
-                [InlineKeyboardButton("➕ Создать шаблон", callback_data="tp_create")],
-                [InlineKeyboardButton("◀️ Назад", callback_data="main_menu")],
+                [
+                    InlineKeyboardButton(
+                        tr("buttons.templates.sozdat_shablon"),
+                        callback_data="tp_create",
+                    )
+                ],
+                [
+                    InlineKeyboardButton(
+                        tr("buttons.nav.back"), callback_data="main_menu"
+                    )
+                ],
             ]
         )
         return text, keyboard
@@ -521,11 +528,18 @@ def _hub_content(
     page = min(_page_value(page), (total - 1) // PAGE_SIZE)
     offset = page * PAGE_SIZE
     page_items = templates[offset : offset + PAGE_SIZE]
-    lines = [f"📄 Мои шаблоны\n\nВсего: {total}."]
+    lines = [tr("templates.hub.moi_shablony_vsego", total=total)]
     for index, template in enumerate(page_items, start=offset + 1):
         lines.append(f"{index}. {_h(template.display_name)} · v{template.revision}")
     if total > PAGE_SIZE:
-        lines.append(f"Показаны {offset + 1}–{offset + len(page_items)} из {total}.")
+        lines.append(
+            tr(
+                "templates.hub.pokazany",
+                value=offset + 1,
+                value_2=offset + len(page_items),
+                total=total,
+            )
+        )
     rows: list[list[InlineKeyboardButton]] = [
         [
             InlineKeyboardButton(
@@ -546,8 +560,16 @@ def _hub_content(
         )
     if navigation:
         rows.append(navigation)
-    rows.append([InlineKeyboardButton("➕ Создать шаблон", callback_data="tp_create")])
-    rows.append([InlineKeyboardButton("◀️ Назад", callback_data="main_menu")])
+    rows.append(
+        [
+            InlineKeyboardButton(
+                tr("buttons.templates.sozdat_shablon"), callback_data="tp_create"
+            )
+        ]
+    )
+    rows.append(
+        [InlineKeyboardButton(tr("buttons.nav.back"), callback_data="main_menu")]
+    )
     return "\n".join(lines), InlineKeyboardMarkup(rows)
 
 
@@ -563,16 +585,20 @@ def _pick_content(
     """
     total = len(templates)
     if total == 0:
-        text = (
-            "📝 Создать по личному шаблону\n\n"
-            "У вас пока нет личных шаблонов. Шаблон определяет, как будет "
-            "выглядеть текст анонса, и подходит для разных площадок.\n\n"
-            "Создайте шаблон — и сразу сможете начать по нему анонс."
-        )
+        text = tr("templates.pick.sozdat_lichnomu_shablonu_u")
         keyboard = InlineKeyboardMarkup(
             [
-                [InlineKeyboardButton("➕ Создать шаблон", callback_data="tp_create")],
-                [InlineKeyboardButton("◀️ Главное меню", callback_data="main_menu")],
+                [
+                    InlineKeyboardButton(
+                        tr("buttons.templates.sozdat_shablon"),
+                        callback_data="tp_create",
+                    )
+                ],
+                [
+                    InlineKeyboardButton(
+                        tr("buttons.nav.main_menu"), callback_data="main_menu"
+                    )
+                ],
             ]
         )
         return text, keyboard
@@ -581,17 +607,23 @@ def _pick_content(
     offset = page * PAGE_SIZE
     page_items = templates[offset : offset + PAGE_SIZE]
     lines = [
-        "📝 Создать по личному шаблону",
+        tr("buttons.main.create_template"),
         "",
-        "Выберите шаблон — анонс начнётся сразу, без лишних подтверждений. "
-        "Правка шаблона — кнопкой «✏️» рядом с названием.",
+        tr("templates.pick.vyberite_shablon_anons_nachnetsya"),
         "",
-        f"Всего шаблонов: {total}.",
+        tr("templates.pick.vsego_shablonov", total=total),
     ]
     for index, template in enumerate(page_items, start=offset + 1):
         lines.append(f"{index}. {_h(template.display_name)} · v{template.revision}")
     if total > PAGE_SIZE:
-        lines.append(f"Показаны {offset + 1}–{offset + len(page_items)} из {total}.")
+        lines.append(
+            tr(
+                "templates.hub.pokazany",
+                value=offset + 1,
+                value_2=offset + len(page_items),
+                total=total,
+            )
+        )
 
     rows: list[list[InlineKeyboardButton]] = []
     for template in page_items:
@@ -617,17 +649,26 @@ def _pick_content(
         )
     if navigation:
         rows.append(navigation)
-    rows.append([InlineKeyboardButton("➕ Создать шаблон", callback_data="tp_create")])
-    rows.append([InlineKeyboardButton("◀️ Главное меню", callback_data="main_menu")])
+    rows.append(
+        [
+            InlineKeyboardButton(
+                tr("buttons.templates.sozdat_shablon"), callback_data="tp_create"
+            )
+        ]
+    )
+    rows.append(
+        [InlineKeyboardButton(tr("buttons.nav.main_menu"), callback_data="main_menu")]
+    )
     return "\n".join(lines), InlineKeyboardMarkup(rows)
 
 
 def _card_back_button(template: TemplateDetails) -> InlineKeyboardButton:
     if template.kind == TEMPLATE_KIND_STANDARD and template.place_id is not None:
         return InlineKeyboardButton(
-            "◀️ К месту", callback_data=f"tp_back_place:{template.place_id}"
+            tr("admin.proposal_admin_list.k_mestu"),
+            callback_data=f"tp_back_place:{template.place_id}",
         )
-    return InlineKeyboardButton("◀️ К списку", callback_data="tp_hub")
+    return InlineKeyboardButton(tr("buttons.places.k_spisku"), callback_data="tp_hub")
 
 
 def _card_content(
@@ -635,27 +676,34 @@ def _card_content(
 ) -> tuple[str, InlineKeyboardMarkup]:
     version = template.current_version
     kind_title = (
-        "Стандартный шаблон места"
+        tr("wizard.selected_template.standartnyy_shablon_mesta")
         if template.kind == TEMPLATE_KIND_STANDARD
-        else "Личный шаблон"
+        else tr("wizard.selected_template.lichnyy_shablon")
     )
     has_extended = version.extended_content is not None
 
     def build(limits: list[int]) -> str:
         lines = [
             f"📄 <b>{_h(template.display_name)}</b>",
-            f"Тип: {kind_title}",
-            f"Версия: {template.revision}",
+            tr("templates.build.tip", kind_title=kind_title),
+            tr("templates.build.versiya", revision=template.revision),
         ]
         if template.kind == TEMPLATE_KIND_STANDARD and place_name:
-            lines.append(f"Место: {_h(place_name)}")
-        lines.extend(["", _value_block("📝 Текст", version.content, limit=limits[0])])
+            lines.append(tr_safe("templates.build.mesto", place_name=_h(place_name)))
+        lines.extend(
+            [
+                "",
+                _value_block(
+                    tr("templates.build.tekst"), version.content, limit=limits[0]
+                ),
+            ]
+        )
         if has_extended:
             lines.extend(
                 [
                     "",
                     _value_block(
-                        "📝 Расширенный текст",
+                        tr("templates.build.rasshirennyy_tekst"),
                         version.extended_content,
                         limit=limits[1],
                     ),
@@ -666,14 +714,14 @@ def _card_content(
     text = _fit_value_screen(build, blocks=2 if has_extended else 1)
     edit_row = [
         InlineKeyboardButton(
-            "✏️ Текст",
+            tr("buttons.templates.tekst"),
             callback_data=f"tp_edit:{template.template_id}",
         )
     ]
     if has_extended:
         edit_row.append(
             InlineKeyboardButton(
-                "✏️ Расширенный",
+                tr("buttons.templates.rasshirennyy"),
                 callback_data=f"tp_edit_ext:{template.template_id}",
             )
         )
@@ -684,11 +732,11 @@ def _card_content(
             # связанных действия «посмотреть», они стоят рядом.
             [
                 InlineKeyboardButton(
-                    "👁 Предпросмотр",
+                    tr("buttons.templates.predprosmotr"),
                     callback_data=f"tp_preview:{template.template_id}",
                 ),
                 InlineKeyboardButton(
-                    "📋 Кирпичики",
+                    tr("buttons.templates.kirpichiki"),
                     callback_data=f"tp_bricks:{template.template_id}",
                 ),
             ],
@@ -696,7 +744,7 @@ def _card_content(
             # случайно рядом с просмотром.
             [
                 InlineKeyboardButton(
-                    "♻️ Восстановить стандарт",
+                    tr("buttons.templates.vosstanovit_standart"),
                     callback_data=f"tp_reset:{template.template_id}",
                 )
             ],
@@ -711,7 +759,7 @@ def _card_content(
             -1,
             [
                 InlineKeyboardButton(
-                    "🗑 Удалить шаблон",
+                    tr("buttons.templates.udalit_shablon"),
                     callback_data=f"tp_delete:{template.template_id}",
                 )
             ],
@@ -727,15 +775,19 @@ def _preview_content(
 
     def build(limits: list[int]) -> str:
         lines = [
-            f"👁 Предпросмотр: {_h(template.display_name)}",
+            tr_safe(
+                "templates.build.predprosmotr", display_name=_h(template.display_name)
+            ),
         ]
         if template.kind == TEMPLATE_KIND_STANDARD and place_name:
-            lines.append(f"Место: {_h(place_name)}")
+            lines.append(tr_safe("templates.build.mesto", place_name=_h(place_name)))
         lines.extend(
             [
-                f"Версия: {template.revision}",
+                tr("templates.build.versiya", revision=template.revision),
                 "",
-                _value_block("📝 Текст", version.content, limit=limits[0]),
+                _value_block(
+                    tr("templates.build.tekst"), version.content, limit=limits[0]
+                ),
             ]
         )
         if has_extended:
@@ -743,7 +795,7 @@ def _preview_content(
                 [
                     "",
                     _value_block(
-                        "📝 Расширенный текст",
+                        tr("templates.build.rasshirennyy_tekst"),
                         version.extended_content,
                         limit=limits[1],
                     ),
@@ -751,22 +803,21 @@ def _preview_content(
             )
         lines.append("")
         if version.bindings:
-            lines.append("🔗 Привязки кирпичиков:")
+            lines.append(tr("templates.build.privyazki_kirpichikov"))
             for binding in version.bindings:
                 label = (
                     f"• [{_h(binding.code)}] — {_h(binding.title)} "
                     f"({SCOPE_TITLES.get(binding.scope, binding.scope)})"
                 )
                 if not binding.is_active:
-                    label += " · архив"
+                    label += tr("templates.build.arhiv")
                 lines.append(label)
         else:
-            lines.append("🔗 Привязок кирпичиков нет.")
+            lines.append(tr("templates.build.privyazok_kirpichikov_net"))
         lines.extend(
             [
                 "",
-                "Это структура шаблона. Значения кирпичиков подставятся при "
-                "создании анонса.",
+                tr("templates.build.eto_struktura_shablona_znacheniya"),
             ]
         )
         return "\n".join(lines)
@@ -776,7 +827,7 @@ def _preview_content(
         [
             [
                 InlineKeyboardButton(
-                    "◀️ К шаблону",
+                    tr("buttons.templates.k_shablonu"),
                     callback_data=f"tp_open:{template.template_id}",
                 )
             ]
@@ -789,29 +840,27 @@ def _reset_confirm_content(
     template: TemplateDetails,
 ) -> tuple[str, InlineKeyboardMarkup]:
     kind_title = (
-        "стандартного шаблона места"
+        tr("templates.reset_confirm.standartnogo_shablona_mesta")
         if template.kind == TEMPLATE_KIND_STANDARD
-        else "личного шаблона"
+        else tr("templates.reset_confirm.lichnogo_shablona")
     )
-    text = (
-        "♻️ Восстановить стандарт?\n\n"
-        f"Шаблон: «{_h(template.display_name)}»\n"
-        f"Текущая версия: {template.revision}\n\n"
-        f"Содержимое {kind_title} будет заменено встроенным стандартом Poster. "
-        "Будет создана новая версия; история версий и снимки не изменятся. "
-        "Черновики постов не затрагиваются."
+    text = tr_safe(
+        "templates.reset_confirm.vosstanovit_standart_shablon",
+        display_name=_h(template.display_name),
+        revision=template.revision,
+        kind_title=kind_title,
     )
     keyboard = InlineKeyboardMarkup(
         [
             [
                 InlineKeyboardButton(
-                    "✅ Подтвердить восстановление",
+                    tr("buttons.templates.podtverdit_vosstanovlenie"),
                     callback_data=f"tp_reset_yes:{template.template_id}",
                 )
             ],
             [
                 InlineKeyboardButton(
-                    "◀️ Отмена",
+                    tr("buttons.admin.otmena_2"),
                     callback_data=f"tp_open:{template.template_id}",
                 )
             ],
@@ -826,27 +875,22 @@ def _reset_confirm_content(
 def _delete_confirm_content(
     template: TemplateDetails,
 ) -> tuple[str, InlineKeyboardMarkup]:
-    text = (
-        "🗑 Удалить шаблон?\n\n"
-        f"Шаблон: «{_h(template.display_name)}»\n"
-        f"Текущая версия: {template.revision}\n\n"
-        "Шаблон исчезнет из списка личных шаблонов. Уже созданные по нему "
-        "анонсы и их история не изменятся.\n\n"
-        "Если шаблон уже использовался в анонсах, удаление невозможно: "
-        "история анонсов должна сохраняться. В этом случае останется "
-        "«♻️ Восстановить стандарт»."
+    text = tr_safe(
+        "templates.delete_confirm.udalit_shablon_shablon_tekuschaya",
+        display_name=_h(template.display_name),
+        revision=template.revision,
     )
     keyboard = InlineKeyboardMarkup(
         [
             [
                 InlineKeyboardButton(
-                    "✅ Удалить",
+                    tr("buttons.templates.udalit"),
                     callback_data=f"tp_delete_yes:{template.template_id}",
                 )
             ],
             [
                 InlineKeyboardButton(
-                    "◀️ Отмена",
+                    tr("buttons.admin.otmena_2"),
                     callback_data=f"tp_open:{template.template_id}",
                 )
             ],
@@ -855,11 +899,7 @@ def _delete_confirm_content(
     return text, keyboard
 
 
-DELETE_BLOCKED_TEXT = (
-    "Шаблон нельзя удалить: по нему уже создавались анонсы, а их история "
-    "должна сохраняться. Шаблон можно отредактировать или восстановить к "
-    "встроенному стандарту."
-)
+DELETE_BLOCKED_TEXT = tr("templates.module.shablon_nelzya_udalit_nemu")
 
 
 def _template_usage(session: Session, template_id: int) -> tuple[int, int]:
@@ -944,17 +984,12 @@ def _text_edit_content(
     def build(limits: list[int]) -> str:
         # Бюджет значения считается от обвязки ЭТОГО экрана: заголовок и
         # подсказка про формат входят в 4096 вместе с блоком значения.
-        return (
-            f"✏️ Редактирование {title}\n\n"
-            f"{_value_block('Текст (черновик)', draft, limit=limits[0])}"
-            "\n\n"
-            "Отправьте новым сообщением ПОЛНЫЙ текст. Переводы строк, "
-            "пробелы и Unicode сохраняются как есть.\n\n"
-            "Кирпичики записываются в квадратных скобках: [код]. Список доступных "
-            "кодов — по кнопке ниже. Служебные скобки [[ и ]] выводятся как текст.\n"
-            "Форматирование: **жирный**, *курсив*, __подчёркнутый__, "
-            "~~зачёркнутый~~. Ссылка: Текст(https://example.com).\n"
-            "Фотографии в шаблон не входят."
+        return tr_safe(
+            "templates.build.redaktirovanie_otpravte_novym",
+            title=title,
+            value_block=_value_block(
+                tr("templates.build.tekst_chernovik"), draft, limit=limits[0]
+            ),
         )
 
     text = _fit_value_screen(build, blocks=1)
@@ -964,19 +999,23 @@ def _text_edit_content(
             # H3 (требование E): два справочных действия рядом.
             [
                 InlineKeyboardButton(
-                    "📋 Кирпичики",
+                    tr("buttons.templates.kirpichiki"),
                     callback_data=f"tp_bricks:{template_id}",
                 ),
                 InlineKeyboardButton(
-                    "❓ Подсказка",
+                    tr("buttons.templates.podskazka"),
                     callback_data=f"tp_help:{template_id}",
                 ),
             ],
             # Очистка — отдельной строкой: необратимо для черновика.
-            [InlineKeyboardButton("🧹 Очистить", callback_data="tp_clear")],
             [
                 InlineKeyboardButton(
-                    "◀️ К шаблону (отменить правку)",
+                    tr("buttons.templates.ochistit"), callback_data="tp_clear"
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    tr("buttons.templates.k_shablonu_otmenit_pravku"),
                     callback_data=f"tp_open:{template_id}",
                 )
             ],
@@ -988,30 +1027,32 @@ def _text_edit_content(
 def _section_back_button(state: dict) -> InlineKeyboardButton:
     if state.get("origin") == "admin" and _positive_int(state.get("place_id")):
         return InlineKeyboardButton(
-            "◀️ К месту",
+            tr("admin.proposal_admin_list.k_mestu"),
             callback_data=f"tp_back_place:{state['place_id']}",
         )
-    return InlineKeyboardButton("◀️ К списку", callback_data="tp_hub")
+    return InlineKeyboardButton(tr("buttons.places.k_spisku"), callback_data="tp_hub")
 
 
 def _error_header(kind: str) -> str:
     return {
-        "stale": "⚠️ Шаблон изменился в другом окне",
-        "conflict": "⚠️ Не удалось сохранить из-за одновременной записи",
-        "forbidden": "⚠️ Нет прав на изменение шаблона",
-        "validation": "⚠️ Текст не сохранён",
-        "syntax": "⚠️ Синтаксическая ошибка",
-        "unknown": "⚠️ Неизвестный кирпичик",
-        "invalid": "⚠️ Текст не прошёл проверку",
-        "unexpected": "⚠️ Не удалось сохранить изменения",
-    }.get(kind, "⚠️ Текст не сохранён")
+        "stale": tr("templates.error_header.shablon_izmenilsya_drugom_okne"),
+        "conflict": tr("templates.error_header.ne_udalos_sohranit_odnovremennoy"),
+        "forbidden": tr("templates.error_header.net_prav_izmenenie_shablona"),
+        "validation": tr("templates.error_header.tekst_sohranen"),
+        "syntax": tr("templates.error_header.sintaksicheskaya_oshibka"),
+        "unknown": tr("templates.error_header.neizvestnyy_kirpichik"),
+        "invalid": tr("templates.error_header.tekst_proshel_proverku"),
+        "unexpected": tr("templates.error_header.ne_udalos_sohranit_izmeneniya"),
+    }.get(kind, tr("templates.error_header.tekst_sohranen"))
 
 
 def _section_error_content(
     state: dict,
 ) -> tuple[str, InlineKeyboardMarkup]:
     kind = str(state.get("error_kind") or "unexpected")
-    message = str(state.get("error_message") or "Повторите попытку.")
+    message = str(
+        state.get("error_message") or tr("templates.section_error.povtorite_popytku")
+    )
     draft = state.get("draft_text", "")
 
     def build(limits: list[int]) -> str:
@@ -1022,23 +1063,19 @@ def _section_error_content(
             "",
         ]
         lines.append(
-            _value_block("Ваш текст сохранён", draft, limit=limits[0])
+            _value_block(
+                tr("templates.build.vash_tekst_sohranen"), draft, limit=limits[0]
+            )
             if draft
-            else "Секция сейчас пуста."
+            else tr("templates.build.sekciya_seychas_pusta")
         )
         lines.append("")
         if kind == "stale":
-            lines.append(
-                "Новая версия не создана: чужие изменения не перезаписаны. "
-                "Обновите версию, проверьте текст и подтвердите сохранение."
-            )
+            lines.append(tr("templates.build.novaya_versiya_sozdana_chuzhie"))
         elif kind == "conflict":
-            lines.append(
-                "Данные не потеряны. Повторите сохранение; при повторной "
-                "неоднозначности выберите кирпичик кнопками."
-            )
+            lines.append(tr("templates.build.dannye_poteryany_povtorite"))
         elif kind == "forbidden":
-            lines.append("Изменение невозможно: права на шаблон больше не действуют.")
+            lines.append(tr("templates.build.izmenenie_nevozmozhno_prava"))
         else:
             lines.append(_TEXT_INPUT_ERROR)
         return "\n".join(lines)
@@ -1053,27 +1090,41 @@ def _section_error_content(
         rows.append(
             [
                 InlineKeyboardButton(
-                    "🔄 Обновить версию и повторить", callback_data="tp_refresh"
+                    tr("buttons.templates.obnovit_versiyu_povtorit"),
+                    callback_data="tp_refresh",
                 )
             ]
         )
         rows.append(
-            [InlineKeyboardButton("✏️ Исправить текст", callback_data="tp_retry")]
+            [
+                InlineKeyboardButton(
+                    tr("buttons.templates.ispravit_tekst"), callback_data="tp_retry"
+                )
+            ]
         )
     elif kind == "conflict":
         rows.append(
             [
                 InlineKeyboardButton(
-                    "💾 Повторить сохранение", callback_data="tp_retry_save"
+                    tr("buttons.templates.povtorit_sohranenie"),
+                    callback_data="tp_retry_save",
                 )
             ]
         )
         rows.append(
-            [InlineKeyboardButton("✏️ Исправить текст", callback_data="tp_retry")]
+            [
+                InlineKeyboardButton(
+                    tr("buttons.templates.ispravit_tekst"), callback_data="tp_retry"
+                )
+            ]
         )
     elif kind == "forbidden":
         rows.append(
-            [InlineKeyboardButton("✏️ Исправить текст", callback_data="tp_retry")]
+            [
+                InlineKeyboardButton(
+                    tr("buttons.templates.ispravit_tekst"), callback_data="tp_retry"
+                )
+            ]
         )
         rows.append([_section_back_button(state)])
     else:
@@ -1081,9 +1132,11 @@ def _section_error_content(
         # тем же текстом, поэтому стоят в одной строке.
         rows.append(
             [
-                InlineKeyboardButton("✏️ Исправить", callback_data="tp_retry"),
                 InlineKeyboardButton(
-                    "📋 Кирпичики",
+                    tr("buttons.templates.ispravit"), callback_data="tp_retry"
+                ),
+                InlineKeyboardButton(
+                    tr("buttons.templates.kirpichiki"),
                     callback_data=f"tp_bricks:{template_id}",
                 ),
             ]
@@ -1091,7 +1144,7 @@ def _section_error_content(
         rows.append(
             [
                 InlineKeyboardButton(
-                    "◀️ К шаблону",
+                    tr("buttons.templates.k_shablonu"),
                     callback_data=f"tp_open:{template_id}",
                 )
             ]
@@ -1104,16 +1157,15 @@ def _access_error_content(state: dict) -> tuple[str, InlineKeyboardMarkup]:
 
     def build(limits: list[int]) -> str:
         lines = [
-            "⚠️ Шаблон больше недоступен",
+            tr("templates.build.shablon_bolshe_nedostupen"),
             "",
-            "Права изменились или шаблон удалён. Текст ниже сохранён в сессии, "
-            "но записать его в этот шаблон уже нельзя.",
+            tr("templates.build.prava_izmenilis_shablon_udalen"),
             "",
         ]
         lines.append(
-            _value_block("Ваш текст", draft, limit=limits[0])
+            _value_block(tr("templates.build.vash_tekst"), draft, limit=limits[0])
             if draft
-            else "Секция сейчас пуста."
+            else tr("templates.build.sekciya_seychas_pusta")
         )
         return "\n".join(lines)
 
@@ -1137,16 +1189,22 @@ def _confirm_content(
 
     def build(limits: list[int]) -> str:
         lines = [
-            f"✅ Предпросмотр и подтверждение сохранения ({title})",
+            tr_safe("templates.build.predprosmotr_podtverzhdenie", title=title),
             "",
-            _value_block("Текст (черновик)", draft, limit=limits[0]),
+            _value_block(tr("templates.build.tekst_chernovik"), draft, limit=limits[0]),
             "",
-            "Второй текст шаблона не меняется. Новая версия создастся только "
-            "после нажатия «Сохранить».",
+            tr("templates.build.vtoroy_tekst_shablona_menyaetsya"),
         ]
         chosen = _chosen_rows(state)
         if chosen:
-            lines.extend(["", "Явно выбраны кирпичики: " + ", ".join(chosen) + "."])
+            lines.extend(
+                [
+                    "",
+                    tr("templates.build.yavno_vybrany_kirpichiki")
+                    + ", ".join(chosen)
+                    + ".",
+                ]
+            )
         return "\n".join(lines)
 
     text = _fit_value_screen(build, blocks=1)
@@ -1156,16 +1214,20 @@ def _confirm_content(
             # H3 (требование E): пара «принять / поправить» — оба действия
             # относятся к показанному выше черновику.
             [
-                InlineKeyboardButton("💾 Сохранить", callback_data="tp_save"),
-                InlineKeyboardButton("✏️ Исправить", callback_data="tp_retry"),
+                InlineKeyboardButton(
+                    tr("buttons.bricks.sohranit"), callback_data="tp_save"
+                ),
+                InlineKeyboardButton(
+                    tr("buttons.templates.ispravit"), callback_data="tp_retry"
+                ),
             ],
             [
                 InlineKeyboardButton(
-                    "📋 Кирпичики",
+                    tr("buttons.templates.kirpichiki"),
                     callback_data=f"tp_bricks:{template_id}",
                 ),
                 InlineKeyboardButton(
-                    "◀️ К шаблону",
+                    tr("buttons.templates.k_shablonu"),
                     callback_data=f"tp_open:{template_id}",
                 ),
             ],
@@ -1205,28 +1267,29 @@ def _ambiguity_content(
 ) -> tuple[str, InlineKeyboardMarkup]:
     groups = _ambiguties(state)
     lines = [
-        "❓ Неоднозначный кирпичик",
+        tr("templates.ambiguity.neodnoznachnyy_kirpichik"),
         "",
-        "Один и тот же код встречается у нескольких доступных кирпичиков. "
-        "Выберите конкретный вариант: в шаблон сохранится его brick_id, а не "
-        "повторное угадывание кода.",
+        tr("templates.ambiguity.odin_tot_zhe_kod"),
     ]
     rows: list[list[InlineKeyboardButton]] = []
     for group_index, group in enumerate(groups):
         code = str(group["code"])
-        lines.extend(["", f"Код [{_h(code)}]"])
+        lines.extend(["", tr_safe("templates.ambiguity.kod", code=_h(code))])
         for candidate_index, candidate in enumerate(group["candidates"]):
             scope = SCOPE_TITLES.get(
                 str(candidate.get("scope")), str(candidate.get("scope"))
             )
-            title = _h(str(candidate.get("title") or "Кирпичик"))
+            title = _h(
+                str(candidate.get("title") or tr("templates.ambiguity.kirpichik"))
+            )
             lines.append(f"{candidate_index + 1}. {title} · {scope}")
             rows.append(
                 [
                     InlineKeyboardButton(
                         _short(
                             f"{candidate_index + 1}. "
-                            f"{candidate.get('title') or 'Кирпичик'} · {scope}"
+                            f"{candidate.get('title') or tr('templates.ambiguity.kirpichik')}"
+                            f" · {scope}"
                         ),
                         callback_data=(f"tp_pick:{group_index}:{candidate_index}"),
                     )
@@ -1237,15 +1300,22 @@ def _ambiguity_content(
     # «поправить / посмотреть коды» и отдельно выход к шаблону.
     rows.append(
         [
-            InlineKeyboardButton("✏️ Исправить", callback_data="tp_retry"),
             InlineKeyboardButton(
-                "📋 Кирпичики",
+                tr("buttons.templates.ispravit"), callback_data="tp_retry"
+            ),
+            InlineKeyboardButton(
+                tr("buttons.templates.kirpichiki"),
                 callback_data=f"tp_bricks:{template_id}",
             ),
         ]
     )
     rows.append(
-        [InlineKeyboardButton("◀️ К шаблону", callback_data=f"tp_open:{template_id}")]
+        [
+            InlineKeyboardButton(
+                tr("buttons.templates.k_shablonu"),
+                callback_data=f"tp_open:{template_id}",
+            )
+        ]
     )
     return "\n".join(lines), InlineKeyboardMarkup(rows)
 
@@ -1262,17 +1332,11 @@ def _brick_list_content(
     if template.kind == TEMPLATE_KIND_STANDARD:
         viewer = None
         place_id = template.place_id
-        scope_hint = (
-            "Для стандартного шаблона доступны системные кирпичики и "
-            "кирпичики этого места."
-        )
+        scope_hint = tr("templates.brick_list.dlya_standartnogo_shablona")
     else:
         viewer = telegram_user_id
         place_id = None
-        scope_hint = (
-            "Для личного шаблона доступны системные кирпичики и ваши личные "
-            "кирпичики."
-        )
+        scope_hint = tr("templates.brick_list.dlya_lichnogo_shablona_dostupny")
     bricks = list_available_bricks(
         session,
         viewer_telegram_user_id=viewer,
@@ -1283,8 +1347,8 @@ def _brick_list_content(
     offset = min(max(0, offset), max_offset)
     page_items = bricks[offset : offset + BRICK_PAGE_SIZE]
     lines = [
-        f"📋 Доступные кирпичики\n\n{scope_hint}",
-        f"Всего: {total}.",
+        tr("templates.brick_list.dostupnye_kirpichiki", scope_hint=scope_hint),
+        tr("templates.brick_list.vsego", total=total),
     ]
     if page_items:
         lines.append("")
@@ -1296,10 +1360,15 @@ def _brick_list_content(
             )
         if total > BRICK_PAGE_SIZE:
             lines.append(
-                f"\nПоказаны {offset + 1}–{offset + len(page_items)} из {total}."
+                tr(
+                    "templates.brick_list.pokazany",
+                    value=offset + 1,
+                    value_2=offset + len(page_items),
+                    total=total,
+                )
             )
     else:
-        lines.append("\nНет доступных кирпичиков.")
+        lines.append(tr("templates.brick_list.net_dostupnyh_kirpichikov"))
     navigation: list[InlineKeyboardButton] = []
     if offset > 0:
         navigation.append(
@@ -1317,25 +1386,14 @@ def _brick_list_content(
     rows: list[list[InlineKeyboardButton]] = []
     if navigation:
         rows.append(navigation)
-    rows.append([InlineKeyboardButton("◀️ Назад", callback_data="tp_back")])
+    rows.append([InlineKeyboardButton(tr("buttons.nav.back"), callback_data="tp_back")])
     return "\n".join(lines), InlineKeyboardMarkup(rows), offset
 
 
 def _help_content() -> tuple[str, InlineKeyboardMarkup]:
-    text = (
-        "❓ Оформление текста шаблона\n\n"
-        "• [код] — подставить кирпичик, например [название] или [дата].\n"
-        "• [[ и ]] — вывести квадратные скобки как обычный текст.\n"
-        "• **жирный**, *курсив*, __подчёркнутый__, ~~зачёркнутый~~.\n"
-        "• Ссылка: Текст(https://example.com) или Текст([ссылка_места]).\n"
-        "• Служебные символы экранируются обратной косой чертой: "
-        "\\* \\_ \\~ \\( \\) \\[ \\].\n\n"
-        "Текст отправляется целиком: переводы строк, отступы и Unicode "
-        "сохраняются. Фотографии — отдельные вложения поста, в шаблон они "
-        "не входят."
-    )
+    text = tr("templates.help.oformlenie_teksta_shablona_kod")
     return text, InlineKeyboardMarkup(
-        [[InlineKeyboardButton("◀️ Назад", callback_data="tp_back")]]
+        [[InlineKeyboardButton(tr("buttons.nav.back"), callback_data="tp_back")]]
     )
 
 
@@ -1346,14 +1404,27 @@ def _create_name_content(
     state: dict,
 ) -> tuple[str, InlineKeyboardMarkup]:
     current = state.get("name")
-    lines = ["➕ Создание шаблона"]
+    lines = [tr("templates.create_name.sozdanie_shablona")]
     if isinstance(current, str) and current.strip():
-        lines.extend(["", f"Текущее название: «{_h(current)}»"])
-    lines.extend(["", "Введите название нового шаблона:"])
+        lines.extend(
+            [
+                "",
+                tr_safe(
+                    "templates.create_name.tekuschee_nazvanie", current=_h(current)
+                ),
+            ]
+        )
+    lines.extend(["", tr("templates.create_name.vvedite_nazvanie_novogo_shablona")])
     # Название вводит человек, и оно может быть любой длины: экран всё равно
     # обязан уложиться в лимит Telegram (с явной пометкой о сокращении).
     return current_value.clip_screen("\n".join(lines)), InlineKeyboardMarkup(
-        [[InlineKeyboardButton("◀️ Отмена", callback_data="tp_cancel")]]
+        [
+            [
+                InlineKeyboardButton(
+                    tr("buttons.admin.otmena_2"), callback_data="tp_cancel"
+                )
+            ]
+        ]
     )
 
 
@@ -1361,23 +1432,26 @@ def _create_choice_content(
     name: str,
 ) -> tuple[str, InlineKeyboardMarkup]:
     text = current_value.clip_screen(
-        f"Шаблон «{_h(name)}»\n\n"
-        "Выберите начальное содержимое:\n"
-        "• «На основе стандартного» — встроенный текст Poster с системными "
-        "кирпичиками;\n"
-        "• «Пустой шаблон» — минимальная заготовка, которую вы заполните "
-        "сами."
+        tr_safe("templates.create_choice.shablon_vyberite_nachalnoe", name=_h(name))
     )
     return text, InlineKeyboardMarkup(
         [
             # H3 (требование E): два варианта основы — один выбор, одна строка.
             [
-                InlineKeyboardButton("📄 Стандартный", callback_data="tp_cstd"),
-                InlineKeyboardButton("📄 Пустой", callback_data="tp_cempty"),
+                InlineKeyboardButton(
+                    tr("buttons.templates.standartnyy"), callback_data="tp_cstd"
+                ),
+                InlineKeyboardButton(
+                    tr("buttons.templates.pustoy"), callback_data="tp_cempty"
+                ),
             ],
             [
-                InlineKeyboardButton("✏️ Название", callback_data="tp_cname"),
-                InlineKeyboardButton("◀️ Отмена", callback_data="tp_cancel"),
+                InlineKeyboardButton(
+                    tr("buttons.bricks.nazvanie"), callback_data="tp_cname"
+                ),
+                InlineKeyboardButton(
+                    tr("buttons.admin.otmena_2"), callback_data="tp_cancel"
+                ),
             ],
         ]
     )
@@ -1391,47 +1465,68 @@ def _create_confirm_content(
     content = str(state.get("create_content") or "")
     extended = state.get("create_extended")
     mode_title = (
-        "на основе стандартного"
+        tr("templates.create_confirm.na_osnove_standartnogo")
         if mode == "standard"
-        else "пустой шаблон (минимальная заготовка)"
+        else tr("templates.create_confirm.pustoy_shablon_minimalnaya")
     )
     has_extended = isinstance(extended, str)
     error = state.get("error_message")
 
     def build(limits: list[int]) -> str:
         lines = [
-            "📄 Проверьте новый шаблон",
+            tr("templates.build.proverte_novyy_shablon"),
             "",
-            f"Название: «{_h(name)}»",
-            f"Основа: {mode_title}",
+            tr_safe("templates.build.nazvanie", name=_h(name)),
+            tr("templates.build.osnova", mode_title=mode_title),
             "",
-            _value_block("📝 Текст", content, limit=limits[0]),
+            _value_block(tr("templates.build.tekst"), content, limit=limits[0]),
         ]
         if isinstance(extended, str):
             lines.extend(
-                ["", _value_block("📝 Расширенный текст", extended, limit=limits[1])]
+                [
+                    "",
+                    _value_block(
+                        tr("templates.build.rasshirennyy_tekst"),
+                        extended,
+                        limit=limits[1],
+                    ),
+                ]
             )
         if mode == "empty":
             lines.extend(
                 [
                     "",
-                    "Совсем пустой шаблон база не принимает, поэтому в тексте "
-                    "остаётся минимальный кирпичик [название]. Его можно заменить "
-                    "или дополнить после создания.",
+                    tr("templates.build.sovsem_pustoy_shablon_baza"),
                 ]
             )
         if isinstance(error, str) and error:
             lines.extend(["", f"⚠️ {_clip(error, ERROR_TEXT_LIMIT)}"])
-        lines.extend(["", "Подтвердите создание?"])
+        lines.extend(["", tr("templates.build.podtverdite_sozdanie")])
         return "\n".join(lines)
 
     text = _fit_value_screen(build, blocks=2 if has_extended else 1)
     return text, InlineKeyboardMarkup(
         [
-            [InlineKeyboardButton("💾 Создать", callback_data="tp_csave")],
-            [InlineKeyboardButton("◀️ К выбору основы", callback_data="tp_cback")],
-            [InlineKeyboardButton("✏️ Изменить название", callback_data="tp_cname")],
-            [InlineKeyboardButton("◀️ Отмена", callback_data="tp_cancel")],
+            [
+                InlineKeyboardButton(
+                    tr("buttons.templates.sozdat"), callback_data="tp_csave"
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    tr("buttons.templates.k_vyboru_osnovy"), callback_data="tp_cback"
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    tr("buttons.templates.izmenit_nazvanie"), callback_data="tp_cname"
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    tr("buttons.admin.otmena_2"), callback_data="tp_cancel"
+                )
+            ],
         ]
     )
 
@@ -1523,25 +1618,18 @@ async def _render_phase(
             page = state.get("page")
             state.clear()
             state.update(_new_hub(_page_value(page)))
-        notice = notice or "Черновик шаблона повреждён — раздел открыт заново."
+        notice = notice or tr("templates.render_phase.chernovik_shablona_povrezhden")
 
     phase = state.get("phase")
     if phase == PHASE_SAVING:
         state["phase"] = phase = PHASE_CONFIRM_SAVE
-        notice = notice or (
-            "Сохранение не было подтверждено. Проверьте текст и повторите."
-        )
+        notice = notice or (tr("templates.render_phase.sohranenie_bylo_podtverzhdeno"))
     elif phase == PHASE_CREATE_SAVING:
         state["phase"] = phase = PHASE_CREATE_CONFIRM
-        notice = notice or (
-            "Создание не было подтверждено. Проверьте, не создан ли шаблон "
-            "ранее, и повторите при необходимости."
-        )
+        notice = notice or (tr("templates.render_phase.sozdanie_bylo_podtverzhdeno"))
     elif phase == PHASE_DELETING:
         state["phase"] = phase = PHASE_DELETE_CONFIRM
-        notice = notice or (
-            "Удаление не было подтверждено. Проверьте список и повторите."
-        )
+        notice = notice or (tr("templates.render_phase.udalenie_bylo_podtverzhdeno"))
 
     telegram_user_id = ctx.user(update).id
     session = SessionLocal()
@@ -1575,7 +1663,9 @@ async def _render_phase(
                     page = state.get("page") if isinstance(state, dict) else 0
                     state.clear()
                     state.update(_new_hub(_page_value(page)))
-                    notice = notice or "Шаблон не найден или больше недоступен."
+                    notice = notice or tr(
+                        "templates.render_phase.shablon_nayden_bolshe_nedostupen"
+                    )
                     templates = list_personal_templates(session, telegram_user_id)
                     text, keyboard = _hub_content(
                         templates, _page_value(state.get("page"))
@@ -1599,17 +1689,15 @@ async def _render_phase(
                 elif phase == PHASE_SECTION_EDIT:
                     if check_revision and template.revision != state.get("revision"):
                         notice = notice or (
-                            "Шаблон изменился в другом окне. Текст сохранён; "
-                            "при сохранении потребуется обновить версию."
+                            tr("templates.render_phase.shablon_izmenilsya_drugom_okne")
                         )
                     text, keyboard = _text_edit_content(state)
                 elif phase == PHASE_CONFIRM_SAVE:
                     if check_revision and template.revision != state.get("revision"):
                         state["phase"] = PHASE_SECTION_ERROR
                         state["error_kind"] = "stale"
-                        state["error_message"] = (
-                            "Шаблон уже изменился в другом окне. "
-                            "Ваш текст не записан."
+                        state["error_message"] = tr(
+                            "templates.render_phase.shablon_izmenilsya_drugom_okne_2"
                         )
                         text, keyboard = _section_error_content(state)
                     else:
@@ -1620,9 +1708,8 @@ async def _render_phase(
                     if check_revision and template.revision != state.get("revision"):
                         state["phase"] = PHASE_SECTION_ERROR
                         state["error_kind"] = "stale"
-                        state["error_message"] = (
-                            "Шаблон уже изменился в другом окне. "
-                            "Явный выбор кирпичика не сохранён."
+                        state["error_message"] = tr(
+                            "templates.render_phase.shablon_izmenilsya_drugom_okne_3"
                         )
                         text, keyboard = _section_error_content(state)
                     elif not _ambiguties(state):
@@ -1642,22 +1729,28 @@ async def _render_phase(
                     state.clear()
                     state.update(_new_hub())
                     text, keyboard = _hub_content([], 0)
-                    notice = notice or "Раздел открыт заново."
+                    notice = notice or tr("templates.render_phase.razdel_otkryt_zanovo")
         else:  # pragma: no cover — _valid_state уже отсекает
             state.clear()
             state.update(_new_hub())
             text, keyboard = _hub_content([], 0)
-            notice = notice or "Раздел открыт заново."
+            notice = notice or tr("templates.render_phase.razdel_otkryt_zanovo")
     except Exception as exc:  # noqa: BLE001 — экран не должен падать
         logger.exception("Не удалось отрисовать раздел шаблонов: %s", exc)
-        text = (
-            "⚠️ Не удалось загрузить раздел шаблонов.\n\n"
-            "Черновик сохранён. Попробуйте повторить или вернитесь в меню."
-        )
+        text = tr("templates.render_phase.ne_udalos_zagruzit_razdel")
         keyboard = InlineKeyboardMarkup(
             [
-                [InlineKeyboardButton("🔄 Повторить", callback_data="tp_retry_render")],
-                [InlineKeyboardButton("🏠 Главное меню", callback_data="main_menu")],
+                [
+                    InlineKeyboardButton(
+                        tr("buttons.templates.povtorit"),
+                        callback_data="tp_retry_render",
+                    )
+                ],
+                [
+                    InlineKeyboardButton(
+                        tr("buttons.admin.glavnoe_menyu"), callback_data="main_menu"
+                    )
+                ],
             ]
         )
     finally:
@@ -1736,7 +1829,7 @@ async def _validate_and_show(
                 state,
                 text,
                 keyboard,
-                notice="Шаблон не найден или больше недоступен.",
+                notice=tr("templates.render_phase.shablon_nayden_bolshe_nedostupen"),
             )
         if template.kind == TEMPLATE_KIND_STANDARD and state.get("origin") != "admin":
             state.clear()
@@ -1749,7 +1842,7 @@ async def _validate_and_show(
                 state,
                 text,
                 keyboard,
-                notice="Шаблон доступен только администратору места.",
+                notice=tr("templates.validate_and_show.shablon_dostupen_tolko"),
             )
         state["origin"] = _template_origin(template)
         state["place_id"] = template.place_id
@@ -1758,8 +1851,7 @@ async def _validate_and_show(
             _set_section_error(
                 state,
                 "stale",
-                "Шаблон уже изменился в другом окне. Ваш текст не записан. "
-                "Обновите версию и повторите проверку.",
+                tr("templates.validate_and_show.shablon_izmenilsya_drugom_okne"),
             )
         else:
             current = template.current_version
@@ -1796,8 +1888,10 @@ async def _validate_and_show(
                     _set_section_error(
                         state,
                         "unknown",
-                        f"Неизвестные кирпичики: {codes}. Проверьте код в "
-                        "«Доступных кирпичиках» или исправьте текст.",
+                        tr(
+                            "templates.validate_and_show.neizvestnye_kirpichiki_proverte",
+                            codes=codes,
+                        ),
                     )
                 elif compiled.ambiguous_codes:
                     state["phase"] = PHASE_RESOLVE_AMBIGUITY
@@ -1816,8 +1910,7 @@ async def _validate_and_show(
         _set_section_error(
             state,
             "unexpected",
-            "Не удалось проверить текст из-за временной ошибки. "
-            "Черновик сохранён; повторите попытку.",
+            tr("templates.validate_and_show.ne_udalos_proverit_tekst"),
         )
     finally:
         session.close()
@@ -1972,7 +2065,7 @@ async def handle_open(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     try:
         template = _load_editable(session, telegram_user_id, template_id)
         if template is None:
-            await query.answer("Шаблон не найден.", show_alert=True)
+            await query.answer(tr("alerts.templates.shablon_nayden"), show_alert=True)
             return
         if template.kind == TEMPLATE_KIND_STANDARD and state.get("origin") != "admin":
             await query.answer(DENIED_TEXT, show_alert=True)
@@ -2022,7 +2115,7 @@ async def handle_edit_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     try:
         template = _load_editable(session, telegram_user_id, template_id)
         if template is None:
-            await query.answer("Шаблон не найден.", show_alert=True)
+            await query.answer(tr("alerts.templates.shablon_nayden"), show_alert=True)
             return
         if template.kind == TEMPLATE_KIND_STANDARD and state.get("origin") != "admin":
             await query.answer(DENIED_TEXT, show_alert=True)
@@ -2032,7 +2125,9 @@ async def handle_edit_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         if text_name == TEMPLATE_EXTENDED_CONTENT and (
             current.extended_content is None
         ):
-            await query.answer("У шаблона нет расширенного текста.", show_alert=True)
+            await query.answer(
+                tr("alerts.templates.u_shablona_net_rasshirennogo"), show_alert=True
+            )
             return
         state.update(
             {
@@ -2070,7 +2165,7 @@ async def handle_preview(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     try:
         template = _load_editable(session, telegram_user_id, template_id)
         if template is None:
-            await query.answer("Шаблон не найден.", show_alert=True)
+            await query.answer(tr("alerts.templates.shablon_nayden"), show_alert=True)
             return
         if template.kind == TEMPLATE_KIND_STANDARD and state.get("origin") != "admin":
             await query.answer(DENIED_TEXT, show_alert=True)
@@ -2110,7 +2205,7 @@ async def handle_reset(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     try:
         template = _load_editable(session, telegram_user_id, template_id)
         if template is None:
-            await query.answer("Шаблон не найден.", show_alert=True)
+            await query.answer(tr("alerts.templates.shablon_nayden"), show_alert=True)
             return
         if template.kind == TEMPLATE_KIND_STANDARD and state.get("origin") != "admin":
             await query.answer(DENIED_TEXT, show_alert=True)
@@ -2150,7 +2245,7 @@ async def handle_reset_yes(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     try:
         template = _load_editable(session, telegram_user_id, template_id)
         if template is None:
-            alert = "Шаблон не найден или больше недоступен."
+            alert = tr("templates.render_phase.shablon_nayden_bolshe_nedostupen")
         elif template.kind == TEMPLATE_KIND_STANDARD and state.get("origin") != "admin":
             alert = DENIED_TEXT
         elif template.revision != state.get("revision"):
@@ -2162,10 +2257,7 @@ async def handle_reset_yes(update: Update, context: ContextTypes.DEFAULT_TYPE) -
             text, keyboard = _card_content(
                 template, place_name=_place_name(session, template.place_id)
             )
-            notice = (
-                "Сброс не выполнен: шаблон уже изменился в другом окне. "
-                "Проверьте актуальную версию и повторите."
-            )
+            notice = tr("templates.handle_reset_yes.sbros_vypolnen_shablon_izmenilsya")
         else:
             reset = (
                 reset_standard_template
@@ -2195,18 +2287,19 @@ async def handle_reset_yes(update: Update, context: ContextTypes.DEFAULT_TYPE) -
                     place_name=_place_name(session, current.place_id),
                 )
                 notice = (
-                    "Шаблон сброшен к встроенному стандарту. "
-                    f"Текущая версия: {current.revision}."
+                    tr(
+                        "templates.handle_reset_yes.shablon_sbroshen_vstroennomu",
+                        revision=current.revision,
+                    )
                     if result.status == "updated"
-                    else "Шаблон уже совпадает со встроенным стандартом; "
-                    "новая версия не создана."
+                    else tr("templates.handle_reset_yes.shablon_sovpadaet_vstroennym")
                 )
             elif result.status == "stale":
                 current = result.template or get_accessible_template(
                     session, telegram_user_id, template_id
                 )
                 if current is None:
-                    alert = "Шаблон не найден."
+                    alert = tr("alerts.templates.shablon_nayden")
                 else:
                     new_state = _card_state(
                         current,
@@ -2217,21 +2310,24 @@ async def handle_reset_yes(update: Update, context: ContextTypes.DEFAULT_TYPE) -
                         current,
                         place_name=_place_name(session, current.place_id),
                     )
-                    notice = (
-                        "Сброс не выполнен: шаблон уже изменился в другом "
-                        "окне. Проверьте актуальную версию и повторите."
+                    notice = tr(
+                        "templates.handle_reset_yes.sbros_vypolnen_shablon_izmenilsya"
                     )
             elif result.status == "forbidden":
-                alert = result.message or "Недостаточно прав."
+                alert = result.message or tr(
+                    "templates.handle_reset_yes.nedostatochno_prav"
+                )
                 new_state = _new_hub(_page_value(state.get("page")))
                 templates = list_personal_templates(session, telegram_user_id)
                 text, keyboard = _hub_content(templates, new_state["page"])
-                notice = result.message or "Права на шаблон больше не действуют."
+                notice = result.message or tr(
+                    "templates.handle_reset_yes.prava_shablon_bolshe_deystvuyut"
+                )
             elif result.status == "not_found":
                 new_state = _new_hub(_page_value(state.get("page")))
                 templates = list_personal_templates(session, telegram_user_id)
                 text, keyboard = _hub_content(templates, new_state["page"])
-                notice = "Шаблон больше не существует."
+                notice = tr("templates.handle_reset_yes.shablon_bolshe_suschestvuet")
             else:
                 new_state = _card_state(
                     template,
@@ -2242,10 +2338,12 @@ async def handle_reset_yes(update: Update, context: ContextTypes.DEFAULT_TYPE) -
                     template,
                     place_name=_place_name(session, template.place_id),
                 )
-                notice = result.message or "Сброс не выполнен."
+                notice = result.message or tr(
+                    "templates.handle_reset_yes.sbros_vypolnen"
+                )
     except Exception as exc:  # noqa: BLE001
         logger.exception("Не удалось сбросить шаблон: %s", exc)
-        alert = "Не удалось сбросить шаблон. Повторите попытку."
+        alert = tr("templates.handle_reset_yes.ne_udalos_sbrosit_shablon")
     finally:
         session.close()
 
@@ -2276,12 +2374,11 @@ async def handle_delete(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     try:
         template = _load_editable(session, telegram_user_id, template_id)
         if template is None:
-            await query.answer("Шаблон не найден.", show_alert=True)
+            await query.answer(tr("alerts.templates.shablon_nayden"), show_alert=True)
             return
         if template.kind != TEMPLATE_KIND_PERSONAL:
             await query.answer(
-                "Стандартный шаблон удалить нельзя: место не может остаться "
-                "без шаблона.",
+                tr("alerts.templates.standartnyy_shablon_udalit_nelzya"),
                 show_alert=True,
             )
             return
@@ -2339,19 +2436,19 @@ async def handle_delete_yes(update: Update, context: ContextTypes.DEFAULT_TYPE) 
             new_state = _new_hub(page)
             templates = list_personal_templates(session, telegram_user_id)
             text, keyboard = _hub_content(templates, page)
-            notice = "Шаблон удалён."
+            notice = tr("templates.handle_delete_yes.shablon_udalen")
         elif outcome == "not_found":
             new_state = _new_hub(page)
             templates = list_personal_templates(session, telegram_user_id)
             text, keyboard = _hub_content(templates, page)
-            notice = "Шаблон уже удалён."
+            notice = tr("templates.handle_delete_yes.shablon_udalen_2")
         elif outcome == "stale":
             template = get_personal_template(session, telegram_user_id, template_id)
             if template is None:
                 new_state = _new_hub(page)
                 templates = list_personal_templates(session, telegram_user_id)
                 text, keyboard = _hub_content(templates, page)
-                notice = "Шаблон уже удалён."
+                notice = tr("templates.handle_delete_yes.shablon_udalen_2")
             else:
                 new_state = _card_state(
                     template,
@@ -2361,17 +2458,14 @@ async def handle_delete_yes(update: Update, context: ContextTypes.DEFAULT_TYPE) 
                 text, keyboard = _card_content(
                     template, place_name=_place_name(session, template.place_id)
                 )
-                notice = (
-                    "Удаление не выполнено: шаблон уже изменился в другом "
-                    "окне. Проверьте актуальную версию и повторите."
-                )
+                notice = tr("templates.handle_delete_yes.udalenie_vypolneno_shablon")
         else:  # blocked
             template = get_personal_template(session, telegram_user_id, template_id)
             if template is None:
                 new_state = _new_hub(page)
                 templates = list_personal_templates(session, telegram_user_id)
                 text, keyboard = _hub_content(templates, page)
-                notice = "Шаблон уже удалён."
+                notice = tr("templates.handle_delete_yes.shablon_udalen_2")
             else:
                 new_state = _card_state(
                     template,
@@ -2384,7 +2478,7 @@ async def handle_delete_yes(update: Update, context: ContextTypes.DEFAULT_TYPE) 
                 notice = DELETE_BLOCKED_TEXT
     except Exception as exc:  # noqa: BLE001
         logger.exception("Не удалось удалить шаблон: %s", exc)
-        alert = "Не удалось удалить шаблон. Повторите попытку."
+        alert = tr("templates.handle_delete_yes.ne_udalos_udalit_shablon")
     finally:
         session.close()
 
@@ -2424,7 +2518,7 @@ async def handle_bricks(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     try:
         template = _load_editable(session, telegram_user_id, template_id)
         if template is None:
-            await query.answer("Шаблон не найден.", show_alert=True)
+            await query.answer(tr("alerts.templates.shablon_nayden"), show_alert=True)
             return
         if template.kind == TEMPLATE_KIND_STANDARD and state.get("origin") != "admin":
             await query.answer(DENIED_TEXT, show_alert=True)
@@ -2504,7 +2598,7 @@ async def handle_back(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             update,
             context,
             state,
-            notice="Создание шаблона не подтверждено. Данные не сохранены.",
+            notice=tr("templates.handle_back.sozdanie_shablona_podtverzhdeno"),
         )
         return
     if phase not in {PHASE_BRICK_LIST, PHASE_HELP}:
@@ -2542,7 +2636,7 @@ async def handle_clear(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         update,
         context,
         state,
-        notice="Текст очищен. Проверьте результат и подтвердите сохранение.",
+        notice=tr("templates.handle_clear.tekst_ochischen_proverte_rezultat"),
     )
 
 
@@ -2583,7 +2677,7 @@ async def handle_refresh(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     try:
         template = _load_editable(session, telegram_user_id, state.get("template_id"))
         if template is None:
-            await query.answer("Шаблон не найден.", show_alert=True)
+            await query.answer(tr("alerts.templates.shablon_nayden"), show_alert=True)
             return
         if template.kind == TEMPLATE_KIND_STANDARD and state.get("origin") != "admin":
             await query.answer(DENIED_TEXT, show_alert=True)
@@ -2601,8 +2695,10 @@ async def handle_refresh(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         context,
         state,
         notice=(
-            f"Версия обновлена до {state['revision']}. "
-            "Ваш текст сохранён — проверьте его и подтвердите."
+            tr(
+                "templates.handle_refresh.versiya_obnovlena_tekst_sohranen",
+                state_revision=state["revision"],
+            )
         ),
     )
 
@@ -2658,12 +2754,14 @@ async def handle_pick(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     chosen = dict(_chosen_map(state) or {})
     chosen[str(group["code"])] = int(brick_id)
     state["chosen_brick_ids"] = chosen
-    title = str(candidate.get("title") or "кирпичик")
+    title = str(candidate.get("title") or tr("templates.handle_pick.kirpichik"))
     await _validate_and_show(
         update,
         context,
         state,
-        notice=f"Выбран кирпичик «{title}». Проверяем текст.",
+        notice=tr(
+            "templates.handle_pick.vybran_kirpichik_proveryaem_tekst", title=title
+        ),
     )
 
 
@@ -2739,9 +2837,9 @@ async def handle_save(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
                 saved, place_name=_place_name(session, saved.place_id)
             )
             notice = (
-                f"Сохранено в версии {saved.revision}."
+                tr("templates.handle_save.sohraneno_versii", revision=saved.revision)
                 if result.status == "updated"
-                else "Содержимое не изменилось; новая версия не создана."
+                else tr("templates.handle_save.soderzhimoe_izmenilos_novaya")
             )
         elif result.status == "stale":
             stale_current = result.template or get_accessible_template(
@@ -2749,9 +2847,8 @@ async def handle_save(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             )
             state["phase"] = PHASE_SECTION_ERROR
             state["error_kind"] = "stale"
-            state["error_message"] = (
-                "Шаблон уже изменился в другом окне. Ваш текст сохранён, "
-                "чужие изменения не перезаписаны."
+            state["error_message"] = tr(
+                "templates.handle_save.shablon_izmenilsya_drugom_okne"
             )
             state.pop("pending_ambiguities", None)
             if stale_current is not None:
@@ -2763,14 +2860,16 @@ async def handle_save(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             state["phase"] = PHASE_SECTION_ERROR
             state["error_kind"] = "forbidden"
             state["error_message"] = result.message or (
-                "Права на изменение шаблона больше не действуют."
+                tr("templates.handle_save.prava_izmenenie_shablona_bolshe")
             )
             new_state = state
             text, keyboard = _section_error_content(state)
         elif result.status == "invalid":
             state["phase"] = PHASE_SECTION_ERROR
             state["error_kind"] = "invalid"
-            state["error_message"] = result.message or "Текст не прошёл проверку."
+            state["error_message"] = result.message or tr(
+                "templates.handle_save.tekst_proshel_proverku"
+            )
             state.pop("pending_ambiguities", None)
             new_state = state
             text, keyboard = _section_error_content(state)
@@ -2778,7 +2877,7 @@ async def handle_save(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             state["phase"] = PHASE_SECTION_ERROR
             state["error_kind"] = "conflict"
             state["error_message"] = result.message or (
-                "Не удалось сохранить из-за одновременной записи. " "Повторите попытку."
+                tr("templates.handle_save.ne_udalos_sohranit_odnovremennoy")
             )
             new_state = state
             text, keyboard = _section_error_content(state)
@@ -2789,11 +2888,13 @@ async def handle_save(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             templates = list_personal_templates(session, telegram_user_id)
             text, keyboard = _hub_content(templates, page)
             new_state = state
-            notice = "Шаблон больше не существует; изменения не сохранены."
+            notice = tr("templates.handle_save.shablon_bolshe_suschestvuet")
         else:  # pragma: no cover — будущие статусы сервиса
             state["phase"] = PHASE_SECTION_ERROR
             state["error_kind"] = "unexpected"
-            state["error_message"] = result.message or "Не удалось сохранить."
+            state["error_message"] = result.message or tr(
+                "templates.handle_save.ne_udalos_sohranit"
+            )
             new_state = state
             text, keyboard = _section_error_content(state)
     except (TemplateValidationError, TemplateCompileError) as exc:
@@ -2813,9 +2914,8 @@ async def handle_save(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         logger.exception("Не удалось сохранить секцию шаблона: %s", exc)
         state["phase"] = PHASE_SECTION_ERROR
         state["error_kind"] = "conflict"
-        state["error_message"] = (
-            "Не удалось сохранить из-за временной ошибки. "
-            "Ваш текст сохранён; повторите попытку."
+        state["error_message"] = tr(
+            "templates.handle_save.ne_udalos_sohranit_vremennoy"
         )
         new_state = state
         text, keyboard = _section_error_content(state)
@@ -2907,7 +3007,7 @@ async def _create_from(
     else:
         # Backend запрещает пустой текст. Минимальная безопасная заготовка
         # сохраняет пользователю «пустой» старт.
-        content, extended = "[название]", None
+        content, extended = tr("templates.create_from.nazvanie"), None
     state.update(
         {
             "phase": PHASE_CREATE_CONFIRM,
@@ -2969,7 +3069,7 @@ async def handle_create_save(
         text, keyboard = _card_content(
             created, place_name=_place_name(session, created.place_id)
         )
-        notice = "Личный шаблон создан."
+        notice = tr("templates.handle_create_save.lichnyy_shablon_sozdan")
     except (TemplateValidationError, TemplateCompileError) as exc:
         state["phase"] = PHASE_CREATE_CONFIRM
         state["error_message"] = _compile_error_text(exc)
@@ -2983,9 +3083,8 @@ async def handle_create_save(
     except Exception as exc:  # noqa: BLE001
         logger.exception("Не удалось создать личный шаблон: %s", exc)
         state["phase"] = PHASE_CREATE_CONFIRM
-        state["error_message"] = (
-            "Не удалось создать шаблон из-за временной ошибки. "
-            "Данные сохранены; повторите попытку."
+        state["error_message"] = tr(
+            "templates.handle_create_save.ne_udalos_sozdat_shablon"
         )
         new_state = state
         text, keyboard = _create_confirm_content(state)
@@ -3004,7 +3103,7 @@ async def handle_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     state = load_template_session(ctx.user(update).id)
     telegram_user_id = ctx.user(update).id
     clear_template_session(telegram_user_id)
-    await query.answer("Отменено.")
+    await query.answer(tr("alerts.templates.otmeneno"))
     session = SessionLocal()
     try:
         _ensure_user(session, update)
@@ -3126,14 +3225,15 @@ async def open_standard_template(
         )
         if not allowed:
             await query.answer(
-                "Стандартный шаблон доступен только администратору места "
-                "или суперадминистратору.",
+                tr("alerts.templates.standartnyy_shablon_dostupen_tolko"),
                 show_alert=True,
             )
             return
         template = get_standard_template(session, telegram_user_id, place_id)
         if template is None:
-            await query.answer("У места нет стандартного шаблона.", show_alert=True)
+            await query.answer(
+                tr("alerts.templates.u_mesta_net_standartnogo"), show_alert=True
+            )
             return
         await query.answer()
         state = _card_state(template, origin="admin")
@@ -3143,7 +3243,7 @@ async def open_standard_template(
     except Exception as exc:  # noqa: BLE001
         logger.exception("Не удалось открыть стандартный шаблон: %s", exc)
         await query.answer(
-            "Не удалось открыть стандартный шаблон. Повторите попытку.",
+            tr("alerts.templates.ne_udalos_otkryt_standartnyy"),
             show_alert=True,
         )
         return

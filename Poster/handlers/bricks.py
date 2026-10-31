@@ -92,38 +92,38 @@ from template_state import clear_template_session
 from user_store import get_or_create_user
 from utils import current_value, keyboard_layouts, screen
 from utils import tg_context as ctx
-from utils.ui_texts import tr
+from utils.ui_texts import tr, tr_safe
 
 logger = logging.getLogger(__name__)
 
 STALE_TEXT = tr("errors.stale.bricks")
 # U3a №8: предложение запускается только из строки конкретного кирпичика.
 # Так отвечает устаревшая общая кнопка `bp_start` без id из старых сообщений.
-PROPOSAL_ROW_ONLY_HINT = "Выберите кирпичик в списке: «📨» справа от его названия."
+PROPOSAL_ROW_ONLY_HINT = tr("bricks.module.vyberite_kirpichik_spiske_sprava")
 # U3a: у нового пользователя кирпичиков нет — ссылаться на «📨» не на что,
 # подсказка ведёт к кнопке, которая на экране действительно есть.
-PROPOSAL_CREATE_HINT = "Сначала создайте кирпичик кнопкой «➕ Создать кирпичик»."
+PROPOSAL_CREATE_HINT = tr("bricks.module.snachala_sozdayte_kirpichik")
 PAGE_SIZE = 8
 _BUTTON_TITLE_LIMIT = 48
 
 TYPE_UI_TITLES = {
-    BRICK_TYPE_SHORT_TEXT: "Короткий текст",
-    BRICK_TYPE_LONG_TEXT: "Большой текст",
-    BRICK_TYPE_DATE: "Дата",
-    BRICK_TYPE_TIME: "Время",
-    BRICK_TYPE_URL: "Ссылка",
-    BRICK_TYPE_NUMBER: "Число",
-    BRICK_TYPE_CHOICE: "Выбор из вариантов",
+    BRICK_TYPE_SHORT_TEXT: tr("bricks.module.korotkiy_tekst"),
+    BRICK_TYPE_LONG_TEXT: tr("bricks.module.bolshoy_tekst"),
+    BRICK_TYPE_DATE: tr("bricks.module.data"),
+    BRICK_TYPE_TIME: tr("bricks.module.vremya"),
+    BRICK_TYPE_URL: tr("bricks.module.ssylka"),
+    BRICK_TYPE_NUMBER: tr("bricks.module.chislo"),
+    BRICK_TYPE_CHOICE: tr("bricks.module.vybor_variantov"),
 }
 
 TYPE_UI_HINTS = {
-    BRICK_TYPE_SHORT_TEXT: "Одна строка: имя, роль, короткая подпись.",
-    BRICK_TYPE_LONG_TEXT: "Несколько строк: описание, примечание, программа.",
-    BRICK_TYPE_DATE: "Дата события; при вводе будет использован календарь.",
-    BRICK_TYPE_TIME: "Время события; используется существующий разбор времени.",
-    BRICK_TYPE_URL: "Ссылка; проверяется и нормализуется как адрес.",
-    BRICK_TYPE_NUMBER: "Число с необязательными границами и подписью.",
-    BRICK_TYPE_CHOICE: "Один или несколько вариантов из вашего списка.",
+    BRICK_TYPE_SHORT_TEXT: tr("bricks.module.odna_stroka_imya_rol"),
+    BRICK_TYPE_LONG_TEXT: tr("bricks.module.neskolko_strok_opisanie"),
+    BRICK_TYPE_DATE: tr("bricks.module.data_sobytiya_vvode_budet"),
+    BRICK_TYPE_TIME: tr("bricks.module.vremya_sobytiya_ispolzuetsya"),
+    BRICK_TYPE_URL: tr("bricks.module.ssylka_proveryaetsya"),
+    BRICK_TYPE_NUMBER: tr("bricks.module.chislo_neobyazatelnymi_granicami"),
+    BRICK_TYPE_CHOICE: tr("bricks.module.odin_neskolko_variantov_vashego"),
 }
 
 _TEXT_PHASES = frozenset(
@@ -339,11 +339,11 @@ def _suggest_code(session: Session, user_id: int, title: str) -> str:
             pieces.append("_")
     base = re.sub(r"_+", "_", "".join(pieces)).strip("_-")
     if len(base) < 2:
-        base = "мой_кирпичик"
+        base = tr("bricks.suggest_code.moy_kirpichik")
     if len(base) > 64:
         base = base[:64].rstrip("_-")
     if len(base) < 2:
-        base = "мой_кирпичик"
+        base = tr("bricks.suggest_code.moy_kirpichik")
 
     candidate = base
     counter = 2
@@ -356,7 +356,7 @@ def _suggest_code(session: Session, user_id: int, title: str) -> str:
         candidate = f"{stem}{suffix}"
         counter += 1
         if counter > 999:
-            return "мой_кирпичик"
+            return tr("bricks.suggest_code.moy_kirpichik")
 
 
 # --- Форматирование ---------------------------------------------------------
@@ -384,7 +384,7 @@ def _type_title(value_type: str) -> str:
 def _description_text(value: object) -> str:
     """Описание для экранов: экранируется и переносится, без «дыр»."""
     text = " ".join(str(value or "").split())
-    return text or "нет"
+    return text or tr("bricks.description.net")
 
 
 def _description_shown(
@@ -402,7 +402,7 @@ def _description_shown(
     """
     text = " ".join(str(value or "").split())
     if not text:
-        return "нет", False
+        return tr("bricks.description.net"), False
     if limit <= 0:
         return current_value.EMPTY, False
     shown, truncated = current_value.clip_parts(
@@ -428,20 +428,40 @@ def _format_number(value: object) -> str:
 def _number_rules_text(rules: dict) -> str:
     parts: list[str] = []
     if rules.get("integer"):
-        parts.append("только целые числа")
+        parts.append(tr("admin.proposal_settings.tolko_celye_chisla"))
     if "min" in rules:
-        parts.append(f"минимум {_format_number(rules['min'])}")
+        parts.append(
+            tr(
+                "admin.proposal_settings.minimum",
+                rules_min=_format_number(rules["min"]),
+            )
+        )
     if "max" in rules:
-        parts.append(f"максимум {_format_number(rules['max'])}")
+        parts.append(
+            tr(
+                "admin.proposal_settings.maksimum",
+                rules_max=_format_number(rules["max"]),
+            )
+        )
     if "suffix" in rules:
-        parts.append(f"подпись «{rules['suffix']}»")
-    return "Без дополнительных ограничений." if not parts else "; ".join(parts) + "."
+        parts.append(tr("admin.proposal_settings.podpis", rules_suffix=rules["suffix"]))
+    return (
+        tr("bricks.number_rules.bez_dopolnitelnyh_ogranicheniy")
+        if not parts
+        else "; ".join(parts) + "."
+    )
 
 
 def _choice_rules_text(rules: dict) -> str:
     choices = rules.get("choices") or []
-    labels = ", ".join(str(item) for item in choices) or "список пуст"
-    multiple = "можно выбрать несколько" if rules.get("multiple") else "один вариант"
+    labels = ", ".join(str(item) for item in choices) or tr(
+        "admin.proposal_settings.spisok_pust"
+    )
+    multiple = (
+        tr("admin.proposal_settings.mozhno_vybrat_neskolko")
+        if rules.get("multiple")
+        else tr("admin.proposal_settings.odin_variant")
+    )
     return f"{labels}; {multiple}."
 
 
@@ -454,21 +474,15 @@ def _settings_text(value_type: str, rules: dict) -> str:
         BRICK_TYPE_URL,
     }:
         if value_type == BRICK_TYPE_DATE:
-            return (
-                "Без ограничений. При будущем вводе будет использован "
-                "существующий календарь Poster."
-            )
+            return tr("bricks.settings.bez_ogranicheniy_buduschem_vvode")
         if value_type == BRICK_TYPE_TIME:
-            return (
-                "Без ограничений. При будущем вводе будет использован "
-                "существующий разбор времени."
-            )
-        return "Без дополнительных настроек."
+            return tr("bricks.settings.bez_ogranicheniy_buduschem_vvode_2")
+        return tr("admin.proposal_settings.bez_dopolnitelnyh_nastroek")
     if value_type == BRICK_TYPE_NUMBER:
         return _number_rules_text(rules)
     if value_type == BRICK_TYPE_CHOICE:
         return _choice_rules_text(rules)
-    return "Без дополнительных настроек."
+    return tr("admin.proposal_settings.bez_dopolnitelnyh_nastroek")
 
 
 def _page_note(offset: int, count: int, total: int) -> str:
@@ -614,20 +628,21 @@ def _archive_content(session: Session, user: User, state: dict):
 
 
 def _card_content(brick):
-    state_label = "🟢 Активный" if brick.status == BRICK_STATUS_ACTIVE else "🗄 В архиве"
+    state_label = (
+        tr("bricks.card.aktivnyy")
+        if brick.status == BRICK_STATUS_ACTIVE
+        else tr("bricks.card.v_arhive")
+    )
 
     def build(limits: list[int]) -> str:
-        return (
-            f"🧱 <b>{_h(brick.title)}</b>\n\n"
-            f"Обозначение: <code>[{_h(brick.code)}]</code>\n"
-            f"Тип: {_h(_type_title(brick.value_type))}\n"
-            f"Описание: {_description_html(brick.description, limit=limits[0])}\n"
-            "Область: личная (видна только вам)\n"
-            f"Статус: {state_label}\n"
-            f"Настройки: {_h(_settings_text(brick.value_type, brick.rules))}\n\n"
-            "Это только определение поля. Значение появится, когда кирпичик "
-            "будет использован в шаблоне анонса; сейчас он не вставляется в "
-            "посты автоматически."
+        return tr_safe(
+            "bricks.build.oboznachenie_tip_opisanie_oblast_html",
+            title=_h(brick.title),
+            code=_h(brick.code),
+            type_title=_h(_type_title(brick.value_type)),
+            description=_description_html(brick.description, limit=limits[0]),
+            state_label=state_label,
+            settings_text=_h(_settings_text(brick.value_type, brick.rules)),
         )
 
     # Бюджет описания считается от обвязки экрана: название кирпичика задаёт
@@ -636,41 +651,56 @@ def _card_content(brick):
     text = current_value.fit_screen(build, blocks=1)
     if brick.status == BRICK_STATUS_ACTIVE:
         rows = [
-            [InlineKeyboardButton("✏️ Изменить", callback_data="bk_edit")],
-            [InlineKeyboardButton("📦 В архив", callback_data="bk_archive")],
+            [
+                InlineKeyboardButton(
+                    tr("buttons.finished.edit"), callback_data="bk_edit"
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    tr("buttons.bricks.v_arhiv"), callback_data="bk_archive"
+                )
+            ],
         ]
     else:
-        rows = [[InlineKeyboardButton("♻️ Восстановить", callback_data="bk_restore")]]
-    rows.append([InlineKeyboardButton("◀️ Назад", callback_data="bk_back")])
+        rows = [
+            [
+                InlineKeyboardButton(
+                    tr("buttons.bricks.vosstanovit"), callback_data="bk_restore"
+                )
+            ]
+        ]
+    rows.append([InlineKeyboardButton(tr("buttons.nav.back"), callback_data="bk_back")])
     return text, InlineKeyboardMarkup(rows)
 
 
 def _archive_confirm_content(brick):
-    text = (
-        "📦 <b>Переместить кирпичик в архив?</b>\n\n"
-        f"Название: {_h(brick.title)}\n"
-        f"Обозначение: <code>[{_h(brick.code)}]</code>\n\n"
-        "Он исчезнет из активного списка, но останется у вас в архиве. "
-        "Восстановить его можно в любой момент. Технический код останется "
-        "занятым, чтобы старые и будущие ссылки не стали неоднозначными."
+    text = tr_safe(
+        "bricks.archive_confirm.peremestit_kirpichik_arhiv_html",
+        title=_h(brick.title),
+        code=_h(brick.code),
     )
     return text, InlineKeyboardMarkup(
         [
             [
                 InlineKeyboardButton(
-                    "✅ Да, в архив", callback_data="bk_archive_confirm"
+                    tr("buttons.bricks.da_arhiv"), callback_data="bk_archive_confirm"
                 )
             ],
-            [InlineKeyboardButton("◀️ Нет, назад", callback_data="bk_back")],
+            [
+                InlineKeyboardButton(
+                    tr("buttons.admin.net_nazad"), callback_data="bk_back"
+                )
+            ],
         ]
     )
 
 
 _PROPOSAL_STATUS_UI = {
-    PROPOSAL_STATUS_PENDING: "⏳ Ожидает решения",
-    PROPOSAL_STATUS_APPROVED: "✅ Одобрено",
-    PROPOSAL_STATUS_REJECTED: "❌ Отклонено",
-    PROPOSAL_STATUS_WITHDRAWN: "↩️ Отозвано",
+    PROPOSAL_STATUS_PENDING: tr("admin.module.ozhidaet_resheniya"),
+    PROPOSAL_STATUS_APPROVED: tr("admin.module.odobreno"),
+    PROPOSAL_STATUS_REJECTED: tr("admin.module.otkloneno"),
+    PROPOSAL_STATUS_WITHDRAWN: tr("bricks.module.otozvano"),
 }
 
 
@@ -686,13 +716,16 @@ def _proposal_date(value: datetime | None) -> str:
 
 def _proposal_target_text(proposal: BrickProposalSnapshot) -> str:
     if proposal.scope == PROPOSAL_SCOPE_SYSTEM:
-        return "вся система"
-    return f"место «{proposal.place_name or f'#{proposal.place_id}'}»"
+        return tr("admin.proposal_target_label.vsya_sistema")
+    return tr(
+        "admin.proposal_target_label.mesto",
+        value=proposal.place_name or f"#{proposal.place_id}",
+    )
 
 
 # Хлебная крошка раздела предложений (R4 №24): человек всегда видит, где он
 # находится, и не путает предложения со списком кирпичиков.
-PROPOSAL_CRUMB = "🧱 Кирпичики → 📨 Предложения"
+PROPOSAL_CRUMB = tr("bricks.module.kirpichiki_predlozheniya")
 
 
 def _proposal_header(title: str, step: int | None = None) -> str:
@@ -702,7 +735,11 @@ def _proposal_header(title: str, step: int | None = None) -> str:
     Шаг указывается только у мастер-экранов (1–4): у списка и карточки шага
     нет, и выдумывать его не нужно.
     """
-    suffix = f" · шаг {step} из {PROPOSAL_STEPS}" if step is not None else ""
+    suffix = (
+        tr("bricks.proposal_header.shag", step=step, proposal_steps=PROPOSAL_STEPS)
+        if step is not None
+        else ""
+    )
     return f"{PROPOSAL_CRUMB}\n\n📨 <b>{title}</b>{suffix}"
 
 
@@ -716,8 +753,8 @@ def _proposal_back_label(state: dict) -> str:
     входа оставлена, чтобы сохранённое состояние не врало подписью.
     """
     if state.get("proposal_entry") == "row":
-        return "◀️ К кирпичикам"
-    return "◀️ К выбору кирпичика"
+        return tr("bricks.proposal_back_label.k_kirpichikam")
+    return tr("bricks.proposal_back_label.k_vyboru_kirpichika")
 
 
 def _proposal_page_note(offset: int, count: int, total: int) -> str:
@@ -778,8 +815,7 @@ def _proposal_select_brick_content(session: Session, user: User, state: dict):
     if total <= 0:
         _proposal_reset_hub(
             state,
-            "Сначала создайте личный кирпичик — затем его можно будет "
-            "предложить месту или всей системе.",
+            tr("bricks.proposal_select_brick.snachala_sozdayte_lichnyy"),
         )
         return None
     offset = _page_value(state.get("proposal_page"))
@@ -793,11 +829,8 @@ def _proposal_select_brick_content(session: Session, user: User, state: dict):
     )
     state["proposal_page"] = offset
     text = (
-        _proposal_header("Выберите кирпичик")
-        + "\n\nВыберите свой личный кирпичик, который хотите предложить для "
-        "места или всей системы.\n\n"
-        "Будет отправлен снимок текущих названия, кода, типа и описания. "
-        "Исходный личный кирпичик и его владелец не изменятся.\n\n"
+        _proposal_header(tr("bricks.proposal_select_brick.vyberite_kirpichik"))
+        + tr("bricks.proposal_select_brick.vyberite_svoy_lichnyy_kirpichik")
         + _proposal_page_note(offset, len(bricks), total)
     )
     rows = [
@@ -823,7 +856,13 @@ def _proposal_select_brick_content(session: Session, user: User, state: dict):
             else None
         ),
     )
-    rows.append([InlineKeyboardButton("◀️ К кирпичикам", callback_data="bp_back")])
+    rows.append(
+        [
+            InlineKeyboardButton(
+                tr("bricks.proposal_back_label.k_kirpichikam"), callback_data="bp_back"
+            )
+        ]
+    )
     return text, InlineKeyboardMarkup(rows)
 
 
@@ -832,24 +871,23 @@ def _proposal_scope_content(session: Session, user: User, state: dict):
     if brick is None:
         _proposal_reset_hub(
             state,
-            "Выбранный кирпичик больше недоступен. Начните предложение заново.",
+            tr("bricks.proposal_scope.vybrannyy_kirpichik_bolshe"),
         )
         return None
-    text = (
-        _proposal_header("Куда предложить кирпичик?", step=1) + "\n\n"
-        f"Кирпичик: <b>{_h(brick.title)}</b>\n"
-        f"Обозначение: <code>[{_h(brick.code)}]</code>\n\n"
-        "Выберите область:\n"
-        "• конкретное место — рассматривает действующий администратор этого "
-        "места или суперадминистратор;\n"
-        "• вся система — рассматривает только суперадминистратор.\n\n"
-        "Новое место автоматически не создаётся."
+    text = _proposal_header(
+        tr("bricks.proposal_scope.kuda_predlozhit_kirpichik"), step=1
+    ) + tr_safe(
+        "bricks.proposal_scope.kirpichik_oboznachenie_vyberite_html",
+        title=_h(brick.title),
+        code=_h(brick.code),
     )
     # Две цели — рядом в одной строке: это выбор из двух равноправных
     # вариантов, а не список. «Назад» остаётся отдельной строкой ниже.
     rows = keyboard_layouts.pair(
-        keyboard_layouts.button("📍 Место", "bp_target:place"),
-        keyboard_layouts.button("🌍 Вся система", "bp_target:system"),
+        keyboard_layouts.button(tr("bricks.proposal_scope.mesto"), "bp_target:place"),
+        keyboard_layouts.button(
+            tr("bricks.proposal_scope.vsya_sistema"), "bp_target:system"
+        ),
     )
     rows.append(
         [
@@ -867,7 +905,7 @@ def _proposal_select_place_content(session: Session, user: User, state: dict):
     if brick is None:
         _proposal_reset_hub(
             state,
-            "Выбранный кирпичик больше недоступен. Начните предложение заново.",
+            tr("bricks.proposal_scope.vybrannyy_kirpichik_bolshe"),
         )
         return None
     offset = _page_value(state.get("proposal_place_page"))
@@ -876,12 +914,12 @@ def _proposal_select_place_content(session: Session, user: User, state: dict):
         offset = ((total - 1) // PROPOSAL_PAGE_SIZE) * PROPOSAL_PAGE_SIZE
         places, total = list_places(session, offset=offset, limit=PROPOSAL_PAGE_SIZE)
     state["proposal_place_page"] = offset
-    text = (
-        _proposal_header("Выберите место", step=2) + "\n\n"
-        f"Кирпичик: <b>{_h(brick.title)}</b> "
-        f"<code>[{_h(brick.code)}]</code>\n\n"
-        "Выберите место из существующего справочника. Новое место здесь "
-        "не создаётся."
+    text = _proposal_header(
+        tr("bricks.proposal_select_place.vyberite_mesto"), step=2
+    ) + tr_safe(
+        "bricks.proposal_select_place.kirpichik_vyberite_mesto_html",
+        title=_h(brick.title),
+        code=_h(brick.code),
     )
     rows = [
         [
@@ -893,10 +931,7 @@ def _proposal_select_place_content(session: Session, user: User, state: dict):
         for place in places
     ]
     if not places:
-        text += (
-            "\n\nВ справочнике пока нет мест. Вернитесь назад и выберите "
-            "всю систему."
-        )
+        text += tr("bricks.proposal_select_place.v_spravochnike_poka_net")
     if total:
         text += "\n\n" + _proposal_page_note(offset, len(places), total)
     navigation: list[InlineKeyboardButton] = []
@@ -915,7 +950,9 @@ def _proposal_select_place_content(session: Session, user: User, state: dict):
         )
     if navigation:
         rows.append(navigation)
-    rows.append([InlineKeyboardButton("◀️ К области", callback_data="bp_back")])
+    rows.append(
+        [InlineKeyboardButton(tr("buttons.bricks.k_oblasti"), callback_data="bp_back")]
+    )
     return text, InlineKeyboardMarkup(rows)
 
 
@@ -924,7 +961,7 @@ def _proposal_preview_content(session: Session, user: User, state: dict):
     if brick is None:
         _proposal_reset_hub(
             state,
-            "Выбранный кирпичик больше недоступен. Снимок не отправлен.",
+            tr("bricks.proposal_preview.vybrannyy_kirpichik_bolshe"),
         )
         return None
     scope = state.get("proposal_scope")
@@ -938,17 +975,19 @@ def _proposal_preview_content(session: Session, user: User, state: dict):
         if details is None:
             state["phase"] = "proposal_select_place"
             _proposal_notice_after_reset(
-                state, "Место не найдено в справочнике. Выберите другое."
+                state, tr("bricks.proposal_preview.mesto_naydeno_spravochnike")
             )
             return _proposal_select_place_content(session, user, state)
-        target = f"место «{_h(details.canonical_name)}»"
+        target = tr_safe(
+            "bricks.proposal_preview.mesto", canonical_name=_h(details.canonical_name)
+        )
     elif scope == PROPOSAL_SCOPE_SYSTEM:
         place_id = None
-        target = "вся система"
+        target = tr("admin.proposal_target_label.vsya_sistema")
     else:
         state["phase"] = "proposal_scope"
         _proposal_notice_after_reset(
-            state, "Область предложения не выбрана. Выберите её заново."
+            state, tr("bricks.proposal_preview.oblast_predlozheniya_vybrana")
         )
         return _proposal_scope_content(session, user, state)
 
@@ -960,36 +999,46 @@ def _proposal_preview_content(session: Session, user: User, state: dict):
         owner_user_id=None,
         exclude_brick_id=brick.id,
     )
-    availability_text = "✅ Код в целевой области свободен."
+    availability_text = tr("bricks.proposal_preview.kod_celevoy_oblasti_svoboden")
     if not availability.available:
-        availability_text = (
-            "⚠️ <b>Отправить сейчас нельзя:</b> "
-            f"{_h(availability.message or 'код уже занят в целевой области')}.\n"
-            "Код не будет изменён автоматически. Исправьте код в личном "
-            "кирпичике или выберите другую область."
+        availability_text = tr_safe(
+            "bricks.proposal_preview.otpravit_seychas_nelzya_kod_html",
+            h=_h(
+                availability.message
+                or tr("bricks.proposal_preview.kod_uzhe_zanyat_celevoy")
+            ),
         )
 
     def build(limits: list[int]) -> str:
-        return (
-            _proposal_header("Проверьте предложение", step=3) + "\n\n"
-            f"Название: <b>{_h(brick.title)}</b>\n"
-            f"Обозначение: <code>[{_h(brick.code)}]</code>\n"
-            f"Тип: {_h(_type_title(brick.value_type))}\n"
-            f"Описание: {_description_html(brick.description, limit=limits[0])}\n"
-            f"Настройки: {_h(_settings_text(brick.value_type, brick.rules))}\n"
-            f"Цель: {target}\n\n"
-            f"{availability_text}\n\n"
-            "После отправки будет сохранён неизменяемый снимок. Последующие "
-            "правки или архивация личного кирпичика не изменят ожидающее "
-            "предложение. Исходный кирпичик не копируется и не перепривязывается."
+        return _proposal_header(
+            tr("bricks.build.proverte_predlozhenie"), step=3
+        ) + tr_safe(
+            "bricks.build.nazvanie_oboznachenie_tip_opisanie_html",
+            title=_h(brick.title),
+            code=_h(brick.code),
+            type_title=_h(_type_title(brick.value_type)),
+            description=_description_html(brick.description, limit=limits[0]),
+            settings_text=_h(_settings_text(brick.value_type, brick.rules)),
+            target=target,
+            availability_text=availability_text,
         )
 
     text = current_value.fit_screen(build, blocks=1)
     rows: list[list[InlineKeyboardButton]] = []
     if availability.available:
-        rows.append([InlineKeyboardButton("📨 Отправить", callback_data="bp_send")])
+        rows.append(
+            [
+                InlineKeyboardButton(
+                    tr("buttons.bricks.otpravit"), callback_data="bp_send"
+                )
+            ]
+        )
     scope = state.get("proposal_scope")
-    back_label = "◀️ К местам" if scope == PROPOSAL_SCOPE_PLACE else "◀️ К области"
+    back_label = (
+        tr("bricks.proposal_preview.k_mestam")
+        if scope == PROPOSAL_SCOPE_PLACE
+        else tr("buttons.bricks.k_oblasti")
+    )
     rows.append([InlineKeyboardButton(back_label, callback_data="bp_back")])
     return text, InlineKeyboardMarkup(rows)
 
@@ -1011,26 +1060,16 @@ def _proposal_list_content(session: Session, user: User, state: dict):
             limit=PROPOSAL_PAGE_SIZE,
         )
     state["proposal_page"] = offset
-    text = (
-        _proposal_header("Мои предложения") + "\n\n"
-        "Здесь хранится история ваших предложений. Ожидающие предложения "
-        "не имеют срока действия: их можно отозвать в любой момент, пока "
-        "администратор не принял решение."
+    text = _proposal_header(tr("bricks.proposal_list.moi_predlozheniya")) + tr(
+        "bricks.proposal_list.zdes_hranitsya_istoriya_vashih"
     )
     if not total:
         # U3a: у пользователя без активных кирпичиков кнопки «📨» нет —
         # подсказка ведёт к созданию кирпичика.
         if count_personal_bricks(session, user.telegram_user_id) > 0:
-            text += (
-                "\n\nВы ещё не отправляли предложений. Откройте «🧱 Кирпичики» и "
-                "нажмите «📨» в строке кирпичика, который хотите предложить."
-            )
+            text += tr("bricks.proposal_list.vy_otpravlyali_predlozheniy")
         else:
-            text += (
-                "\n\nВы ещё не отправляли предложений. Создайте кирпичик кнопкой "
-                "«➕ Создать кирпичик» в разделе «Мои кирпичики» — после этого "
-                "его можно будет предложить месту или всей системе."
-            )
+            text += tr("bricks.proposal_list.vy_otpravlyali_predlozheniy_2")
     else:
         text += "\n\n" + _proposal_page_note(offset, len(proposals), total)
     rows = keyboard_layouts.list_rows(
@@ -1061,7 +1100,13 @@ def _proposal_list_content(session: Session, user: User, state: dict):
             else None
         ),
     )
-    rows.append([InlineKeyboardButton("◀️ К кирпичикам", callback_data="bp_back")])
+    rows.append(
+        [
+            InlineKeyboardButton(
+                tr("bricks.proposal_back_label.k_kirpichikam"), callback_data="bp_back"
+            )
+        ]
+    )
     return text, InlineKeyboardMarkup(rows)
 
 
@@ -1080,68 +1125,103 @@ def _proposal_description(value: object) -> str:
 
 def _proposal_card_content(proposal: BrickProposalSnapshot):
     parts = [
-        _proposal_header("Предложение кирпичика"),
+        _proposal_header(tr("bricks.proposal_card.predlozhenie_kirpichika")),
         "",
-        f"Название: <b>{_h(proposal.title)}</b>",
-        f"Обозначение: <code>[{_h(proposal.code)}]</code>",
-        f"Тип: {_h(_type_title(proposal.value_type))}",
-        f"Описание: {_proposal_description(proposal.description)}",
-        f"Автор: {_h(proposal.author_label)}",
-        f"Цель: {_h(_proposal_target_text(proposal))}",
-        f"Статус: {_proposal_status_ui(proposal.status)}",
-        f"Настройки: {_h(_settings_text(proposal.value_type, proposal.rules))}",
-        f"Отправлено: {_proposal_date(proposal.created_at)}",
+        tr_safe("admin.proposal_admin_card.nazvanie_html", title=_h(proposal.title)),
+        tr_safe("admin.proposal_admin_card.oboznachenie_html", code=_h(proposal.code)),
+        tr_safe(
+            "bricks.proposal_card.tip", type_title=_h(_type_title(proposal.value_type))
+        ),
+        tr_safe(
+            "bricks.proposal_card.opisanie",
+            proposal_description=_proposal_description(proposal.description),
+        ),
+        tr_safe(
+            "admin.proposal_admin_card.avtor", author_label=_h(proposal.author_label)
+        ),
+        tr_safe(
+            "bricks.proposal_card.cel",
+            proposal_target_text=_h(_proposal_target_text(proposal)),
+        ),
+        tr(
+            "bricks.proposal_card.status",
+            proposal_status_ui=_proposal_status_ui(proposal.status),
+        ),
+        tr_safe(
+            "bricks.proposal_card.nastroyki",
+            settings_text=_h(_settings_text(proposal.value_type, proposal.rules)),
+        ),
+        tr(
+            "bricks.proposal_card.otpravleno",
+            proposal_date=_proposal_date(proposal.created_at),
+        ),
     ]
     if proposal.decided_at is not None:
-        parts.append(f"Решение: {_proposal_date(proposal.decided_at)}")
-    if proposal.status == PROPOSAL_STATUS_APPROVED:
         parts.append(
-            "Создан отдельный кирпичик в целевой области. Исходный личный "
-            "кирпичик не изменён."
+            tr(
+                "bricks.proposal_card.reshenie",
+                proposal_date=_proposal_date(proposal.decided_at),
+            )
         )
+    if proposal.status == PROPOSAL_STATUS_APPROVED:
+        parts.append(tr("bricks.proposal_card.sozdan_otdelnyy_kirpichik_celevoy"))
     elif proposal.status == PROPOSAL_STATUS_REJECTED:
         if proposal.decision_note:
-            parts.append(f"Причина: {_h(proposal.decision_note)}")
+            parts.append(
+                tr_safe(
+                    "admin.proposal_admin_card.prichina",
+                    decision_note=_h(proposal.decision_note),
+                )
+            )
         else:
-            parts.append("Предложение отклонено без изменения личного кирпичика.")
+            parts.append(tr("admin.proposal_admin_card.predlozhenie_otkloneno_bez"))
     elif proposal.status == PROPOSAL_STATUS_WITHDRAWN:
-        parts.append("Предложение отозвано вами и больше не ожидает решения.")
+        parts.append(tr("bricks.proposal_card.predlozhenie_otozvano_vami_bolshe"))
     else:
-        parts.append(
-            "Предложение ожидает решения. Срок действия не ограничен; "
-            "пока решение не принято, его можно отозвать."
-        )
+        parts.append(tr("bricks.proposal_card.predlozhenie_ozhidaet_resheniya"))
     parts.extend(
         [
             "",
-            "Предложение хранит снимок на момент отправки. Ваши последующие "
-            "правки личного кирпичика его не меняют.",
+            tr("bricks.proposal_card.predlozhenie_hranit_snimok_moment"),
         ]
     )
     rows = keyboard_layouts.danger_row(
-        keyboard_layouts.button("🗑 Отозвать", "bp_withdraw")
+        keyboard_layouts.button(tr("bricks.proposal_card.otozvat"), "bp_withdraw")
         if proposal.status == PROPOSAL_STATUS_PENDING
         else None
     )
-    rows.append([InlineKeyboardButton("◀️ К предложениям", callback_data="bp_back")])
+    rows.append(
+        [
+            InlineKeyboardButton(
+                tr("buttons.bricks.k_predlozheniyam"), callback_data="bp_back"
+            )
+        ]
+    )
     return "\n".join(parts), InlineKeyboardMarkup(rows)
 
 
 def _proposal_withdraw_confirm_content(proposal: BrickProposalSnapshot):
-    text = (
-        _proposal_header("Отозвать предложение?") + "\n\n"
-        f"Название: {_h(proposal.title)}\n"
-        f"Обозначение: <code>[{_h(proposal.code)}]</code>\n"
-        f"Цель: {_h(_proposal_target_text(proposal))}\n\n"
-        "После отзыва администратор больше не сможет его одобрить. Личный "
-        "кирпичик останется у вас без изменений. Новое предложение можно "
-        "будет отправить позже."
+    text = _proposal_header(
+        tr("bricks.proposal_withdraw_confirm.otozvat_predlozhenie")
+    ) + tr_safe(
+        "bricks.proposal_withdraw_confirm.nazvanie_oboznachenie_ce_html",
+        title=_h(proposal.title),
+        code=_h(proposal.code),
+        proposal_target_text=_h(_proposal_target_text(proposal)),
     )
     # Необратимое действие — отдельной строкой над безопасным «назад».
     rows = keyboard_layouts.danger_row(
-        keyboard_layouts.button("✅ Отозвать", "bp_withdraw_yes")
+        keyboard_layouts.button(
+            tr("bricks.proposal_withdraw_confirm.otozvat"), "bp_withdraw_yes"
+        )
     )
-    rows.append([InlineKeyboardButton("◀️ К карточке", callback_data="bp_back")])
+    rows.append(
+        [
+            InlineKeyboardButton(
+                tr("buttons.bricks.k_kartochke"), callback_data="bp_back"
+            )
+        ]
+    )
     return text, InlineKeyboardMarkup(rows)
 
 
@@ -1168,7 +1248,7 @@ def _proposal_content(
         if proposal is None:
             state["phase"] = "proposal_list"
             _proposal_notice_after_reset(
-                state, "Предложение не найдено или больше вам не доступно."
+                state, tr("bricks.proposal.predlozhenie_naydeno_bolshe_vam")
             )
             return _proposal_list_content(session, user, state)
         return _proposal_card_content(proposal)
@@ -1181,14 +1261,14 @@ def _proposal_content(
         if proposal is None:
             state["phase"] = "proposal_list"
             _proposal_notice_after_reset(
-                state, "Предложение не найдено или больше вам не доступно."
+                state, tr("bricks.proposal.predlozhenie_naydeno_bolshe_vam")
             )
             return _proposal_list_content(session, user, state)
         if proposal.status != PROPOSAL_STATUS_PENDING:
             state["phase"] = "proposal_card"
             _proposal_notice_after_reset(
                 state,
-                "Предложение уже не ожидает решения; отзыв невозможен.",
+                tr("bricks.proposal.predlozhenie_ozhidaet_resheniya"),
             )
             return _proposal_card_content(proposal)
         return _proposal_withdraw_confirm_content(proposal)
@@ -1200,46 +1280,59 @@ def _edit_menu_content(state: dict):
     value_type = draft.get("value_type") or ""
     description = draft.get("description") or ""
     rows = [
-        [InlineKeyboardButton("✏️ Название", callback_data="bk_edit_title")],
-        [InlineKeyboardButton("🔤 Обозначение", callback_data="bk_edit_code")],
         [
             InlineKeyboardButton(
-                "📝 Описание: есть" if description else "📝 Добавить описание",
+                tr("buttons.bricks.nazvanie"), callback_data="bk_edit_title"
+            )
+        ],
+        [
+            InlineKeyboardButton(
+                tr("buttons.bricks.oboznachenie"), callback_data="bk_edit_code"
+            )
+        ],
+        [
+            InlineKeyboardButton(
+                (
+                    tr("buttons.bricks.opisanie_est")
+                    if description
+                    else tr("buttons.bricks.dobavit_opisanie")
+                ),
                 callback_data="bk_edit_description",
             )
         ],
     ]
     if value_type in {BRICK_TYPE_NUMBER, BRICK_TYPE_CHOICE}:
         rows.append(
-            [InlineKeyboardButton("⚙️ Настройки", callback_data="bk_edit_settings")]
+            [
+                InlineKeyboardButton(
+                    tr("buttons.bricks.nastroyki"), callback_data="bk_edit_settings"
+                )
+            ]
         )
-    rows.append([InlineKeyboardButton("👁 К проверке", callback_data="bk_preview")])
-    rows.append([InlineKeyboardButton("◀️ Назад", callback_data="bk_back")])
+    rows.append(
+        [
+            InlineKeyboardButton(
+                tr("buttons.bricks.k_proverke"), callback_data="bk_preview"
+            )
+        ]
+    )
+    rows.append([InlineKeyboardButton(tr("buttons.nav.back"), callback_data="bk_back")])
 
     def build(limits: list[int]) -> str:
-        return (
-            "✏️ <b>Изменить кирпичик</b>\n\n"
-            f"Название: {_h(draft.get('title') or '—')}\n"
-            f"Обозначение: <code>[{_h(draft.get('code') or '—')}]</code>\n"
-            f"Тип: {_h(_type_title(value_type))}\n"
-            f"Описание: {_description_html(draft.get('description'), limit=limits[0])}\n"
-            f"Настройки: {_h(_settings_text(value_type, draft.get('rules') or {}))}\n\n"
-            "Тип после создания не меняется: для другого типа создайте новый "
-            "кирпичик. Идентификатор сохраняется при любых изменениях."
+        return tr_safe(
+            "bricks.build.izmenit_kirpichik_nazvanie_html",
+            h=_h(draft.get("title") or "—"),
+            h_2=_h(draft.get("code") or "—"),
+            type_title=_h(_type_title(value_type)),
+            get=_description_html(draft.get("description"), limit=limits[0]),
+            settings_text=_h(_settings_text(value_type, draft.get("rules") or {})),
         )
 
     text = current_value.fit_screen(build, blocks=1)
     return text, InlineKeyboardMarkup(rows)
 
 
-THREE_FIELDS_HINT = (
-    "Три поля кирпичика:\n"
-    "• <b>Название</b> — что человек видит в списках и на экране вопроса.\n"
-    "• <b>Обозначение</b> — короткая вставка <code>[код]</code> в шаблон "
-    "анонса.\n"
-    "• <b>Описание</b> — инструкция автору анонса: её видно при заполнении "
-    "поля."
-)
+THREE_FIELDS_HINT = tr_safe("bricks.module.tri_polya_kirpichika_nazvanie_html")
 
 
 def _title_input_content(state: dict):
@@ -1248,25 +1341,16 @@ def _title_input_content(state: dict):
     def build(limits: list[int]) -> str:
         if state.get("mode") == "edit":
             text = (
-                "✏️ <b>Название кирпичика</b>\n\n"
+                tr_safe("bricks.build.nazvanie_kirpichika_html")
                 + current_value.current_value_text(
-                    "Текущее значение", draft.get("title") or "—", limit=limits[0]
+                    tr("bricks.build.tekuschee_znachenie"),
+                    draft.get("title") or "—",
+                    limit=limits[0],
                 )
-                + "\n\n"
-                "Введите новое человекочитаемое название — то, что человек видит "
-                "в списках и на экране вопроса. Оно может повторять названия "
-                "других кирпичиков: однозначность обеспечивает техническое "
-                "обозначение."
+                + tr("bricks.build.vvedite_novoe_chelovekochitaemoe")
             )
         else:
-            text = (
-                "1️⃣ <b>Как назвать кирпичик?</b>\n\n"
-                "Например: «Ведущий мероприятия», «Формат участия» или "
-                "«Стоимость билета».\n\n"
-                "Название видно в списках и на экране вопроса — это то, что "
-                "прочитает человек, заполняющий анонс. Техническое обозначение и "
-                "описание зададим следующими шагами."
-            )
+            text = tr_safe("bricks.build.1_nazvat_kirpichik_naprimer_html")
         return text + "\n\n" + THREE_FIELDS_HINT
 
     # Название кирпичика не ограничено по длине: бюджет блока считается от
@@ -1274,7 +1358,7 @@ def _title_input_content(state: dict):
     # с подсказкой выносило экран за лимит Telegram.
     text = current_value.fit_screen(build, blocks=1)
     return text, InlineKeyboardMarkup(
-        [[InlineKeyboardButton("◀️ Назад", callback_data="bk_back")]]
+        [[InlineKeyboardButton(tr("buttons.nav.back"), callback_data="bk_back")]]
     )
 
 
@@ -1282,37 +1366,33 @@ def _code_input_content(state: dict):
     draft = _draft(state)
     code = draft.get("code") or ""
     if state.get("mode") == "edit":
-        intro = "Введите новое техническое обозначение."
+        intro = tr("bricks.code_input.vvedite_novoe_tehnicheskoe")
     else:
-        intro = (
-            "Предлагаю обозначение для будущих шаблонов. Можно согласиться "
-            "или отправить другое."
-        )
+        intro = tr("bricks.code_input.predlagayu_oboznachenie_buduschih")
     current = (
-        current_value.current_value_text("Текущее обозначение", f"[{code}]") + "\n\n"
+        current_value.current_value_text(
+            tr("bricks.code_input.tekuschee_oboznachenie"), f"[{code}]"
+        )
+        + "\n\n"
         if code
-        else "Обозначение ещё не задано.\n\n"
+        else tr("bricks.code_input.oboznachenie_zadano")
     )
-    text = (
-        "2️⃣ <b>Техническое обозначение</b>\n\n"
-        f"{intro}\n\n"
-        f"{current}"
-        "Это короткая вставка <code>[код]</code>, которую автор шаблона "
-        "пишет в тексте анонса вместо самого значения. От 2 до 64 символов: "
-        "буквы, цифры, «_» и «-». Без пробелов и квадратных скобок.\n\n"
-        "Если код уже занят, бот объяснит конфликт и попросит другой."
+    text = tr_safe(
+        "bricks.code_input.2_tehnicheskoe_oboznachenie_html",
+        intro=intro,
+        current=current,
     )
     rows: list[list[InlineKeyboardButton]] = []
     if code:
         rows.append(
             [
                 InlineKeyboardButton(
-                    f"✅ Оставить [{_short(code, 28)}]",
+                    tr("buttons.bricks.ostavit", code=_short(code, 28)),
                     callback_data="bk_accept_code",
                 )
             ]
         )
-    rows.append([InlineKeyboardButton("◀️ Назад", callback_data="bk_back")])
+    rows.append([InlineKeyboardButton(tr("buttons.nav.back"), callback_data="bk_back")])
     return text, InlineKeyboardMarkup(rows)
 
 
@@ -1324,28 +1404,23 @@ def _description_input_content(state: dict):
     def build(limits: list[int]) -> str:
         shown = (
             current_value.current_value_text(
-                "Текущее описание", current, limit=limits[0]
+                tr("bricks.build.tekuschee_opisanie"), current, limit=limits[0]
             )
             + "\n\n"
             if current
             else ""
         )
-        return (
-            "3️⃣ <b>Описание для автора анонса</b>\n\n"
-            f"{shown}"
-            "Напишите подсказку тому, кто будет заполнять это поле: что именно "
-            "указать и в каком виде. Например: «Имя и фамилия ведущего, без "
-            "должности» или «Цена в рублях, только число».\n\n"
-            "Описание видно на экране вопроса — над полем ввода. В текст "
-            "анонса оно не попадает и на шаблон не влияет.\n\n"
-            "Поле необязательное: без описания кирпичик работает как обычно."
-        )
+        return tr_safe("bricks.build.3_opisanie_avtora_anonsa_html", shown=shown)
 
     text = current_value.fit_screen(build, blocks=1)
     rows: list[list[InlineKeyboardButton]] = [
-        [InlineKeyboardButton("⏭ Без описания", callback_data="bk_skip_description")]
+        [
+            InlineKeyboardButton(
+                tr("buttons.bricks.bez_opisaniya"), callback_data="bk_skip_description"
+            )
+        ]
     ]
-    rows.append([InlineKeyboardButton("◀️ Назад", callback_data="bk_back")])
+    rows.append([InlineKeyboardButton(tr("buttons.nav.back"), callback_data="bk_back")])
     return text, InlineKeyboardMarkup(rows)
 
 
@@ -1353,10 +1428,9 @@ def _type_select_content(state: dict):
     draft = _draft(state)
     current = draft.get("value_type") or ""
     lines = [
-        "4️⃣ <b>Выберите тип кирпичика</b>",
+        tr_safe("bricks.type_select.4_vyberite_tip_kirpichika_html"),
         "",
-        "Тип определяет, какое значение будет допустимо в будущем. "
-        "Уже сохранённый тип изменить нельзя.",
+        tr("bricks.type_select.tip_opredelyaet_kakoe_znachenie"),
         "",
     ]
     for value_type in BRICK_TYPES:
@@ -1365,7 +1439,15 @@ def _type_select_content(state: dict):
             f"{_h(TYPE_UI_HINTS[value_type])}"
         )
     if current:
-        lines.extend(["", f"Сейчас выбран: <b>{_h(_type_title(current))}</b>."])
+        lines.extend(
+            [
+                "",
+                tr_safe(
+                    "bricks.type_select.seychas_vybran_html",
+                    type_title=_h(_type_title(current)),
+                ),
+            ]
+        )
     rows: list[list[InlineKeyboardButton]] = []
     for index in range(0, len(BRICK_TYPES), 2):
         row = [
@@ -1375,55 +1457,93 @@ def _type_select_content(state: dict):
             for value_type in BRICK_TYPES[index : index + 2]
         ]
         rows.append(row)
-    rows.append([InlineKeyboardButton("◀️ Назад", callback_data="bk_back")])
+    rows.append([InlineKeyboardButton(tr("buttons.nav.back"), callback_data="bk_back")])
     return "\n".join(lines), InlineKeyboardMarkup(rows)
 
 
 def _number_settings_content(state: dict):
     draft = _draft(state)
     rules = draft.get("rules") or {}
-    integer = "да" if rules.get("integer") else "нет"
-    minimum = _format_number(rules["min"]) if "min" in rules else "не задан"
-    maximum = _format_number(rules["max"]) if "max" in rules else "не задан"
-    suffix = f"«{rules['suffix']}»" if "suffix" in rules else "не задана"
-    text = (
-        "⚙️ <b>Настройки числа</b>\n\n"
-        f"Только целые: <b>{integer}</b>\n"
-        f"Минимум: <b>{_h(minimum)}</b>\n"
-        f"Максимум: <b>{_h(maximum)}</b>\n"
-        f"Подпись: <b>{_h(suffix)}</b>\n\n"
-        "Все ограничения необязательны. Это настройки определения, а не "
-        "значение для конкретного анонса."
+    integer = (
+        tr("bricks.number_settings.da")
+        if rules.get("integer")
+        else tr("bricks.description.net")
+    )
+    minimum = (
+        _format_number(rules["min"])
+        if "min" in rules
+        else tr("bricks.number_settings.ne_zadan")
+    )
+    maximum = (
+        _format_number(rules["max"])
+        if "max" in rules
+        else tr("bricks.number_settings.ne_zadan")
+    )
+    suffix = (
+        f"«{rules['suffix']}»"
+        if "suffix" in rules
+        else tr("bricks.number_settings.ne_zadana")
+    )
+    text = tr_safe(
+        "bricks.number_settings.nastroyki_chisla_tolko_celye_html",
+        integer=integer,
+        minimum=_h(minimum),
+        maximum=_h(maximum),
+        suffix=_h(suffix),
     )
     rows: list[list[InlineKeyboardButton]] = [
         [
             InlineKeyboardButton(
-                f"🔢 Только целые: {integer}", callback_data="bk_num:integer"
+                tr("buttons.bricks.tolko_celye", integer=integer),
+                callback_data="bk_num:integer",
             )
         ],
-        [InlineKeyboardButton(f"Минимум: {minimum}", callback_data="bk_num:set_min")],
-        [InlineKeyboardButton(f"Максимум: {maximum}", callback_data="bk_num:set_max")],
-        [InlineKeyboardButton(f"Подпись: {suffix}", callback_data="bk_num:set_suffix")],
+        [
+            InlineKeyboardButton(
+                tr("buttons.bricks.minimum", minimum=minimum),
+                callback_data="bk_num:set_min",
+            )
+        ],
+        [
+            InlineKeyboardButton(
+                tr("buttons.bricks.maksimum", maximum=maximum),
+                callback_data="bk_num:set_max",
+            )
+        ],
+        [
+            InlineKeyboardButton(
+                tr("buttons.bricks.podpis", suffix=suffix),
+                callback_data="bk_num:set_suffix",
+            )
+        ],
     ]
     clear_row: list[InlineKeyboardButton] = []
     if "min" in rules:
         clear_row.append(
-            InlineKeyboardButton("✖️ Минимум", callback_data="bk_num:clear_min")
+            InlineKeyboardButton(
+                tr("buttons.bricks.minimum_2"), callback_data="bk_num:clear_min"
+            )
         )
     if "max" in rules:
         clear_row.append(
-            InlineKeyboardButton("✖️ Максимум", callback_data="bk_num:clear_max")
+            InlineKeyboardButton(
+                tr("buttons.bricks.maksimum_2"), callback_data="bk_num:clear_max"
+            )
         )
     if "suffix" in rules:
         clear_row.append(
-            InlineKeyboardButton("✖️ Подпись", callback_data="bk_num:clear_suffix")
+            InlineKeyboardButton(
+                tr("buttons.bricks.podpis_2"), callback_data="bk_num:clear_suffix"
+            )
         )
     if clear_row:
         rows.append(clear_row)
     rows.append(
         [
-            InlineKeyboardButton("✅ Готово", callback_data="bk_num:done"),
-            InlineKeyboardButton("◀️ Назад", callback_data="bk_back"),
+            InlineKeyboardButton(
+                tr("buttons.wizard.gotovo"), callback_data="bk_num:done"
+            ),
+            InlineKeyboardButton(tr("buttons.nav.back"), callback_data="bk_back"),
         ]
     )
     return text, InlineKeyboardMarkup(rows)
@@ -1433,17 +1553,29 @@ def _choice_settings_content(state: dict):
     draft = _draft(state)
     rules = draft.get("rules") or {}
     choices = [str(item) for item in (rules.get("choices") or [])]
-    multiple = "да" if rules.get("multiple") else "нет"
+    multiple = (
+        tr("bricks.number_settings.da")
+        if rules.get("multiple")
+        else tr("bricks.description.net")
+    )
     if choices:
-        lines = ["", "Варианты:", *[f"• {_h(item)}" for item in choices]]
-        hint = "Нажмите вариант на клавиатуре, чтобы удалить его."
+        lines = [
+            "",
+            tr("bricks.choice_settings.varianty"),
+            *[f"• {_h(item)}" for item in choices],
+        ]
+        hint = tr("bricks.choice_settings.nazhmite_variant_klaviature_chtoby")
     else:
-        lines = ["", "Список вариантов пока пуст."]
-        hint = "Добавьте хотя бы один вариант."
+        lines = ["", tr("bricks.choice_settings.spisok_variantov_poka_pust")]
+        hint = tr("bricks.choice_settings.dobavte_hotya_by_odin")
     text = (
-        "🎛 <b>Варианты выбора</b>\n"
+        tr_safe("bricks.choice_settings.varianty_vybora_html")
         + "\n".join(lines)
-        + f"\n\nМожно выбрать несколько: <b>{multiple}</b>.\n{hint}"
+        + tr_safe(
+            "bricks.choice_settings.mozhno_vybrat_neskolko_html",
+            multiple=multiple,
+            hint=hint,
+        )
     )
     rows: list[list[InlineKeyboardButton]] = []
     for index, item in enumerate(choices):
@@ -1456,20 +1588,26 @@ def _choice_settings_content(state: dict):
             ]
         )
     rows.append(
-        [InlineKeyboardButton("➕ Добавить вариант", callback_data="bk_choice_add")]
+        [
+            InlineKeyboardButton(
+                tr("buttons.bricks.dobavit_variant"), callback_data="bk_choice_add"
+            )
+        ]
     )
     rows.append(
         [
             InlineKeyboardButton(
-                f"Можно несколько: {multiple}",
+                tr("buttons.bricks.mozhno_neskolko", multiple=multiple),
                 callback_data="bk_choice_multiple",
             )
         ]
     )
     rows.append(
         [
-            InlineKeyboardButton("✅ Готово", callback_data="bk_choice_done"),
-            InlineKeyboardButton("◀️ Назад", callback_data="bk_back"),
+            InlineKeyboardButton(
+                tr("buttons.wizard.gotovo"), callback_data="bk_choice_done"
+            ),
+            InlineKeyboardButton(tr("buttons.nav.back"), callback_data="bk_back"),
         ]
     )
     return text, InlineKeyboardMarkup(rows)
@@ -1483,26 +1621,23 @@ def _preview_content(state: dict):
     code = draft.get("code") or "—"
 
     def build(limits: list[int]) -> str:
-        text = (
-            "👁 <b>Проверьте кирпичик</b>\n\n"
-            f"Название: {_h(title)}\n"
-            f"Обозначение: <code>[{_h(code)}]</code>\n"
-            f"Тип: {_h(_type_title(value_type))}\n"
-            f"Описание: {_description_html(draft.get('description'), limit=limits[0])}\n"
-            "Область: личная (видна только вам)\n"
-            f"Настройки: {_h(_settings_text(value_type, draft.get('rules') or {}))}\n\n"
-            "После сохранения кирпичик появится в вашем списке. В посты и "
-            "шаблоны он пока не вставляется."
+        text = tr_safe(
+            "bricks.build.proverte_kirpichik_nazvanie_html",
+            title=_h(title),
+            code=_h(code),
+            type_title=_h(_type_title(value_type)),
+            get=_description_html(draft.get("description"), limit=limits[0]),
+            settings_text=_h(_settings_text(value_type, draft.get("rules") or {})),
         )
         if mode == "edit":
-            text += "\n\nТип при редактировании не меняется."
+            text += tr("bricks.build.tip_redaktirovanii_menyaetsya")
         return text
 
     text = current_value.fit_screen(build, blocks=1)
     rows = [
-        [InlineKeyboardButton("💾 Сохранить", callback_data="bk_save")],
-        [InlineKeyboardButton("✏️ Изменить", callback_data="bk_change")],
-        [InlineKeyboardButton("✖️ Отмена", callback_data="bk_cancel")],
+        [InlineKeyboardButton(tr("buttons.bricks.sohranit"), callback_data="bk_save")],
+        [InlineKeyboardButton(tr("buttons.finished.edit"), callback_data="bk_change")],
+        [InlineKeyboardButton(tr("buttons.bricks.otmena"), callback_data="bk_cancel")],
     ]
     return text, InlineKeyboardMarkup(rows)
 
@@ -1565,13 +1700,13 @@ async def _render_phase(
         page, archive_page = _saved_page(state)
         state.clear()
         state.update(_new_hub(page=page, archive_page=archive_page))
-        notice = notice or "Черновик не найден — раздел открыт заново."
+        notice = notice or tr("bricks.render_phase.chernovik_nayden_razdel_otkryt")
         phase = "hub"
     if phase in _WIZARD_PHASES and not _valid_wizard_state(state):
         page, archive_page = _saved_page(state)
         state.clear()
         state.update(_new_hub(page=page, archive_page=archive_page))
-        notice = notice or "Черновик кирпичика повреждён — начните заново."
+        notice = notice or tr("bricks.render_phase.chernovik_kirpichika_povrezhden")
         phase = "hub"
 
     session = SessionLocal()
@@ -1588,7 +1723,7 @@ async def _render_phase(
                 state.clear()
                 state.update(_new_hub(page=page, archive_page=archive_page))
                 text, keyboard = _hub_content(session, user, state)
-                notice = notice or "В архиве пока нет кирпичиков."
+                notice = notice or tr("bricks.render_phase.v_arhive_poka_net")
             else:
                 text, keyboard = content
         elif phase == "card":
@@ -1602,7 +1737,7 @@ async def _render_phase(
                 state.clear()
                 state.update(_new_hub(page=page, archive_page=archive_page))
                 text, keyboard = _hub_content(session, user, state)
-                notice = notice or "Кирпичик не найден или больше вам не доступен."
+                notice = notice or tr("bricks.render_phase.kirpichik_nayden_bolshe_vam")
             else:
                 state["revision"] = brick.revision
                 text, keyboard = _card_content(brick)
@@ -1617,12 +1752,12 @@ async def _render_phase(
                 state.clear()
                 state.update(_new_hub(page=page, archive_page=archive_page))
                 text, keyboard = _hub_content(session, user, state)
-                notice = notice or "Кирпичик не найден."
+                notice = notice or tr("bricks.render_phase.kirpichik_nayden")
             elif brick.status != BRICK_STATUS_ACTIVE:
                 state["phase"] = "card"
                 state["revision"] = brick.revision
                 text, keyboard = _card_content(brick)
-                notice = notice or "Кирпичик уже не активен."
+                notice = notice or tr("bricks.render_phase.kirpichik_aktiven")
             else:
                 state["revision"] = brick.revision
                 text, keyboard = _archive_confirm_content(brick)
@@ -1642,30 +1777,52 @@ async def _render_phase(
             draft = _draft(state)
             rules = draft.get("rules") or {}
             if phase == "number_min_input":
-                current = _format_number(rules["min"]) if "min" in rules else "не задан"
-                prompt = "Введите минимальное число или нажмите «Назад»."
+                current = (
+                    _format_number(rules["min"])
+                    if "min" in rules
+                    else tr("bricks.number_settings.ne_zadan")
+                )
+                prompt = tr("bricks.render_phase.vvedite_minimalnoe_chislo_nazhmite")
             elif phase == "number_max_input":
-                current = _format_number(rules["max"]) if "max" in rules else "не задан"
-                prompt = "Введите максимальное число или нажмите «Назад»."
+                current = (
+                    _format_number(rules["max"])
+                    if "max" in rules
+                    else tr("bricks.number_settings.ne_zadan")
+                )
+                prompt = tr("bricks.render_phase.vvedite_maksimalnoe_chislo")
             else:
-                current = f"«{rules['suffix']}»" if "suffix" in rules else "не задана"
-                prompt = "Введите подпись, например «₽» или «чел.»."
-            text = (
-                "⚙️ <b>Настройка числа</b>\n\n"
-                f"Сейчас: <b>{_h(current)}</b>\n\n{prompt}"
+                current = (
+                    f"«{rules['suffix']}»"
+                    if "suffix" in rules
+                    else tr("bricks.number_settings.ne_zadana")
+                )
+                prompt = tr("bricks.render_phase.vvedite_podpis_naprimer_chel")
+            text = tr_safe(
+                "bricks.render_phase.nastroyka_chisla_seychas_html",
+                current=_h(current),
+                prompt=prompt,
             )
             keyboard = InlineKeyboardMarkup(
-                [[InlineKeyboardButton("◀️ Назад", callback_data="bk_back")]]
+                [
+                    [
+                        InlineKeyboardButton(
+                            tr("buttons.nav.back"), callback_data="bk_back"
+                        )
+                    ]
+                ]
             )
         elif phase == "choice_settings":
             text, keyboard = _choice_settings_content(state)
         elif phase == "choice_input":
-            text = (
-                "🎛 <b>Новый вариант выбора</b>\n\n"
-                "Отправьте название варианта, например «Очно» или «Онлайн»."
-            )
+            text = tr_safe("bricks.render_phase.novyy_variant_vybora_otpravte_html")
             keyboard = InlineKeyboardMarkup(
-                [[InlineKeyboardButton("◀️ Назад", callback_data="bk_back")]]
+                [
+                    [
+                        InlineKeyboardButton(
+                            tr("buttons.nav.back"), callback_data="bk_back"
+                        )
+                    ]
+                ]
             )
         elif phase in _PROPOSAL_PHASES:
             content = _proposal_content(session, user, state)
@@ -1812,14 +1969,14 @@ async def handle_open(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
                 update,
                 context,
                 state,
-                notice="Кирпичик не найден. Возможно, он уже недоступен.",
+                notice=tr("bricks.handle_open.kirpichik_nayden_vozmozhno_on"),
             )
         else:
             await _render_phase(
                 update,
                 context,
                 state,
-                notice="Кирпичик не найден. Возможно, он уже недоступен.",
+                notice=tr("bricks.handle_open.kirpichik_nayden_vozmozhno_on"),
             )
         return
     state["phase"] = "card"
@@ -1924,10 +2081,7 @@ async def handle_proposal_start(
             update,
             context,
             state,
-            notice=(
-                "Сначала создайте личный кирпичик — затем его можно будет "
-                "предложить месту или всей системе."
-            ),
+            notice=(tr("bricks.proposal_select_brick.snachala_sozdayte_lichnyy")),
         )
         return
     if source_id is not None and brick is None:
@@ -1936,8 +2090,7 @@ async def handle_proposal_start(
             context,
             state,
             notice=(
-                "Кирпичик не найден или уже в архиве. Выберите другой "
-                "активный кирпичик."
+                tr("bricks.handle_proposal_start.kirpichik_nayden_arhive_vyberite")
             ),
         )
         return
@@ -1999,8 +2152,7 @@ async def handle_proposal_source(
             context,
             state,
             notice=(
-                "Кирпичик не найден или уже в архиве. Выберите другой "
-                "активный кирпичик."
+                tr("bricks.handle_proposal_start.kirpichik_nayden_arhive_vyberite")
             ),
         )
         return
@@ -2062,7 +2214,7 @@ async def handle_proposal_place(
             update,
             context,
             state,
-            notice="Место не найдено в справочнике. Выберите другое.",
+            notice=tr("bricks.proposal_preview.mesto_naydeno_spravochnike"),
         )
         return
     state["proposal_scope"] = PROPOSAL_SCOPE_PLACE
@@ -2118,7 +2270,7 @@ async def handle_proposal_send(
             update,
             context,
             state,
-            notice="Данные предложения устарели. Выберите кирпичик заново.",
+            notice=tr("bricks.handle_proposal_send.dannye_predlozheniya_ustareli"),
         )
         return
     session = SessionLocal()
@@ -2147,10 +2299,7 @@ async def handle_proposal_send(
         update,
         context,
         state,
-        notice=(
-            "Предложение отправлено на рассмотрение. Снимок сохранён; "
-            "исходный кирпичик не изменён."
-        ),
+        notice=(tr("bricks.handle_proposal_send.predlozhenie_otpravleno")),
     )
 
 
@@ -2178,7 +2327,7 @@ async def handle_proposal_open_own(
             update,
             context,
             state,
-            notice="Предложение не найдено или больше вам не доступно.",
+            notice=tr("bricks.proposal.predlozhenie_naydeno_bolshe_vam"),
         )
         return
     state["proposal_id"] = proposal.id
@@ -2232,7 +2381,8 @@ async def handle_proposal_withdraw_confirm(
             update,
             context,
             state,
-            notice=result.message or "Предложение не найдено.",
+            notice=result.message
+            or tr("admin.handle_brick_proposal.predlozhenie_naydeno"),
         )
         return
     if result.status == "error":
@@ -2240,7 +2390,8 @@ async def handle_proposal_withdraw_confirm(
             update,
             context,
             state,
-            notice=result.message or "Не удалось отозвать предложение.",
+            notice=result.message
+            or tr("bricks.handle_proposal_withdraw.ne_udalos_otozvat_predlozhenie"),
         )
         return
     state["phase"] = "proposal_card"
@@ -2250,7 +2401,8 @@ async def handle_proposal_withdraw_confirm(
         update,
         context,
         state,
-        notice=result.message or "Статус предложения обновлён.",
+        notice=result.message
+        or tr("bricks.handle_proposal_withdraw.status_predlozheniya_obnovlen"),
     )
 
 
@@ -2393,7 +2545,7 @@ async def _cancel_preview(
             update,
             context,
             state,
-            notice="Изменения отменены. Данные кирпичика не изменены.",
+            notice=tr("bricks.cancel_preview.izmeneniya_otmeneny_dannye"),
             cleanup_ids=cleanup,
         )
         return
@@ -2403,7 +2555,7 @@ async def _cancel_preview(
         update,
         context,
         state,
-        notice="Создание отменено. В базе ничего не сохранено.",
+        notice=tr("bricks.cancel_preview.sozdanie_otmeneno_baze_nichego"),
         cleanup_ids=cleanup,
     )
 
@@ -2423,23 +2575,25 @@ async def handle_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
 def _parse_number(raw: str) -> int | float:
     text = raw.strip().replace(" ", "").replace(",", ".")
     if not text:
-        raise BrickValidationError("Введите число.")
+        raise BrickValidationError(tr("bricks.parse_number.vvedite_chislo"))
     try:
         value = Decimal(text)
     except (InvalidOperation, ValueError) as exc:
         raise BrickValidationError(
-            "Это не число. Введите число без лишних символов."
+            tr("bricks.parse_number.eto_ne_chislo_vvedite")
         ) from exc
     if not value.is_finite():
-        raise BrickValidationError("Число должно быть конечным.")
+        raise BrickValidationError(tr("bricks.parse_number.chislo_konechnym"))
     if value == value.to_integral_value():
         try:
             return int(value)
         except (OverflowError, ValueError) as exc:
-            raise BrickValidationError("Число слишком велико.") from exc
+            raise BrickValidationError(
+                tr("bricks.parse_number.chislo_slishkom")
+            ) from exc
     result = float(value)
     if result == float("inf") or result == float("-inf"):
-        raise BrickValidationError("Число слишком велико.")
+        raise BrickValidationError(tr("bricks.parse_number.chislo_slishkom"))
     return result
 
 
@@ -2488,8 +2642,8 @@ async def handle_brick_text(update: Update, context: ContextTypes.DEFAULT_TYPE) 
                 )
                 if not available.available:
                     notice = (
-                        available.message or "Код уже используется."
-                    ) + " Введите другое обозначение."
+                        available.message or tr("bricks.handle_brick.kod_ispolzuetsya")
+                    ) + tr("bricks.handle_brick.vvedite_drugoe_oboznachenie")
                 else:
                     draft["code"] = available.code or validated
                     state["phase"] = (
@@ -2523,8 +2677,7 @@ async def handle_brick_text(update: Update, context: ContextTypes.DEFAULT_TYPE) 
                 if key == "suffix":
                     if not raw:
                         raise BrickValidationError(
-                            "Подпись не может быть пустой. Используйте «✖️ Подпись» "
-                            "на экране настроек, чтобы убрать её."
+                            tr("bricks.number_settings.podpis_ne_mozhet_byt")
                         )
                     rules["suffix"] = raw
                 else:
@@ -2541,9 +2694,13 @@ async def handle_brick_text(update: Update, context: ContextTypes.DEFAULT_TYPE) 
             try:
                 value = " ".join(raw.split())
                 if not value:
-                    raise BrickValidationError("Вариант не может быть пустым.")
+                    raise BrickValidationError(
+                        tr("bricks.choice_settings.variant_ne_mozhet_byt")
+                    )
                 if value in choices:
-                    raise BrickValidationError("Такой вариант уже есть.")
+                    raise BrickValidationError(
+                        tr("bricks.choice_settings.takoy_variant_uzhe_est")
+                    )
                 choices.append(value)
                 rules["choices"] = choices
                 draft["rules"] = parse_rules(draft.get("value_type") or "", rules)
@@ -2603,7 +2760,7 @@ async def handle_accept_code(
             update,
             context,
             state,
-            notice="Не удалось проверить код из-за ошибки базы. Повторите.",
+            notice=tr("bricks.handle_accept_code.ne_udalos_proverit_kod"),
             cleanup_ids=_failed_take(state),
         )
         return
@@ -2612,8 +2769,8 @@ async def handle_accept_code(
             update,
             context,
             state,
-            notice=(available.message or "Код уже используется.")
-            + " Введите другое обозначение.",
+            notice=(available.message or tr("bricks.handle_brick.kod_ispolzuetsya"))
+            + tr("bricks.handle_brick.vvedite_drugoe_oboznachenie"),
             cleanup_ids=_failed_take(state),
         )
         return
@@ -2782,7 +2939,7 @@ async def handle_choice_settings(
                 update,
                 context,
                 state,
-                notice="Добавьте хотя бы один вариант выбора.",
+                notice=tr("bricks.handle_choice_settings.dobavte_hotya_by_odin"),
                 cleanup_ids=_failed_take(state),
             )
             return
@@ -2832,7 +2989,7 @@ async def handle_edit(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             update,
             context,
             state,
-            notice="Кирпичик не найден. Обновите список.",
+            notice=tr("bricks.handle_edit.kirpichik_nayden_obnovite_spisok"),
             cleanup_ids=_failed_take(state),
         )
         return
@@ -2842,7 +2999,7 @@ async def handle_edit(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             update,
             context,
             state,
-            notice="Архивный кирпичик нельзя редактировать. Сначала восстановите его.",
+            notice=tr("bricks.handle_edit.arhivnyy_kirpichik_nelzya"),
             cleanup_ids=_failed_take(state),
         )
         return
@@ -2941,7 +3098,7 @@ async def _handle_create_save(
                     context,
                     state,
                     notice=(available.message or str(exc))
-                    + " Введите другое обозначение.",
+                    + tr("bricks.handle_brick.vvedite_drugoe_oboznachenie"),
                     cleanup_ids=_failed_take(state),
                 )
             else:
@@ -2950,8 +3107,7 @@ async def _handle_create_save(
                     context,
                     state,
                     notice=(
-                        "Не удалось сохранить кирпичик из-за ошибки базы. "
-                        "Данные не записаны; повторите сохранение."
+                        tr("bricks.handle_create_save.ne_udalos_sohranit_kirpichik")
                     ),
                     cleanup_ids=_failed_take(state),
                 )
@@ -2963,10 +3119,7 @@ async def _handle_create_save(
                 update,
                 context,
                 state,
-                notice=(
-                    "Не удалось сохранить кирпичик из-за ошибки базы. "
-                    "Данные не записаны; повторите сохранение."
-                ),
+                notice=(tr("bricks.handle_create_save.ne_udalos_sohranit_kirpichik")),
                 cleanup_ids=_failed_take(state),
             )
             return
@@ -2981,8 +3134,11 @@ async def _handle_create_save(
         context,
         state,
         notice=(
-            f"Кирпичик «{_h(brick.title)}» создан. "
-            f"Обозначение: <code>[{_h(brick.code)}]</code>."
+            tr_safe(
+                "bricks.handle_create_save.kirpichik_sozdan_oboznachenie_html",
+                title=_h(brick.title),
+                code=_h(brick.code),
+            )
         ),
         drop_input=True,
     )
@@ -3027,10 +3183,7 @@ async def _handle_edit_save(
                 update,
                 context,
                 state,
-                notice=(
-                    "Не удалось сохранить изменения из-за ошибки базы. "
-                    "Данные не изменены; повторите попытку."
-                ),
+                notice=(tr("bricks.handle_edit_save.ne_udalos_sohranit_izmeneniya")),
                 cleanup_ids=_failed_take(state),
             )
             return
@@ -3048,7 +3201,7 @@ async def _handle_edit_save(
             update,
             context,
             state,
-            notice="Изменения сохранены.",
+            notice=tr("bricks.handle_edit_save.izmeneniya_sohraneny"),
             drop_input=True,
         )
         return
@@ -3058,8 +3211,8 @@ async def _handle_edit_save(
             update,
             context,
             state,
-            notice=(result.message or "Код уже используется.")
-            + " Введите другое обозначение.",
+            notice=(result.message or tr("bricks.handle_brick.kod_ispolzuetsya"))
+            + tr("bricks.handle_brick.vvedite_drugoe_oboznachenie"),
             cleanup_ids=_failed_take(state),
         )
         return
@@ -3076,7 +3229,8 @@ async def _handle_edit_save(
             update,
             context,
             state,
-            notice=result.message or "Кирпичик изменился. Откройте его заново.",
+            notice=result.message
+            or tr("bricks.handle_edit_save.kirpichik_izmenilsya_otkroyte_ego"),
             cleanup_ids=_failed_take(state),
         )
         return
@@ -3091,7 +3245,7 @@ async def _handle_edit_save(
             update,
             context,
             state,
-            notice=result.message or "Кирпичик недоступен.",
+            notice=result.message or tr("bricks.handle_edit_save.kirpichik_nedostupen"),
             cleanup_ids=_failed_take(state),
         )
         return
@@ -3100,7 +3254,7 @@ async def _handle_edit_save(
         update,
         context,
         state,
-        notice="Не удалось определить результат сохранения. Откройте карточку заново.",
+        notice=tr("bricks.handle_edit_save.ne_udalos_opredelit_rezultat"),
         cleanup_ids=_failed_take(state),
     )
 
@@ -3139,7 +3293,7 @@ async def handle_archive(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             update,
             context,
             state,
-            notice="Кирпичик не найден. Обновите список.",
+            notice=tr("bricks.handle_edit.kirpichik_nayden_obnovite_spisok"),
             cleanup_ids=_failed_take(state),
         )
         return
@@ -3149,7 +3303,7 @@ async def handle_archive(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             update,
             context,
             state,
-            notice="Кирпичик уже находится в архиве.",
+            notice=tr("bricks.handle_archive.kirpichik_nahoditsya_arhive"),
             cleanup_ids=_failed_take(state),
         )
         return
@@ -3185,8 +3339,7 @@ async def handle_archive_confirm(
                 context,
                 state,
                 notice=(
-                    "Не удалось переместить кирпичик в архив из-за ошибки базы. "
-                    "Кирпичик не изменён."
+                    tr("bricks.handle_archive_confirm.ne_udalos_peremestit_kirpichik")
                 ),
                 cleanup_ids=_failed_take(state),
             )
@@ -3208,9 +3361,9 @@ async def handle_archive_confirm(
         state,
         notice=result.message
         or (
-            "Кирпичик перемещён в архив."
+            tr("bricks.handle_archive_confirm.kirpichik_peremeschen_arhiv")
             if result.status in {"archived", "already_archived"}
-            else "Кирпичик недоступен."
+            else tr("bricks.handle_edit_save.kirpichik_nedostupen")
         ),
         cleanup_ids=_failed_take(state),
     )
@@ -3239,10 +3392,7 @@ async def handle_restore(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
                 update,
                 context,
                 state,
-                notice=(
-                    "Не удалось восстановить кирпичик из-за ошибки базы. "
-                    "Кирпичик остался в архиве."
-                ),
+                notice=(tr("bricks.handle_restore.ne_udalos_vosstanovit_kirpichik")),
                 cleanup_ids=_failed_take(state),
             )
             return
@@ -3263,9 +3413,9 @@ async def handle_restore(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         state,
         notice=result.message
         or (
-            "Кирпичик восстановлен."
+            tr("bricks.handle_restore.kirpichik_vosstanovlen")
             if result.status in {"restored", "already_active"}
-            else "Кирпичик недоступен."
+            else tr("bricks.handle_edit_save.kirpichik_nedostupen")
         ),
         cleanup_ids=_failed_take(state),
     )
@@ -3345,7 +3495,7 @@ async def handle_brick_stray_text(
         update,
         context,
         state,
-        notice="Этот экран работает кнопками — выберите действие.",
+        notice=tr("bricks.handle_brick_stray.etot_ekran_rabotaet_knopkami"),
         drop_input=True,
     )
 

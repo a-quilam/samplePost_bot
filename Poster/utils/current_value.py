@@ -34,6 +34,7 @@ from __future__ import annotations
 from collections.abc import Callable
 
 from utils.tg_html import escape_html, split_html, utf16_len
+from utils.ui_texts import tr
 
 # Разделитель значения: визуальная рамка без разметки Telegram, поэтому
 # его вид одинаков в любом клиенте и не занимает заметную часть лимита.
@@ -66,12 +67,9 @@ MIN_VALUE_LIMIT = 200
 
 # Пометка о том, что показано только начало значения. Полное значение
 # остаётся в базе и в анонсе — об этом сказано прямо.
-TRUNCATED_NOTE = (
-    "… Показано начало значения: экран Telegram ограничен 4096 символами, "
-    "полное значение сохранено."
-)
+TRUNCATED_NOTE = tr("screen.module.pokazano_nachalo_znacheniya_ekran")
 
-EMPTY = "— пусто —"
+EMPTY = tr("templates.value_block.pusto")
 
 
 def _clip_safe(value: str, limit: int) -> tuple[str, bool]:

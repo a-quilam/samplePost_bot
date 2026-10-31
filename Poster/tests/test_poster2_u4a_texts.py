@@ -91,16 +91,26 @@ class CatalogFileTests(unittest.TestCase):
 
         Если такая строка стоит в Python-коде, правка YAML оставляет на
         экране старый текст — владелец правит файл и не видит эффекта.
-        Проверяются экраны, переведённые на каталог: места, конструктор и
-        обработчик ошибок.
+        Проверяются все экраны, переведённые на каталог (H4: включая
+        администрирование, кирпичики, шаблоны и запуск бота).
         """
         import ast
 
         root = CATALOG_PATH.parent.parent
         sources = [
-            root / "handlers" / "places.py",
+            root / "handlers" / "admin.py",
             root / "handlers" / "announcement_wizard.py",
+            root / "handlers" / "bricks.py",
+            root / "handlers" / "places.py",
+            root / "handlers" / "templates.py",
+            root / "handlers" / "wizard_questions.py",
+            root / "handlers" / "wizard_photos.py",
+            root / "handlers" / "main_menu.py",
+            root / "bot.py",
             root / "errors.py",
+            root / "utils" / "calendar_view.py",
+            root / "utils" / "current_value.py",
+            root / "utils" / "screen.py",
         ]
         default_values = {
             value
@@ -122,6 +132,45 @@ class CatalogFileTests(unittest.TestCase):
             "литералы дублируют каталог и не меняются через YAML: "
             + "; ".join(duplicates),
         )
+
+    def test_calendar_labels_come_from_catalog(self) -> None:
+        """H4: дни недели и месяцы календаря — строки каталога, не литералы."""
+        from utils import calendar_view
+
+        weekdays = [
+            ui_texts.DEFAULTS[f"calendar.weekday.{name}"]
+            for name in (
+                "pn",
+                "vt",
+                "sr",
+                "cht",
+                "pt",
+                "sb",
+                "vs",
+            )
+        ]
+        self.assertEqual(list(calendar_view.WEEKDAYS_SHORT), weekdays)
+        for number, name in enumerate(
+            (
+                "yanvar",
+                "fevral",
+                "mart",
+                "aprel",
+                "may",
+                "iyun",
+                "iyul",
+                "avgust",
+                "sentyabr",
+                "oktyabr",
+                "noyabr",
+                "dekabr",
+            ),
+            start=1,
+        ):
+            self.assertEqual(
+                calendar_view.MONTH_NAMES[number],
+                ui_texts.DEFAULTS[f"calendar.month.{name}"],
+            )
 
     def test_required_keys_are_marked(self) -> None:
         for key in ("menu.main", "menu.manage", "help.text_html"):

@@ -163,14 +163,14 @@ from template_state import clear_template_session
 from user_store import get_or_create_user
 from utils import current_value, screen
 from utils import tg_context as ctx
-from utils.ui_texts import tr
+from utils.ui_texts import tr, tr_safe
 
 logger = logging.getLogger(__name__)
 
 BUTTON_TEXT_LIMIT = 60
 STALE_TEXT = tr("errors.stale.admin")
-DENIED_TEXT = "Раздел доступен только администраторам Poster."
-DENIED_ALERT = "Доступ к административному разделу закрыт."
+DENIED_TEXT = tr("admin.module.razdel_dostupen_tolko")
+DENIED_ALERT = tr("admin.module.dostup_administrativnomu_razdelu")
 
 PHASES = {
     "places",
@@ -302,7 +302,7 @@ def _safe_link(url: str | None, *, limit: int | None = None) -> str:
     Отсутствующая ссылка показывается текстом «Не указана».
     """
     if not url:
-        return "Не указана"
+        return tr("admin.safe_link.ne_ukazana")
     if url.lower().startswith(("http://", "https://")) and len(url) <= LINK_HREF_LIMIT:
         return f'<a href="{_h(url)}">{_h(url)}</a>'
     return current_value.clipped_text(
@@ -327,7 +327,10 @@ def _user_label(user: AdminUser, *, with_id: bool = False) -> str:
     else:
         base = f"ID {user.telegram_user_id}"
     if with_id:
-        base += f"\nПостоянный Telegram user ID: {user.telegram_user_id}"
+        base += tr(
+            "admin.user_label.postoyannyy_telegram_user_id",
+            telegram_user_id=user.telegram_user_id,
+        )
     return base
 
 
@@ -351,7 +354,10 @@ def _transfer_user_label(user: TransferUser, *, with_id: bool = False) -> str:
     else:
         base = f"ID {user.telegram_user_id}"
     if with_id:
-        base += f"\nПостоянный Telegram user ID: {user.telegram_user_id}"
+        base += tr(
+            "admin.user_label.postoyannyy_telegram_user_id",
+            telegram_user_id=user.telegram_user_id,
+        )
     return base
 
 
@@ -361,21 +367,15 @@ def _transfer_username_content(
     initiator = (
         _h(_user_label(active_admin, with_id=True))
         if active_admin is not None
-        else "текущий администратор"
+        else tr("admin.transfer_username.tekuschiy_administrator")
     )
-    text = (
-        "🔁 Передача администрации места\n\n"
-        f"📍 {_h(details.canonical_name)}\n"
-        f"Инициатор: {initiator}\n\n"
-        "Передача лишит вас полномочий на это место только после того, как "
-        "получатель подтвердит предложение в своём аккаунте. До этого вы "
-        "остаётесь администратором и можете отменить передачу.\n\n"
-        "Введите @username получателя. Username — только подсказка: если "
-        "человек уже известен боту, вы выберете его по постоянному Telegram "
-        "user ID. Если нет — бот создаст одноразовую ссылку-приглашение."
+    text = tr_safe(
+        "admin.transfer_username.peredacha_administracii_mesta",
+        canonical_name=_h(details.canonical_name),
+        initiator=initiator,
     )
     keyboard = InlineKeyboardMarkup(
-        [[InlineKeyboardButton("◀️ Назад", callback_data="adm_cancel")]]
+        [[InlineKeyboardButton(tr("buttons.nav.back"), callback_data="adm_cancel")]]
     )
     return text, keyboard
 
@@ -384,12 +384,10 @@ def _transfer_candidates_content(
     details: PlaceDetails, candidates: tuple[TransferUser, ...], state: dict
 ) -> tuple[str, InlineKeyboardMarkup]:
     username = _h(str(state.get("transfer_username") or ""))
-    text = (
-        "👤 Найдено несколько известных пользователей\n\n"
-        f"📍 {_h(details.canonical_name)}\n"
-        f"Username: @{username}\n\n"
-        "Одинаковый username не позволяет надёжно выбрать человека. "
-        "Укажите конкретного получателя по постоянному Telegram user ID:"
+    text = tr_safe(
+        "admin.transfer_candidates.naydeno_neskolko_izvestnyh",
+        canonical_name=_h(details.canonical_name),
+        username=username,
     )
     rows: list[list[InlineKeyboardButton]] = []
     for index, user in enumerate(candidates, start=1):
@@ -405,7 +403,9 @@ def _transfer_candidates_content(
                 )
             ]
         )
-    rows.append([InlineKeyboardButton("◀️ Назад", callback_data="adm_cancel")])
+    rows.append(
+        [InlineKeyboardButton(tr("buttons.nav.back"), callback_data="adm_cancel")]
+    )
     return text, InlineKeyboardMarkup(rows)
 
 
@@ -425,24 +425,25 @@ def _transfer_known_confirm_content(
         full_name=target_row.full_name,
     )
     active = get_active_place_admin(session, details.place_id)
-    text = (
-        "📨 Подтвердите создание предложения\n\n"
-        f"📍 {_h(details.canonical_name)}\n"
-        f"От: {_h(_user_label(active.user, with_id=True)) if active else '—'}\n"
-        f"Получатель: {_h(_transfer_user_label(target, with_id=True))}\n\n"
-        "Получатель уже известен боту, поэтому предложение будет привязано к "
-        "его постоянному Telegram user ID, а не к username. Права перейдут "
-        "только после его подтверждения; до этого вы остаётесь "
-        "администратором. Предложение действует 24 часа."
+    text = tr_safe(
+        "admin.transfer_known_confirm.podtverdite_sozdanie_predlozheniy",
+        canonical_name=_h(details.canonical_name),
+        user_label=_h(_user_label(active.user, with_id=True)) if active else "—",
+        transfer_user_label=_h(_transfer_user_label(target, with_id=True)),
     )
     return text, InlineKeyboardMarkup(
         [
             [
                 InlineKeyboardButton(
-                    "✅ Создать предложение", callback_data="adm_transfer_confirm"
+                    tr("buttons.admin.sozdat_predlozhenie"),
+                    callback_data="adm_transfer_confirm",
                 )
             ],
-            [InlineKeyboardButton("❌ Отмена", callback_data="adm_cancel")],
+            [
+                InlineKeyboardButton(
+                    tr("buttons.admin.otmena"), callback_data="adm_cancel"
+                )
+            ],
         ]
     )
 
@@ -451,28 +452,24 @@ def _transfer_invite_confirm_content(
     details: PlaceDetails, state: dict
 ) -> tuple[str, InlineKeyboardMarkup]:
     username = _h(str(state.get("transfer_username") or ""))
-    text = (
-        "🔗 Получатель пока не известен боту\n\n"
-        f"📍 {_h(details.canonical_name)}\n"
-        f"Username: @{username}\n\n"
-        "По одному username нельзя достоверно определить Telegram user ID: "
-        "username можно сменить, а освободившийся — занять другому человеку. "
-        "Автоматической передачи по username не будет.\n\n"
-        "Бот создаст одноразовую ссылку-приглашение на 24 часа. Открывший её "
-        "пользователь станет лишь кандидатом: вы увидите его постоянный "
-        "Telegram user ID и должны будете явно утвердить его. Только после "
-        "этого получатель сможет подтвердить передачу.\n\n"
-        "Права до подтверждения получателя остаются у вас."
+    text = tr_safe(
+        "admin.transfer_invite_confirm.poluchatel_poka_izvesten_botu",
+        canonical_name=_h(details.canonical_name),
+        username=username,
     )
     return text, InlineKeyboardMarkup(
         [
             [
                 InlineKeyboardButton(
-                    "🔗 Создать ссылку-приглашение",
+                    tr("buttons.admin.sozdat_ssylku_priglashenie"),
                     callback_data="adm_transfer_confirm",
                 )
             ],
-            [InlineKeyboardButton("❌ Отмена", callback_data="adm_cancel")],
+            [
+                InlineKeyboardButton(
+                    tr("buttons.admin.otmena"), callback_data="adm_cancel"
+                )
+            ],
         ]
     )
 
@@ -492,64 +489,56 @@ def _transfer_outgoing_content(
     if view is None:
         return None
 
-    text = (
-        "📨 Передача администрации\n\n"
-        f"📍 {_h(details.canonical_name)}\n"
-        f"Статус: {_h(transfer_status_label(view.status))}\n"
-        f"Действует до: {_h(_transfer_expiry_label(view))}\n"
-        f"Инициатор: {_h(_transfer_user_label(view.from_user))}\n"
+    text = tr_safe(
+        "admin.transfer_outgoing.peredacha_administracii_status",
+        canonical_name=_h(details.canonical_name),
+        transfer_status_label=_h(transfer_status_label(view.status)),
+        transfer_expiry_label=_h(_transfer_expiry_label(view)),
+        transfer_user_label=_h(_transfer_user_label(view.from_user)),
     )
     if view.to_user is not None:
-        text += (
-            "Получатель: " f"{_h(_transfer_user_label(view.to_user, with_id=True))}\n"
+        text += tr_safe(
+            "admin.transfer_outgoing.poluchatel",
+            transfer_user_label=_h(_transfer_user_label(view.to_user, with_id=True)),
         )
     else:
-        text += f"Username в приглашении: @{_h(view.to_username or '—')}\n"
+        text += tr_safe(
+            "admin.transfer_outgoing.username_priglashenii",
+            h=_h(view.to_username or "—"),
+        )
         if view.opened_by is not None:
-            text += (
-                "Ссылку открыл: "
-                f"{_h(_transfer_user_label(view.opened_by, with_id=True))}\n\n"
-                "Это ещё не передача прав. Проверьте, что открывший — нужный "
-                "вам человек, и утвердите его как получателя."
+            text += tr_safe(
+                "admin.transfer_outgoing.ssylku_otkryl_peredacha_prav",
+                transfer_user_label=_h(
+                    _transfer_user_label(view.opened_by, with_id=True)
+                ),
             )
         else:
-            text += (
-                "\nСсылку пока никто не открыл. Отправьте её получателю сами: "
-                "бот не может первым написать незнакомому человеку."
-            )
+            text += tr("admin.transfer_outgoing.ssylku_poka_nikto_otkryl")
 
     if invite_url:
-        text += (
-            "\n\n🔗 Одноразовая ссылка-приглашение:\n"
-            f"{_safe_link(invite_url)}\n\n"
-            "Ссылка показывается только сейчас и хранится в базе лишь в виде "
-            "хеша. Если вы её потеряли, отмените предложение и создайте новое."
+        text += tr_safe(
+            "admin.transfer_outgoing.odnorazovaya_ssylka_priglashenie",
+            invite_url=_safe_link(invite_url),
         )
     elif view.has_invite_token and view.to_user is None:
-        text += (
-            "\n\nСсылка-приглашение была показана один раз при создании. "
-            "Восстановить её из базы нельзя; если она потеряна, отмените "
-            "предложение и создайте новое."
-        )
+        text += tr("admin.transfer_outgoing.ssylka_priglashenie_byla_pokazana")
 
     if view.awaiting_recipient:
-        text += (
-            "\n\nПолучатель известен, но ещё не подтвердил передачу. "
-            "Права остаются у вас."
-        )
+        text += tr("admin.transfer_outgoing.poluchatel_izvesten_no_podtverdil")
         if view.notified_at is None:
-            text += " Доставка уведомления получателю не подтверждена."
+            text += tr("admin.transfer_outgoing.dostavka_uvedomleniya_poluchatelyu")
     elif view.awaiting_initiator_approval:
-        text += "\n\nОжидается ваше утверждение кандидата."
+        text += tr("admin.transfer_outgoing.ozhidaetsya_vashe_utverzhdenie")
     else:
-        text += "\n\nПрава остаются у вас до подтверждения получателем."
+        text += tr("admin.transfer_outgoing.prava_ostayutsya_u_podtverzhdeniya")
 
     rows: list[list[InlineKeyboardButton]] = []
     if view.awaiting_initiator_approval:
         rows.append(
             [
                 InlineKeyboardButton(
-                    "✅ Утвердить получателя",
+                    tr("buttons.admin.utverdit_poluchatelya"),
                     callback_data=f"adm_transfer_approve:{view.transfer_id}",
                 )
             ]
@@ -558,7 +547,7 @@ def _transfer_outgoing_content(
         rows.append(
             [
                 InlineKeyboardButton(
-                    "🔔 Уведомить получателя ещё раз",
+                    tr("buttons.admin.uvedomit_poluchatelya_raz"),
                     callback_data=f"adm_transfer_notify:{view.transfer_id}",
                 )
             ]
@@ -566,7 +555,7 @@ def _transfer_outgoing_content(
     rows.append(
         [
             InlineKeyboardButton(
-                "🔄 Обновить статус",
+                tr("buttons.admin.obnovit_status"),
                 callback_data=f"adm_transfer_refresh:{details.place_id}",
             )
         ]
@@ -574,25 +563,23 @@ def _transfer_outgoing_content(
     rows.append(
         [
             InlineKeyboardButton(
-                "❌ Отменить передачу",
+                tr("buttons.admin.otmenit_peredachu"),
                 callback_data=f"adm_transfer_cancel:{view.transfer_id}",
             )
         ]
     )
-    rows.append([InlineKeyboardButton("◀️ Назад", callback_data="adm_cancel")])
+    rows.append(
+        [InlineKeyboardButton(tr("buttons.nav.back"), callback_data="adm_cancel")]
+    )
     return text, InlineKeyboardMarkup(rows)
 
 
 def _transfer_offer_text(view: TransferView) -> str:
-    return (
-        "📨 Вам предлагают администрирование места\n\n"
-        f"📍 {_h(view.place_name)}\n"
-        f"От: {_h(_transfer_user_label(view.from_user, with_id=True))}\n"
-        f"Действует до: {_h(_transfer_expiry_label(view))}\n\n"
-        "Если вы подтвердите, вы станете администратором этого места, а "
-        "отправитель потеряет полномочия. До подтверждения права остаются "
-        "у отправителя. Подтверждение действует только в вашем аккаунте "
-        "Telegram."
+    return tr_safe(
+        "admin.transfer_offer.vam_predlagayut_administrirovanie",
+        place_name=_h(view.place_name),
+        transfer_user_label=_h(_transfer_user_label(view.from_user, with_id=True)),
+        transfer_expiry_label=_h(_transfer_expiry_label(view)),
     )
 
 
@@ -601,17 +588,21 @@ def _transfer_offer_keyboard(view: TransferView) -> InlineKeyboardMarkup:
         [
             [
                 InlineKeyboardButton(
-                    "✅ Подтверждаю",
+                    tr("buttons.admin.podtverzhdayu"),
                     callback_data=f"adm_transfer_accept:{view.transfer_id}",
                 )
             ],
             [
                 InlineKeyboardButton(
-                    "❌ Отклонить",
+                    tr("buttons.admin.otklonit"),
                     callback_data=f"adm_transfer_decline:{view.transfer_id}",
                 )
             ],
-            [InlineKeyboardButton("🏠 Главное меню", callback_data="main_menu")],
+            [
+                InlineKeyboardButton(
+                    tr("buttons.admin.glavnoe_menyu"), callback_data="main_menu"
+                )
+            ],
         ]
     )
 
@@ -621,34 +612,32 @@ def _incoming_transfer_content(
 ) -> tuple[str, InlineKeyboardMarkup]:
     """Экран получателя после открытия ссылки или нажатия кнопки."""
     menu = InlineKeyboardMarkup(
-        [[InlineKeyboardButton("🏠 Главное меню", callback_data="main_menu")]]
+        [
+            [
+                InlineKeyboardButton(
+                    tr("buttons.admin.glavnoe_menyu"), callback_data="main_menu"
+                )
+            ]
+        ]
     )
     if view is None or status == "invalid_invite":
         return (
-            "🔗 Ссылка-приглашение недействительна\n\n"
-            "Проверьте, что ссылка скопирована полностью и не изменена. "
-            "Попросите инициатора создать новое приглашение.",
+            tr("admin.incoming_transfer.ssylka_priglashenie_nedeystvitelna"),
             menu,
         )
     if status == "self":
         return (
-            "🔁 Это ваша собственная ссылка-приглашение\n\n"
-            "Передать админку самому себе нельзя. Отправьте ссылку другому "
-            "человеку.",
+            tr("admin.incoming_transfer.eto_sobstvennaya_ssylka"),
             menu,
         )
     if status == "opened_by_other":
         return (
-            "🔗 Ссылка уже открыта другим аккаунтом\n\n"
-            "Приглашение нельзя перепривязать к другому человеку. Попросите "
-            "инициатора отменить его и создать новую ссылку.",
+            tr("admin.incoming_transfer.ssylka_otkryta_drugim_akkauntom"),
             menu,
         )
     if status == "not_recipient":
         return (
-            "🔒 Предложение адресовано другому пользователю\n\n"
-            "Подтвердить передачу может только получатель, выбранный "
-            "инициатором.",
+            tr("admin.incoming_transfer.predlozhenie_adresovano_drugomu"),
             menu,
         )
     if status == "approved" or (
@@ -660,62 +649,64 @@ def _incoming_transfer_content(
     if view.status == STATUS_PENDING and view.opened_by is not None:
         if view.opened_by.telegram_user_id == viewer_telegram_user_id:
             return (
-                "✅ Приглашение открыто\n\n"
-                f"📍 {_h(view.place_name)}\n"
-                f"От: {_h(_transfer_user_label(view.from_user, with_id=True))}\n\n"
-                "Это ещё не передача прав. Инициатор должен увидеть ваш "
-                "постоянный Telegram user ID и явно утвердить вас как "
-                "получателя. После этого вы сможете подтвердить передачу.\n\n"
-                "До подтверждения администратором остаётся отправитель.",
+                tr_safe(
+                    "admin.incoming_transfer.priglashenie_otkryto_peredacha",
+                    place_name=_h(view.place_name),
+                    transfer_user_label=_h(
+                        _transfer_user_label(view.from_user, with_id=True)
+                    ),
+                ),
                 menu,
             )
         return (
-            "🔗 Ссылка уже открыта другим аккаунтом\n\n"
-            "Приглашение нельзя перепривязать к другому человеку. Попросите "
-            "инициатора создать новую ссылку.",
+            tr("admin.incoming_transfer.ssylka_otkryta_drugim_akkauntom_2"),
             menu,
         )
     if view.status == STATUS_CONFIRMED:
         return (
-            "✅ Передача уже завершена\n\n"
-            f"📍 {_h(view.place_name)}\n\n"
-            "Это предложение больше нельзя подтвердить повторно.",
+            tr_safe(
+                "admin.incoming_transfer.peredacha_zavershena_predlozhenie",
+                place_name=_h(view.place_name),
+            ),
             menu,
         )
     if view.status == STATUS_EXPIRED:
         return (
-            "⌛ Срок приглашения истёк\n\n"
-            f"📍 {_h(view.place_name)}\n\n"
-            "Передача не состоялась; администратором остаётся отправитель. "
-            "Можно попросить его создать новое предложение.",
+            tr_safe(
+                "admin.incoming_transfer.srok_priglasheniya_istek_peredacha",
+                place_name=_h(view.place_name),
+            ),
             menu,
         )
     if view.status == STATUS_CANCELLED:
         return (
-            "❌ Передача отменена инициатором\n\n"
-            f"📍 {_h(view.place_name)}\n\n"
-            "Полномочия не изменились.",
+            tr_safe(
+                "admin.incoming_transfer.peredacha_otmenena_iniciatorom",
+                place_name=_h(view.place_name),
+            ),
             menu,
         )
     if view.status == STATUS_REJECTED:
         return (
-            "❌ Предложение отклонено\n\n"
-            f"📍 {_h(view.place_name)}\n\n"
-            "Полномочия не изменились. Можно создать новое предложение.",
+            tr_safe(
+                "admin.incoming_transfer.predlozhenie_otkloneno",
+                place_name=_h(view.place_name),
+            ),
             menu,
         )
     if view.status == STATUS_SUPERSEDED:
         return (
-            "⚠️ Предложение недействительно\n\n"
-            f"📍 {_h(view.place_name)}\n\n"
-            "Администратор места изменился или назначение было отозвано. "
-            "Передача не состоится.",
+            tr_safe(
+                "admin.incoming_transfer.predlozhenie_nedeystvitelno",
+                place_name=_h(view.place_name),
+            ),
             menu,
         )
     return (
-        "📨 Предложение передачи\n\n"
-        f"📍 {_h(view.place_name)}\n\n"
-        "Сейчас это предложение нельзя подтвердить.",
+        tr_safe(
+            "admin.incoming_transfer.predlozhenie_peredachi_seychas",
+            place_name=_h(view.place_name),
+        ),
         menu,
     )
 
@@ -815,9 +806,12 @@ def _clamp_offset(offset: int, total: int, page_size: int) -> int:
 def _page_note(offset: int, count: int, total: int) -> str:
     if total <= 0:
         return ""
-    return (
-        f"Показано {offset + 1}–{offset + count} из {total}.\n"
-        f"Страница {offset // ADMIN_PLACES_PAGE_SIZE + 1}."
+    return tr(
+        "admin.page_note.pokazano_stranica",
+        value=offset + 1,
+        value_2=offset + count,
+        total=total,
+        value_3=offset // ADMIN_PLACES_PAGE_SIZE + 1,
     )
 
 
@@ -904,7 +898,13 @@ async def _render_denied(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         ctx.chat(update).id,
         DENIED_TEXT,
         InlineKeyboardMarkup(
-            [[InlineKeyboardButton("🏠 Главное меню", callback_data="main_menu")]]
+            [
+                [
+                    InlineKeyboardButton(
+                        tr("buttons.admin.glavnoe_menyu"), callback_data="main_menu"
+                    )
+                ]
+            ]
         ),
     )
     screen.save_screen_ref(user_id, user_data, ctx.chat(update).id)
@@ -934,17 +934,17 @@ def _places_content(
     state["page"] = offset
 
     if access_kind == "superadmin":
-        heading = "🛡 Все места"
-        intro = "Выберите место, чтобы назначить, заменить или снять " "администратора."
+        heading = tr("admin.places.vse_mesta")
+        intro = tr("admin.places.vyberite_mesto_chtoby_naznachit")
     else:
-        heading = "🛡 Мои места"
-        intro = "Здесь показаны только места, которыми вы управляете."
+        heading = tr("admin.places.moi_mesta")
+        intro = tr("admin.places.zdes_pokazany_tolko_mesta")
 
     if total == 0:
         text = f"{heading}\n\n{intro}\n\n" + (
-            "В справочнике пока нет мест."
+            tr("admin.places.v_spravochnike_poka_net")
             if access_kind == "superadmin"
-            else "Действующих назначений пока нет."
+            else tr("admin.places.deystvuyuschih_naznacheniy_poka")
         )
         empty_rows: list[list[InlineKeyboardButton]] = []
         if access_kind == "superadmin":
@@ -961,7 +961,10 @@ def _places_content(
             empty_rows.append(
                 [
                     InlineKeyboardButton(
-                        f"🌍 Глобальные предложения ({system_pending})",
+                        tr(
+                            "buttons.admin.globalnye_predlozheniya",
+                            system_pending=system_pending,
+                        ),
                         callback_data="adm_bprop_global",
                     )
                 ]
@@ -969,13 +972,20 @@ def _places_content(
             empty_rows.append(
                 [
                     InlineKeyboardButton(
-                        f"📍 Предложения по местам ({places_pending})",
+                        tr(
+                            "buttons.admin.predlozheniya_mestam",
+                            places_pending=places_pending,
+                        ),
                         callback_data="adm_bprop_places",
                     )
                 ]
             )
         empty_rows.append(
-            [InlineKeyboardButton("🏠 Главное меню", callback_data="main_menu")]
+            [
+                InlineKeyboardButton(
+                    tr("buttons.admin.glavnoe_menyu"), callback_data="main_menu"
+                )
+            ]
         )
         return text, InlineKeyboardMarkup(empty_rows)
 
@@ -985,11 +995,13 @@ def _places_content(
         admin_line = (
             _h(_short(_user_label(item.admin), 90))
             if item.admin is not None
-            else "не назначен"
+            else tr("admin.places.ne_naznachen")
         )
-        text += (
-            f"{index}. {_h(_short(item.canonical_name, 100))}\n"
-            f"   Администратор: {admin_line}\n"
+        text += tr_safe(
+            "admin.places.administrator",
+            index=index,
+            canonical_name=_h(_short(item.canonical_name, 100)),
+            admin_line=admin_line,
         )
         rows.append(
             [
@@ -1005,14 +1017,14 @@ def _places_content(
     if offset > 0:
         nav.append(
             InlineKeyboardButton(
-                "⬅️ Назад",
+                tr("buttons.nav.prev"),
                 callback_data=f"adm_page:{max(offset - ADMIN_PLACES_PAGE_SIZE, 0)}",
             )
         )
     if offset + len(items) < total:
         nav.append(
             InlineKeyboardButton(
-                "Вперёд ➡️",
+                tr("buttons.nav.next"),
                 callback_data=f"adm_page:{offset + len(items)}",
             )
         )
@@ -1028,7 +1040,10 @@ def _places_content(
         rows.append(
             [
                 InlineKeyboardButton(
-                    f"🌍 Глобальные предложения ({system_pending})",
+                    tr(
+                        "buttons.admin.globalnye_predlozheniya",
+                        system_pending=system_pending,
+                    ),
                     callback_data="adm_bprop_global",
                 )
             ]
@@ -1036,12 +1051,21 @@ def _places_content(
         rows.append(
             [
                 InlineKeyboardButton(
-                    f"📍 Предложения по местам ({places_pending})",
+                    tr(
+                        "buttons.admin.predlozheniya_mestam",
+                        places_pending=places_pending,
+                    ),
                     callback_data="adm_bprop_places",
                 )
             ]
         )
-    rows.append([InlineKeyboardButton("🏠 Главное меню", callback_data="main_menu")])
+    rows.append(
+        [
+            InlineKeyboardButton(
+                tr("buttons.admin.glavnoe_menyu"), callback_data="main_menu"
+            )
+        ]
+    )
     return text, InlineKeyboardMarkup(rows)
 
 
@@ -1053,43 +1077,39 @@ def _place_text(
     viewer_telegram_user_id: int | None = None,
 ) -> str:
     active = get_active_place_admin(session, details.place_id)
-    head = f"🛡 Место\n\n📍 {_h(details.canonical_name)}"
+    head = tr_safe("admin.place.mesto", canonical_name=_h(details.canonical_name))
     alternatives = [item for item in details.names if not item.is_canonical]
     if alternatives:
-        head += "\n\nАльтернативные названия:\n" + "\n".join(
+        head += tr("admin.place.alternativnye_nazvaniya") + "\n".join(
             f"— {_h(_short(item.name, 120))}" for item in alternatives[:8]
         )
         if len(alternatives) > 8:
-            head += f"\nЕщё {len(alternatives) - 8}."
+            head += tr("admin.place.esche", value=len(alternatives) - 8)
 
     tail = ""
     open_conflicts = count_open_conflicts_for_place(session, details.place_id)
     if open_conflicts:
-        tail += (
-            "\n\n⚔️ Активные задачи конфликтов кодов: "
-            f"{open_conflicts}. Их нужно разрешить до правки привязок: "
-            "кирпичик места или глобальный кирпичик."
+        tail += tr(
+            "admin.place.aktivnye_zadachi_konfliktov_kodov",
+            open_conflicts=open_conflicts,
         )
     if active is None:
-        tail += "\n\nАдминистратор: не назначен."
+        tail += tr("admin.place.administrator_naznachen")
     else:
-        tail += (
-            "\n\nАдминистратор: "
-            f"{_h(_user_label(active.user, with_id=True))}\n"
-            f"Назначен: {_h(_date_label(active.assigned_at))}"
+        tail += tr_safe(
+            "admin.place.administrator_naznachen_2",
+            user_label=_h(_user_label(active.user, with_id=True)),
+            date_label=_h(_date_label(active.assigned_at)),
         )
     if active is not None and viewer_telegram_user_id == active.user.telegram_user_id:
         pending = get_pending_transfer_for_place(session, details.place_id)
         if pending is not None:
-            tail += (
-                "\n\n📨 Передача администрации: "
-                f"{_h(transfer_status_label(pending.status))} до "
-                f"{_h(_transfer_expiry_label(pending))}."
+            tail += tr_safe(
+                "admin.place.peredacha_administracii",
+                transfer_status_label=_h(transfer_status_label(pending.status)),
+                transfer_expiry_label=_h(_transfer_expiry_label(pending)),
             )
-    tail += (
-        "\n\nРедактирование названия, альтернативных названий, города, адреса "
-        "и ссылки доступно из этого кабинета."
-    )
+    tail += tr("admin.place.redaktirovanie_nazvaniya")
 
     # H3 (требование D): на одном экране два длинных значения (адрес и
     # ссылка), поэтому у них общий бюджет от фактической обвязки экрана —
@@ -1100,12 +1120,20 @@ def _place_text(
         text = head
         position = 0
         if details.address:
-            text += f"\n\nАдрес: {_long_value(details.address, limit=limits[position])}"
+            text += tr_safe(
+                "admin.build.adres",
+                address=_long_value(details.address, limit=limits[position]),
+            )
             position += 1
         # Poster 2.0 U1a: город показывается и у старых мест (NULL → «—»).
-        text += f"\n\nГород: {_h(details.city) if details.city else '—'}"
+        text += tr_safe(
+            "admin.build.gorod", city=_h(details.city) if details.city else "—"
+        )
         if details.url:
-            text += f"\n\nСсылка: {_safe_link(details.url, limit=limits[position])}"
+            text += tr_safe(
+                "admin.build.ssylka",
+                url=_safe_link(details.url, limit=limits[position]),
+            )
         return text + tail
 
     return _place_value_limits(build, max(blocks, 1))[1]
@@ -1122,7 +1150,7 @@ def _place_keyboard(
     rows.append(
         [
             InlineKeyboardButton(
-                "✏️ Редактировать место",
+                tr("buttons.admin.redaktirovat_mesto"),
                 callback_data=f"adm_edit_place:{details.place_id}",
             )
         ]
@@ -1130,7 +1158,7 @@ def _place_keyboard(
     rows.append(
         [
             InlineKeyboardButton(
-                "📄 Стандартный шаблон",
+                tr("buttons.admin.standartnyy_shablon"),
                 callback_data=f"tp_std:{details.place_id}",
             )
         ]
@@ -1145,7 +1173,10 @@ def _place_keyboard(
         rows.append(
             [
                 InlineKeyboardButton(
-                    f"🧱 Предложения кирпичиков ({pending_proposals})",
+                    tr(
+                        "buttons.admin.predlozheniya_kirpichikov",
+                        pending_proposals=pending_proposals,
+                    ),
                     callback_data=f"adm_bprop_place:{details.place_id}",
                 )
             ]
@@ -1154,7 +1185,7 @@ def _place_keyboard(
         rows.append(
             [
                 InlineKeyboardButton(
-                    f"⚔️ Конфликты кодов ({open_conflicts})",
+                    tr("buttons.admin.konflikty_kodov", open_conflicts=open_conflicts),
                     callback_data=f"adm_bconflicts:{details.place_id}",
                 )
             ]
@@ -1164,7 +1195,7 @@ def _place_keyboard(
         rows.append(
             [
                 InlineKeyboardButton(
-                    "🔁 Передать админку",
+                    tr("buttons.admin.peredat_adminku"),
                     callback_data=f"adm_transfer:{details.place_id}",
                 )
             ]
@@ -1174,7 +1205,7 @@ def _place_keyboard(
             rows.append(
                 [
                     InlineKeyboardButton(
-                        "👤 Назначить администратора",
+                        tr("buttons.admin.naznachit_administratora"),
                         callback_data=f"adm_assign:{details.place_id}",
                     )
                 ]
@@ -1183,7 +1214,7 @@ def _place_keyboard(
             rows.append(
                 [
                     InlineKeyboardButton(
-                        "🔁 Заменить администратора",
+                        tr("buttons.admin.zamenit_administratora"),
                         callback_data=f"adm_replace:{details.place_id}",
                     )
                 ]
@@ -1191,21 +1222,33 @@ def _place_keyboard(
             rows.append(
                 [
                     InlineKeyboardButton(
-                        "🚫 Снять администратора",
+                        tr("buttons.admin.snyat_administratora"),
                         callback_data=f"adm_revoke:{details.place_id}",
                     )
                 ]
             )
-    rows.append([InlineKeyboardButton("◀️ К списку мест", callback_data="adm_places")])
-    rows.append([InlineKeyboardButton("🏠 Главное меню", callback_data="main_menu")])
+    rows.append(
+        [
+            InlineKeyboardButton(
+                tr("buttons.admin.k_spisku_mest"), callback_data="adm_places"
+            )
+        ]
+    )
+    rows.append(
+        [
+            InlineKeyboardButton(
+                tr("buttons.admin.glavnoe_menyu"), callback_data="main_menu"
+            )
+        ]
+    )
     return InlineKeyboardMarkup(rows)
 
 
 _PROPOSAL_STATUS_UI = {
-    PROPOSAL_STATUS_PENDING: "⏳ Ожидает решения",
-    PROPOSAL_STATUS_APPROVED: "✅ Одобрено",
-    PROPOSAL_STATUS_REJECTED: "❌ Отклонено",
-    PROPOSAL_STATUS_WITHDRAWN: "↩️ Отозвано автором",
+    PROPOSAL_STATUS_PENDING: tr("admin.module.ozhidaet_resheniya"),
+    PROPOSAL_STATUS_APPROVED: tr("admin.module.odobreno"),
+    PROPOSAL_STATUS_REJECTED: tr("admin.module.otkloneno"),
+    PROPOSAL_STATUS_WITHDRAWN: tr("admin.module.otozvano_avtorom"),
 }
 
 
@@ -1218,29 +1261,42 @@ def _proposal_settings_text(proposal: BrickProposalSnapshot) -> str:
     if proposal.value_type == BRICK_TYPE_NUMBER:
         parts: list[str] = []
         if rules.get("integer"):
-            parts.append("только целые числа")
+            parts.append(tr("admin.proposal_settings.tolko_celye_chisla"))
         if "min" in rules:
-            parts.append(f"минимум {rules['min']}")
+            parts.append(tr("admin.proposal_settings.minimum", rules_min=rules["min"]))
         if "max" in rules:
-            parts.append(f"максимум {rules['max']}")
+            parts.append(tr("admin.proposal_settings.maksimum", rules_max=rules["max"]))
         if "suffix" in rules:
-            parts.append(f"подпись «{rules['suffix']}»")
-        return "; ".join(parts) + "." if parts else "Без ограничений."
+            parts.append(
+                tr("admin.proposal_settings.podpis", rules_suffix=rules["suffix"])
+            )
+        return (
+            "; ".join(parts) + "."
+            if parts
+            else tr("admin.proposal_settings.bez_ogranicheniy")
+        )
     if proposal.value_type == BRICK_TYPE_CHOICE:
         raw_choices = rules.get("choices")
         choices = raw_choices if isinstance(raw_choices, list) else []
-        labels = ", ".join(str(item) for item in choices) or "список пуст"
+        labels = ", ".join(str(item) for item in choices) or tr(
+            "admin.proposal_settings.spisok_pust"
+        )
         multiple = (
-            "можно выбрать несколько" if rules.get("multiple") else "один вариант"
+            tr("admin.proposal_settings.mozhno_vybrat_neskolko")
+            if rules.get("multiple")
+            else tr("admin.proposal_settings.odin_variant")
         )
         return f"{labels}; {multiple}."
-    return "Без дополнительных настроек."
+    return tr("admin.proposal_settings.bez_dopolnitelnyh_nastroek")
 
 
 def _proposal_target_label(proposal: BrickProposalSnapshot) -> str:
     if proposal.scope == PROPOSAL_SCOPE_SYSTEM:
-        return "вся система"
-    return f"место «{proposal.place_name or f'#{proposal.place_id}'}»"
+        return tr("admin.proposal_target_label.vsya_sistema")
+    return tr(
+        "admin.proposal_target_label.mesto",
+        value=proposal.place_name or f"#{proposal.place_id}",
+    )
 
 
 def _proposal_page_note(offset: int, count: int, total: int) -> str:
@@ -1248,9 +1304,13 @@ def _proposal_page_note(offset: int, count: int, total: int) -> str:
         return ""
     pages = max((total + PROPOSAL_PAGE_SIZE - 1) // PROPOSAL_PAGE_SIZE, 1)
     page = offset // PROPOSAL_PAGE_SIZE + 1
-    return (
-        f"Показано {offset + 1}–{offset + count} из {total}. "
-        f"Страница {page} из {pages}."
+    return tr(
+        "admin.proposal_page_note.pokazano_stranica",
+        value=offset + 1,
+        value_2=offset + count,
+        total=total,
+        page=page,
+        pages=pages,
     )
 
 
@@ -1263,11 +1323,8 @@ def _proposal_admin_list_content(
     offset = _page_value(state, "proposal_offset")
     place_filter = state.get("proposal_place_filter")
     if phase == "proposal_global_list":
-        heading = "🌍 Глобальные предложения"
-        intro = (
-            "Предложения новых кирпичиков для всей системы. Рассматривать "
-            "их может только суперадминистратор."
-        )
+        heading = tr("admin.proposal_admin_list.globalnye_predlozheniya")
+        intro = tr("admin.proposal_admin_list.predlozheniya_novyh_kirpichikov")
         proposals, total = list_pending_system_proposals(
             session,
             telegram_user_id,
@@ -1283,18 +1340,20 @@ def _proposal_admin_list_content(
                 limit=PROPOSAL_PAGE_SIZE,
             )
         page_prefix = "adm_bprop_global_page"
-        back_label = "◀️ К списку мест"
+        back_label = tr("buttons.admin.k_spisku_mest")
     else:
         if isinstance(place_filter, int) and not isinstance(place_filter, bool):
             details = get_place_details(session, place_filter)
             if details is None:
                 state.clear()
                 state.update(_new_state())
-                raise ProposalPermissionError("Место не существует или было удалено.")
-            heading = "🧱 Предложения кирпичиков"
-            intro = (
-                f"Ожидающие предложения для места «{_h(details.canonical_name)}». "
-                "Другие места здесь не показываются."
+                raise ProposalPermissionError(
+                    tr("admin.render_phase.mesto_suschestvuet_bylo_udaleno")
+                )
+            heading = tr("admin.proposal_admin_list.predlozheniya_kirpichikov")
+            intro = tr_safe(
+                "admin.proposal_admin_list.ozhidayuschie_predlozheniya_mesta",
+                canonical_name=_h(details.canonical_name),
             )
             proposals, total = list_pending_for_place(
                 session,
@@ -1312,13 +1371,10 @@ def _proposal_admin_list_content(
                     offset=offset,
                     limit=PROPOSAL_PAGE_SIZE,
                 )
-            back_label = "◀️ К месту"
+            back_label = tr("admin.proposal_admin_list.k_mestu")
         else:
-            heading = "📍 Предложения по местам"
-            intro = (
-                "Все ожидающие предложения для существующих мест. "
-                "Глобальные системные предложения показаны в отдельном разделе."
-            )
+            heading = tr("admin.proposal_admin_list.predlozheniya_mestam")
+            intro = tr("admin.proposal_admin_list.vse_ozhidayuschie_predlozheniya")
             proposals, total = list_pending_place_proposals(
                 session,
                 telegram_user_id,
@@ -1333,24 +1389,23 @@ def _proposal_admin_list_content(
                     offset=offset,
                     limit=PROPOSAL_PAGE_SIZE,
                 )
-            back_label = "◀️ К списку мест"
+            back_label = tr("buttons.admin.k_spisku_mest")
         page_prefix = "adm_bprop_places_page"
     state["proposal_offset"] = offset
     text = f"{heading} — {total}\n\n{intro}"
     if not total:
-        text += (
-            "\n\nОжидающих предложений нет. Отозванные и решённые "
-            "предложения в очередь не попадают."
-        )
+        text += tr("admin.proposal_admin_list.ozhidayuschih_predlozheniy_net")
     else:
         text += "\n\n" + _proposal_page_note(offset, len(proposals), total)
         for index, proposal in enumerate(proposals, start=offset + 1):
-            text += (
-                f"\n{index}. <b>{_h(proposal.title)}</b> "
-                f"<code>[{_h(proposal.code)}]</code>\n"
-                f"   Автор: {_h(_short(proposal.author_label, 100))}\n"
-                f"   Область: {_h(_proposal_target_label(proposal))}\n"
-                f"   Отправлено: {_h(_date_label(proposal.created_at))}\n"
+            text += tr_safe(
+                "admin.proposal_admin_list.avtor_oblast_otpravleno_html",
+                index=index,
+                title=_h(proposal.title),
+                code=_h(proposal.code),
+                author_label=_h(_short(proposal.author_label, 100)),
+                proposal_target_label=_h(_proposal_target_label(proposal)),
+                date_label=_h(_date_label(proposal.created_at)),
             )
     rows = [
         [
@@ -1368,21 +1423,27 @@ def _proposal_admin_list_content(
     if offset > 0:
         navigation.append(
             InlineKeyboardButton(
-                "⬅️ Назад",
+                tr("buttons.nav.prev"),
                 callback_data=f"{page_prefix}:{max(offset - PROPOSAL_PAGE_SIZE, 0)}",
             )
         )
     if offset + len(proposals) < total:
         navigation.append(
             InlineKeyboardButton(
-                "Вперёд ➡️",
+                tr("buttons.nav.next"),
                 callback_data=f"{page_prefix}:{offset + PROPOSAL_PAGE_SIZE}",
             )
         )
     if navigation:
         rows.append(navigation)
     rows.append([InlineKeyboardButton(back_label, callback_data="adm_bprop_back")])
-    rows.append([InlineKeyboardButton("🏠 Главное меню", callback_data="main_menu")])
+    rows.append(
+        [
+            InlineKeyboardButton(
+                tr("buttons.admin.glavnoe_menyu"), callback_data="main_menu"
+            )
+        ]
+    )
     return text, InlineKeyboardMarkup(rows)
 
 
@@ -1403,41 +1464,71 @@ def _proposal_admin_card_content(
     proposal: BrickProposalSnapshot,
 ) -> tuple[str, InlineKeyboardMarkup]:
     parts = [
-        "🧱 <b>Предложение кирпичика</b>",
+        tr_safe("admin.proposal_admin_card.predlozhenie_kirpichika_html"),
         "",
         # R4 №29: все семь полей карточки — название, код, тип, описание,
         # автор, цель и статус — в одном месте и в одном порядке.
-        f"Название: <b>{_h(proposal.title)}</b>",
-        f"Обозначение: <code>[{_h(proposal.code)}]</code>",
-        f"Тип: {_h(BRICK_TYPE_TITLES.get(proposal.value_type, proposal.value_type))}",
-        f"Описание: {_proposal_description_html(proposal.description)}",
-        f"Автор: {_h(proposal.author_label)}",
-        f"Цель: {_h(_proposal_target_label(proposal))}",
-        f"Статус: {_h(_proposal_status_label(proposal.status))}",
-        f"Настройки: {_h(_proposal_settings_text(proposal))}",
-        f"Отправлено: {_h(_date_label(proposal.created_at))}",
+        tr_safe("admin.proposal_admin_card.nazvanie_html", title=_h(proposal.title)),
+        tr_safe("admin.proposal_admin_card.oboznachenie_html", code=_h(proposal.code)),
+        tr_safe(
+            "admin.proposal_admin_card.tip",
+            get=_h(BRICK_TYPE_TITLES.get(proposal.value_type, proposal.value_type)),
+        ),
+        tr_safe(
+            "admin.proposal_admin_card.opisanie",
+            description=_proposal_description_html(proposal.description),
+        ),
+        tr_safe(
+            "admin.proposal_admin_card.avtor", author_label=_h(proposal.author_label)
+        ),
+        tr_safe(
+            "admin.proposal_admin_card.cel",
+            proposal_target_label=_h(_proposal_target_label(proposal)),
+        ),
+        tr_safe(
+            "admin.proposal_admin_card.status",
+            proposal_status_label=_h(_proposal_status_label(proposal.status)),
+        ),
+        tr_safe(
+            "admin.proposal_admin_card.nastroyki",
+            proposal_settings_text=_h(_proposal_settings_text(proposal)),
+        ),
+        tr_safe(
+            "admin.proposal_admin_card.otpravleno",
+            date_label=_h(_date_label(proposal.created_at)),
+        ),
     ]
     if proposal.decided_at is not None:
-        parts.append(f"Решение: {_h(_date_label(proposal.decided_at))}")
+        parts.append(
+            tr_safe(
+                "admin.proposal_admin_card.reshenie",
+                date_label=_h(_date_label(proposal.decided_at)),
+            )
+        )
     if proposal.status == PROPOSAL_STATUS_APPROVED:
         parts.append(
-            f"Создан отдельный кирпичик #{proposal.approved_brick_id}. "
-            "Исходный личный кирпичик автора не изменён."
+            tr(
+                "admin.proposal_admin_card.sozdan_otdelnyy_kirpichik_ishodnyy",
+                approved_brick_id=proposal.approved_brick_id,
+            )
         )
     elif proposal.status == PROPOSAL_STATUS_REJECTED:
         if proposal.decision_note:
-            parts.append(f"Причина: {_h(proposal.decision_note)}")
+            parts.append(
+                tr_safe(
+                    "admin.proposal_admin_card.prichina",
+                    decision_note=_h(proposal.decision_note),
+                )
+            )
         else:
-            parts.append("Предложение отклонено без изменения личного кирпичика.")
+            parts.append(tr("admin.proposal_admin_card.predlozhenie_otkloneno_bez"))
     elif proposal.status == PROPOSAL_STATUS_WITHDRAWN:
-        parts.append("Предложение отозвано автором. Решение уже невозможно.")
+        parts.append(tr("admin.proposal_admin_card.predlozhenie_otozvano_avtorom"))
     else:
         parts.extend(
             [
                 "",
-                "Снимок названия, кода, типа и настроек зафиксирован при "
-                "отправке. Правки и архивация личного кирпичика на него не "
-                "влияют. Код будет повторно проверен при одобрении.",
+                tr("admin.proposal_admin_card.snimok_nazvaniya_koda_tipa"),
             ]
         )
     rows: list[list[InlineKeyboardButton]] = []
@@ -1445,43 +1536,48 @@ def _proposal_admin_card_content(
         rows.append(
             [
                 InlineKeyboardButton(
-                    "✅ Одобрить",
+                    tr("buttons.admin.odobrit"),
                     callback_data=f"adm_bprop_approve:{proposal.id}",
                 ),
                 InlineKeyboardButton(
-                    "❌ Отклонить",
+                    tr("buttons.admin.otklonit"),
                     callback_data=f"adm_bprop_reject:{proposal.id}",
                 ),
             ]
         )
-    rows.append([InlineKeyboardButton("◀️ К очереди", callback_data="adm_bprop_back")])
+    rows.append(
+        [
+            InlineKeyboardButton(
+                tr("buttons.admin.k_ocheredi"), callback_data="adm_bprop_back"
+            )
+        ]
+    )
     return "\n".join(parts), InlineKeyboardMarkup(rows)
 
 
 def _proposal_approve_confirm_content(
     proposal: BrickProposalSnapshot,
 ) -> tuple[str, InlineKeyboardMarkup]:
-    text = (
-        "✅ <b>Одобрить предложение кирпичика?</b>\n\n"
-        f"Название: {_h(proposal.title)}\n"
-        f"Обозначение: <code>[{_h(proposal.code)}]</code>\n"
-        f"Область: {_h(_proposal_target_label(proposal))}\n"
-        f"Автор: {_h(proposal.author_label)}\n\n"
-        "Будет создан отдельный кирпичик в целевой области. Исходный личный "
-        "кирпичик, его владелец и существующие шаблоны не изменятся. При "
-        "подтверждении права, статус, область, тип, правила и занятость кода "
-        "проверяются ещё раз в одной транзакции. При конфликте код не будет "
-        "переименован молча."
+    text = tr_safe(
+        "admin.proposal_approve_confirm.odobrit_predlozhenie_kirpi_html",
+        title=_h(proposal.title),
+        code=_h(proposal.code),
+        proposal_target_label=_h(_proposal_target_label(proposal)),
+        author_label=_h(proposal.author_label),
     )
     return text, InlineKeyboardMarkup(
         [
             [
                 InlineKeyboardButton(
-                    "✅ Да, одобрить",
+                    tr("buttons.admin.da_odobrit"),
                     callback_data=f"adm_bprop_approve_yes:{proposal.id}",
                 )
             ],
-            [InlineKeyboardButton("◀️ Нет, назад", callback_data="adm_bprop_back")],
+            [
+                InlineKeyboardButton(
+                    tr("buttons.admin.net_nazad"), callback_data="adm_bprop_back"
+                )
+            ],
         ]
     )
 
@@ -1489,25 +1585,26 @@ def _proposal_approve_confirm_content(
 def _proposal_reject_confirm_content(
     proposal: BrickProposalSnapshot,
 ) -> tuple[str, InlineKeyboardMarkup]:
-    text = (
-        "❌ <b>Отклонить предложение кирпичика?</b>\n\n"
-        f"Название: {_h(proposal.title)}\n"
-        f"Обозначение: <code>[{_h(proposal.code)}]</code>\n"
-        f"Область: {_h(_proposal_target_label(proposal))}\n"
-        f"Автор: {_h(proposal.author_label)}\n\n"
-        "Предложение получит окончательный статус «отклонено». Личный "
-        "кирпичик автора и шаблоны не изменятся. Автор сможет позже "
-        "отправить новое предложение."
+    text = tr_safe(
+        "admin.proposal_reject_confirm.otklonit_predlozhenie_kirpi_html",
+        title=_h(proposal.title),
+        code=_h(proposal.code),
+        proposal_target_label=_h(_proposal_target_label(proposal)),
+        author_label=_h(proposal.author_label),
     )
     return text, InlineKeyboardMarkup(
         [
             [
                 InlineKeyboardButton(
-                    "❌ Да, отклонить",
+                    tr("buttons.admin.da_otklonit"),
                     callback_data=f"adm_bprop_reject_yes:{proposal.id}",
                 )
             ],
-            [InlineKeyboardButton("◀️ Нет, назад", callback_data="adm_bprop_back")],
+            [
+                InlineKeyboardButton(
+                    tr("buttons.admin.net_nazad"), callback_data="adm_bprop_back"
+                )
+            ],
         ]
     )
 
@@ -1516,7 +1613,9 @@ def _proposal_reject_confirm_content(
 
 
 def _conflict_short_label(view: BrickConflictView) -> str:
-    place = view.place_name or f"место #{view.place_id}"
+    place = view.place_name or tr(
+        "admin.conflict_short_label.mesto", place_id=view.place_id
+    )
     return f"[{view.code}] — {place}"
 
 
@@ -1529,18 +1628,15 @@ def _conflicts_list_content(
     details = get_place_details(session, place_id)
     place_label = details.canonical_name if details is not None else f"#{place_id}"
     conflicts = list_place_conflicts(session, telegram_user_id, place_id)
-    text = (
-        "⚔️ Конфликты кодов\n\n"
-        f"📍 {_h(place_label)}\n\n"
-        "Глобальный кирпичик уже действует для новых привязок. Пока задача "
-        "активна, местный кирпичик того же кода остаётся как есть: выберите "
-        "«переименовать местный» или «переключиться на глобальный». "
-        "Существующие снимки анонсов не изменяются."
+    text = tr_safe(
+        "admin.conflicts_list.konflikty_kodov_globalnyy", place_label=_h(place_label)
     )
     if not conflicts:
-        text += "\n\n✅ Активных задач нет."
+        text += tr("admin.conflicts_list.aktivnyh_zadach_net")
     else:
-        text += f"\n\nАктивных задач: {len(conflicts)}."
+        text += tr(
+            "admin.conflicts_list.aktivnyh_zadach", count_conflicts=len(conflicts)
+        )
         for index, item in enumerate(conflicts, start=1):
             text += (
                 f"\n{index}. <b>{_h(item.local_brick_title)}</b> "
@@ -1557,36 +1653,43 @@ def _conflicts_list_content(
             ]
         )
     rows.append(
-        [InlineKeyboardButton("◀️ К месту", callback_data=f"adm_place:{place_id}")]
+        [
+            InlineKeyboardButton(
+                tr("admin.proposal_admin_list.k_mestu"),
+                callback_data=f"adm_place:{place_id}",
+            )
+        ]
     )
-    rows.append([InlineKeyboardButton("🏠 Главное меню", callback_data="main_menu")])
+    rows.append(
+        [
+            InlineKeyboardButton(
+                tr("buttons.admin.glavnoe_menyu"), callback_data="main_menu"
+            )
+        ]
+    )
     return text, InlineKeyboardMarkup(rows)
 
 
 def _conflict_card_content(
     view: BrickConflictView,
 ) -> tuple[str, InlineKeyboardMarkup]:
-    place = view.place_name or f"место #{view.place_id}"
-    text = (
-        "⚔️ <b>Задача разрешения конфликта</b>\n\n"
-        f"Код: <code>[{_h(view.code)}]</code>\n"
-        f"Место: {_h(place)}\n"
-        f"Местный кирпичик: {_h(view.local_brick_title)} "
-        f"(#{view.local_brick_id})\n"
-        f"Глобальный кирпичик: #{view.system_brick_id}\n\n"
-        "Глобальный кирпичик уже используется для НОВЫХ привязок этого кода. "
-        "Местный кирпичик не удалён и не переименован: данные не потеряны.\n\n"
-        "Выберите исход: переименовать местный кирпичик (привязки и снимки "
-        "сохранятся) или переключить шаблон места на глобальный кирпичик "
-        "(будет создана новая версия шаблона, старые версии и снимки "
-        "останутся неизменными)."
+    place = view.place_name or tr(
+        "admin.conflict_short_label.mesto", place_id=view.place_id
+    )
+    text = tr_safe(
+        "admin.conflict_card.zadacha_razresheniya_konflikta_kod_html",
+        code=_h(view.code),
+        place=_h(place),
+        local_brick_title=_h(view.local_brick_title),
+        local_brick_id=view.local_brick_id,
+        system_brick_id=view.system_brick_id,
     )
     rows: list[list[InlineKeyboardButton]] = []
     if view.is_open:
         rows.append(
             [
                 InlineKeyboardButton(
-                    "✏️ Переименовать местный",
+                    tr("buttons.admin.pereimenovat_mestnyy"),
                     callback_data=f"adm_bconflict_rename:{view.id}",
                 )
             ]
@@ -1594,41 +1697,44 @@ def _conflict_card_content(
         rows.append(
             [
                 InlineKeyboardButton(
-                    "🌍 Переключиться на глобальный",
+                    tr("buttons.admin.pereklyuchitsya_globalnyy"),
                     callback_data=f"adm_bconflict_switch:{view.id}",
                 )
             ]
         )
     else:
-        text += "\n\n✅ Задача решена; история сохранена."
+        text += tr("admin.conflict_card.zadacha_reshena_istoriya_sohranena")
     rows.append(
         [
             InlineKeyboardButton(
-                "◀️ К конфликтам",
+                tr("buttons.admin.k_konfliktam"),
                 callback_data=f"adm_bconflicts:{view.place_id}",
             )
         ]
     )
-    rows.append([InlineKeyboardButton("🏠 Главное меню", callback_data="main_menu")])
+    rows.append(
+        [
+            InlineKeyboardButton(
+                tr("buttons.admin.glavnoe_menyu"), callback_data="main_menu"
+            )
+        ]
+    )
     return text, InlineKeyboardMarkup(rows)
 
 
 def _conflict_rename_input_content(
     view: BrickConflictView,
 ) -> tuple[str, InlineKeyboardMarkup]:
-    text = (
-        "✏️ <b>Переименование местного кирпичика</b>\n\n"
-        f"Конфликтный код: <code>[{_h(view.code)}]</code>\n"
-        f"Кирпичик: {_h(view.local_brick_title)}\n\n"
-        "Введите новое обозначение для местного кирпичика. Привязки шаблонов "
-        "указывают на кирпичик по ID и продолжат работать; изменится только "
-        "технический код в тексте шаблона."
+    text = tr_safe(
+        "admin.conflict_rename_input.pereimenovanie_mestnogo_kirpi_html",
+        code=_h(view.code),
+        local_brick_title=_h(view.local_brick_title),
     )
     return text, InlineKeyboardMarkup(
         [
             [
                 InlineKeyboardButton(
-                    "◀️ Назад",
+                    tr("buttons.nav.back"),
                     callback_data=f"adm_bconflict:{view.id}",
                 )
             ]
@@ -1639,26 +1745,22 @@ def _conflict_rename_input_content(
 def _conflict_switch_confirm_content(
     view: BrickConflictView,
 ) -> tuple[str, InlineKeyboardMarkup]:
-    text = (
-        "🌍 <b>Переключиться на глобальный кирпичик?</b>\n\n"
-        f"Код: <code>[{_h(view.code)}]</code>\n"
-        f"Место: {_h(view.place_name or f'#{view.place_id}')}\n\n"
-        "Стандартный шаблон места получит НОВУЮ версию с привязкой этого кода "
-        "к глобальному кирпичику. Местный кирпичик останется в разделе "
-        "кирпичиков места и не будет удалён. Прежние версии шаблона и "
-        "сохранённые снимки анонсов не изменятся."
+    text = tr_safe(
+        "admin.conflict_switch_confirm.pereklyuchitsya_globalnyy_html",
+        code=_h(view.code),
+        h=_h(view.place_name or f"#{view.place_id}"),
     )
     return text, InlineKeyboardMarkup(
         [
             [
                 InlineKeyboardButton(
-                    "✅ Да, переключить",
+                    tr("buttons.admin.da_pereklyuchit"),
                     callback_data=f"adm_bconflict_switch_yes:{view.id}",
                 )
             ],
             [
                 InlineKeyboardButton(
-                    "◀️ Нет, назад",
+                    tr("buttons.admin.net_nazad"),
                     callback_data=f"adm_bconflict:{view.id}",
                 )
             ],
@@ -1668,24 +1770,21 @@ def _conflict_switch_confirm_content(
 
 def _assign_search_text(details: PlaceDetails, state: dict) -> str:
     mode = str(state.get("mode") or "assign")
-    action = "замены администратора" if mode == "replace" else "назначения"
-    return (
-        f"👤 Поиск получателя для {action}\n\n"
-        f"📍 {_h(details.canonical_name)}\n\n"
-        "Введите @username, часть имени или точный постоянный Telegram user ID. "
-        "Найти можно только пользователя, который уже взаимодействовал с "
-        "Poster.\n\n"
-        "Если получатель ещё не запускал бота по этой ссылке, попросите его "
-        "сначала открыть Poster и нажать /start."
+    action = (
+        tr("admin.assign_search.zameny_administratora")
+        if mode == "replace"
+        else tr("admin.assign_search.naznacheniya")
+    )
+    return tr_safe(
+        "admin.assign_search.poisk_poluchatelya_vvedite",
+        action=action,
+        canonical_name=_h(details.canonical_name),
     )
 
 
 # R1, дефект №21: исход поиска получателя всегда явный. Вид запроса хранится
 # в состоянии, чтобы «не найдено» объясняло, что именно не нашлось.
-ASSIGN_QUERY_INVALID_TEXT = (
-    "Неверный формат запроса. Введите @username, имя или точный числовой "
-    "Telegram user ID — пустой ввод и одни символы не ищутся."
-)
+ASSIGN_QUERY_INVALID_TEXT = tr("admin.module.nevernyy_format_zaprosa_vvedite")
 
 ASSIGN_QUERY_USERNAME = "username"
 ASSIGN_QUERY_ID = "id"
@@ -1722,21 +1821,18 @@ def _normalize_assign_query(raw: str) -> tuple[str, str] | None:
 def _assign_not_found_text(query: str, kind: str) -> str:
     """Явное «не найдено» с конкретным следующим шагом (R1, дефект №21)."""
     if kind == ASSIGN_QUERY_ID:
-        return (
-            f"Пользователь не найден: Telegram user ID "
-            f"{_h(_short(query, 40))} не известен боту. Получатель должен "
-            "открыть Poster и нажать /start, после чего повторите поиск."
+        return tr_safe(
+            "admin.assign_not_found.polzovatel_nayden_telegram_user",
+            query=_h(_short(query, 40)),
         )
     if kind == ASSIGN_QUERY_USERNAME:
-        return (
-            f"Пользователь не найден: @{_h(_short(query, 100))} не известен "
-            "боту. Получатель должен открыть Poster и нажать /start, после "
-            "чего повторите поиск."
+        return tr_safe(
+            "admin.assign_not_found.polzovatel_nayden_izvesten_botu",
+            query=_h(_short(query, 100)),
         )
-    return (
-        f"Пользователь не найден по запросу «{_h(_short(query, 100))}». Если "
-        "это получатель, он должен открыть Poster и нажать /start, после чего "
-        "повторите поиск по @username или точному Telegram user ID."
+    return tr_safe(
+        "admin.assign_not_found.polzovatel_nayden_zaprosu_esli",
+        query=_h(_short(query, 100)),
     )
 
 
@@ -1745,10 +1841,10 @@ def _assign_results_content(
 ) -> tuple[str, InlineKeyboardMarkup]:
     query = str(state.get("query") or "")
     results = search_known_users(session, query)
-    text = (
-        f"👤 Получатель\n\n"
-        f"📍 {_h(details.canonical_name)}\n"
-        f"Запрос: «{_h(_short(query, 100))}»\n\n"
+    text = tr_safe(
+        "admin.assign_results.poluchatel_zapros",
+        canonical_name=_h(details.canonical_name),
+        query=_h(_short(query, 100)),
     )
     keyboard: list[list[InlineKeyboardButton]] = []
     if not results.users:
@@ -1759,11 +1855,12 @@ def _assign_results_content(
         text += _assign_not_found_text(query, kind)
     else:
         if results.total == len(results.users):
-            text += f"Найдено: {results.total}.\n\n"
+            text += tr("admin.assign_results.naydeno", total=results.total)
         else:
-            text += (
-                f"Найдено: {results.total}; показаны первые "
-                f"{len(results.users)}. Уточните запрос.\n\n"
+            text += tr(
+                "admin.assign_results.naydeno_pokazany_pervye_utochnite",
+                total=results.total,
+                count_users=len(results.users),
             )
         for index, user in enumerate(results.users, start=1):
             label = _short(_user_label(user), 100)
@@ -1780,9 +1877,15 @@ def _assign_results_content(
                 ]
             )
     keyboard.append(
-        [InlineKeyboardButton("🔁 Искать снова", callback_data="adm_search_again")]
+        [
+            InlineKeyboardButton(
+                tr("buttons.nav.retry_search"), callback_data="adm_search_again"
+            )
+        ]
     )
-    keyboard.append([InlineKeyboardButton("◀️ Назад", callback_data="adm_cancel")])
+    keyboard.append(
+        [InlineKeyboardButton(tr("buttons.nav.back"), callback_data="adm_cancel")]
+    )
     return text, InlineKeyboardMarkup(keyboard)
 
 
@@ -1811,50 +1914,49 @@ def _edit_menu_content(
             address_text = _long_value(details.address, limit=limits[position])
             position += 1
         else:
-            address_text = "Не указан"
+            address_text = tr("admin.build.ne_ukazan")
         if details.url:
             url_text = _safe_link(details.url, limit=limits[position])
         else:
-            url_text = "Не указана"
-        return (
-            "✏️ Редактирование места\n\n"
-            f"📍 Название: {_h(details.canonical_name)}\n"
-            f"Альтернативные названия: {len(aliases)}\n"
-            f"Город: {_h(details.city) if details.city else 'Не указан'}\n"
-            f"Адрес: {address_text}\n"
-            f"Ссылка: {url_text}\n\n"
-            "Выберите, что изменить:"
+            url_text = tr("admin.safe_link.ne_ukazana")
+        return tr_safe(
+            "admin.build.redaktirovanie_mesta_nazvanie",
+            canonical_name=_h(details.canonical_name),
+            count_aliases=len(aliases),
+            city=_h(details.city) if details.city else tr("admin.build.ne_ukazan"),
+            address_text=address_text,
+            url_text=url_text,
         )
 
     text = _place_value_limits(build, max(blocks, 1))[1]
     rows: list[list[InlineKeyboardButton]] = [
         [
             InlineKeyboardButton(
-                "🏷 Изменить название",
+                tr("buttons.admin.izmenit_nazvanie"),
                 callback_data=f"adm_edit_name:{details.place_id}",
             )
         ],
         [
             InlineKeyboardButton(
-                "📝 Альтернативные названия",
+                tr("buttons.admin.alternativnye_nazvaniya"),
                 callback_data=f"adm_aliases:{details.place_id}",
             )
         ],
         [
             InlineKeyboardButton(
-                "🏙 Изменить город",
+                tr("buttons.admin.izmenit_gorod"),
                 callback_data=f"adm_edit_city:{details.place_id}",
             )
         ],
         [
             InlineKeyboardButton(
-                "✏️ Адрес",
+                tr("buttons.admin.adres"),
                 callback_data=f"adm_edit_address:{details.place_id}",
             )
         ],
         [
             InlineKeyboardButton(
-                "✏️ Ссылка",
+                tr("buttons.admin.ssylka"),
                 callback_data=f"adm_edit_url:{details.place_id}",
             )
         ],
@@ -1873,7 +1975,9 @@ def _edit_menu_content(
                 "🗑", callback_data=f"adm_edit_url_delete:{details.place_id}"
             )
         )
-    rows.append([InlineKeyboardButton("◀️ Назад", callback_data="adm_cancel")])
+    rows.append(
+        [InlineKeyboardButton(tr("buttons.nav.back"), callback_data="adm_cancel")]
+    )
     return text, InlineKeyboardMarkup(rows)
 
 
@@ -1882,29 +1986,21 @@ def _edit_input_content(
 ) -> tuple[str, InlineKeyboardMarkup]:
     """Экран ввода нового значения для редактируемого поля."""
     if phase == "edit_name_input":
-        text = (
-            "🏷 Изменение названия\n\n"
-            f"📍 Текущее название: {_h(details.canonical_name)}\n\n"
-            "Введите новое каноническое название места. Старое название "
-            "сохранится как альтернативное для поиска.\n\n"
-            "Название не должно совпадать с другими названиями этого места и "
-            "не должно быть слишком похожим на другие места — проверим на "
-            "следующем шаге."
+        text = tr_safe(
+            "admin.edit_input.izmenenie_nazvaniya_tekuschee",
+            canonical_name=_h(details.canonical_name),
         )
     elif phase == "edit_alias_add_input":
-        text = (
-            "📝 Добавление альтернативного названия\n\n"
-            f"📍 {_h(details.canonical_name)}\n\n"
-            "Введите альтернативное название. Оно будет доступно для поиска "
-            "вместе с каноническим названием."
+        text = tr_safe(
+            "admin.edit_input.dobavlenie_alternativnogo",
+            canonical_name=_h(details.canonical_name),
         )
     elif phase == "edit_alias_rename_input":
         target_name = _h(str(state.get("edit_target_name") or ""))
-        text = (
-            "📝 Переименование альтернативного названия\n\n"
-            f"📍 {_h(details.canonical_name)}\n\n"
-            f"Текущее альтернативное название: {target_name}\n\n"
-            "Введите новое название для этого варианта."
+        text = tr_safe(
+            "admin.edit_input.pereimenovanie_alternativnogo",
+            canonical_name=_h(details.canonical_name),
+            target_name=target_name,
         )
     elif phase == "edit_address_input":
 
@@ -1912,46 +2008,48 @@ def _edit_input_content(
             current = (
                 _long_value(details.address, limit=limits[0])
                 if details.address
-                else "Не указан"
+                else tr("admin.build.ne_ukazan")
             )
-            return (
-                "🏠 Изменение адреса\n\n"
-                f"📍 {_h(details.canonical_name)}\n"
-                f"Текущий адрес: {current}\n\n"
-                "Введите адрес места обычным текстом. Длина не ограничена "
-                "искусственно: адрес сохраняется полностью."
+            return tr_safe(
+                "admin.build.izmenenie_adresa_tekuschiy_adres",
+                canonical_name=_h(details.canonical_name),
+                current=current,
             )
 
         # H3 (требование D): даже один длинный адрес ограничен бюджетом
         # экрана, иначе ввод не отправится вовсе.
         text = _place_value_limits(build, 1)[1]
     elif phase == "edit_city_input":
-        current = _h(details.city) if details.city else "Не указан"
-        text = (
-            "🏙 Изменение города\n\n"
-            f"📍 {_h(details.canonical_name)}\n"
-            f"Текущий город: {current}\n\n"
-            "Введите город площадки обычным текстом (например, Москва). "
-            "Город показывается в списке площадок и помогает найти место "
-            "поиском."
+        current = _h(details.city) if details.city else tr("admin.build.ne_ukazan")
+        text = tr_safe(
+            "admin.edit_input.izmenenie_goroda_tekuschiy_gorod",
+            canonical_name=_h(details.canonical_name),
+            current=current,
         )
     elif phase == "edit_url_input":
 
         def build(limits: list[int]) -> str:
-            return (
-                "🔗 Изменение ссылки\n\n"
-                f"📍 {_h(details.canonical_name)}\n"
-                f"Текущая ссылка: "
-                f"{_safe_link(details.url, limit=limits[0]) if details.url else 'Не указана'}\n\n"
-                "Введите ссылку на страницу места (например, example.com или "
-                "https://t.me/poster)."
+            return tr_safe(
+                "admin.build.izmenenie_ssylki_tekuschaya_ssylka",
+                canonical_name=_h(details.canonical_name),
+                url=(
+                    _safe_link(details.url, limit=limits[0])
+                    if details.url
+                    else tr("admin.safe_link.ne_ukazana")
+                ),
             )
 
         text = _place_value_limits(build, 1)[1]
     else:
-        text = "✏️ Редактирование места\n\nВведите новое значение."
+        text = tr("admin.edit_input.redaktirovanie_mesta_vvedite_novoe")
     return text, InlineKeyboardMarkup(
-        [[InlineKeyboardButton("◀️ Отмена", callback_data="adm_cancel")]]
+        [
+            [
+                InlineKeyboardButton(
+                    tr("buttons.admin.otmena_2"), callback_data="adm_cancel"
+                )
+            ]
+        ]
     )
 
 
@@ -1967,11 +2065,10 @@ def _edit_confirm_content(
             return None
 
         def build(limits: list[int]) -> str:
-            return (
-                "🗑 Подтвердите удаление адреса\n\n"
-                f"📍 {_h(details.canonical_name)}\n\n"
-                f"Текущий адрес: {_long_value(details.address, limit=limits[0])}\n\n"
-                "Адрес будет удалён из карточки места. Само место сохранится."
+            return tr_safe(
+                "admin.build.podtverdite_udalenie_adresa",
+                canonical_name=_h(details.canonical_name),
+                address=_long_value(details.address, limit=limits[0]),
             )
 
         text = _place_value_limits(build, 1)[1]
@@ -1980,23 +2077,20 @@ def _edit_confirm_content(
             return None
 
         def build(limits: list[int]) -> str:
-            return (
-                "🗑 Подтвердите удаление ссылки\n\n"
-                f"📍 {_h(details.canonical_name)}\n\n"
-                f"Текущая ссылка: {_safe_link(details.url, limit=limits[0])}\n\n"
-                "Ссылка будет удалена из карточки места. Само место сохранится."
+            return tr_safe(
+                "admin.build.podtverdite_udalenie_ssylki",
+                canonical_name=_h(details.canonical_name),
+                url=_safe_link(details.url, limit=limits[0]),
             )
 
         text = _place_value_limits(build, 1)[1]
     elif phase == "edit_alias_delete_confirm":
         target_name = _h(str(state.get("edit_target_name") or ""))
-        text = (
-            f"{warning_block}"
-            "🗑 Подтвердите удаление альтернативного названия\n\n"
-            f"📍 {_h(details.canonical_name)}\n\n"
-            f"Будет удалено: {target_name}\n\n"
-            "Каноническое название и другие альтернативные названия останутся "
-            "нетронутыми."
+        text = tr_safe(
+            "admin.edit_confirm.podtverdite_udalenie",
+            warning_block=warning_block,
+            canonical_name=_h(details.canonical_name),
+            target_name=target_name,
         )
     else:
         value = state.get("edit_value")
@@ -2006,31 +2100,27 @@ def _edit_confirm_content(
         if phase == "edit_name_confirm":
             if value == details.canonical_name:
                 return None
-            text = (
-                f"{warning_block}"
-                "✏️ Подтвердите изменение названия\n\n"
-                f"📍 {_h(details.canonical_name)}\n\n"
-                f"Новое название: {_h(value)}\n\n"
-                "Старое название сохранится как альтернативное для поиска. "
-                "Изменение подтверждает администратор места или суперадминистратор."
+            text = tr_safe(
+                "admin.edit_confirm.podtverdite_izmenenie_nazvaniya",
+                warning_block=warning_block,
+                canonical_name=_h(details.canonical_name),
+                h=_h(value),
             )
         elif phase == "edit_alias_add_confirm":
-            text = (
-                f"{warning_block}"
-                "✏️ Подтвердите добавление альтернативного названия\n\n"
-                f"📍 {_h(details.canonical_name)}\n\n"
-                f"Новое название: {_h(value)}\n\n"
-                "Название будет доступно для поиска вместе с каноническим."
+            text = tr_safe(
+                "admin.edit_confirm.podtverdite_dobavlenie",
+                warning_block=warning_block,
+                canonical_name=_h(details.canonical_name),
+                h=_h(value),
             )
         elif phase == "edit_alias_rename_confirm":
             target_name = _h(str(state.get("edit_target_name") or ""))
-            text = (
-                f"{warning_block}"
-                "✏️ Подтвердите переименование альтернативного названия\n\n"
-                f"📍 {_h(details.canonical_name)}\n\n"
-                f"Текущее: {target_name}\n"
-                f"Новое: {_h(value)}\n\n"
-                "Название будет доступно для поиска вместе с каноническим."
+            text = tr_safe(
+                "admin.edit_confirm.podtverdite_pereimenovanie",
+                warning_block=warning_block,
+                canonical_name=_h(details.canonical_name),
+                target_name=target_name,
+                h=_h(value),
             )
         elif phase == "edit_address_confirm":
 
@@ -2038,42 +2128,37 @@ def _edit_confirm_content(
                 current = (
                     _long_value(details.address, limit=limits[0])
                     if details.address
-                    else "Не указан"
+                    else tr("admin.build.ne_ukazan")
                 )
-                return (
-                    f"{warning_block}"
-                    "🏠 Подтвердите изменение адреса\n\n"
-                    f"📍 {_h(details.canonical_name)}\n\n"
-                    f"Текущий адрес: {current}\n"
-                    f"Новый адрес: {_long_value(value, limit=limits[1])}\n\n"
-                    "Адрес будет виден в карточке места полностью; длинное "
-                    "значение на экране помечается как фрагмент."
+                return tr_safe(
+                    "admin.build.podtverdite_izmenenie_adresa",
+                    warning_block=warning_block,
+                    canonical_name=_h(details.canonical_name),
+                    current=current,
+                    long_value=_long_value(value, limit=limits[1]),
                 )
 
             # Два значения на одном экране делят остаток лимита Telegram.
             text = _place_value_limits(build, 2)[1]
         elif phase == "edit_city_confirm":
-            current = _h(details.city) if details.city else "Не указан"
-            text = (
-                f"{warning_block}"
-                "🏙 Подтвердите изменение города\n\n"
-                f"📍 {_h(details.canonical_name)}\n\n"
-                f"Текущий город: {current}\n"
-                f"Новый город: {_h(value)}\n\n"
-                "Город показывается в списке площадок и результатах поиска, "
-                "но не в тексте анонса."
+            current = _h(details.city) if details.city else tr("admin.build.ne_ukazan")
+            text = tr_safe(
+                "admin.edit_confirm.podtverdite_izmenenie_goroda",
+                warning_block=warning_block,
+                canonical_name=_h(details.canonical_name),
+                current=current,
+                h=_h(value),
             )
         elif phase == "edit_url_confirm":
-            current = details.url if details.url else "Не указана"
+            current = details.url if details.url else tr("admin.safe_link.ne_ukazana")
 
             def build(limits: list[int]) -> str:
-                return (
-                    f"{warning_block}"
-                    "🔗 Подтвердите изменение ссылки\n\n"
-                    f"📍 {_h(details.canonical_name)}\n\n"
-                    f"Текущая ссылка: {_safe_link(current, limit=limits[0])}\n"
-                    f"Новая ссылка: {_safe_link(value, limit=limits[1])}\n\n"
-                    "Ссылка будет видна в карточке места."
+                return tr_safe(
+                    "admin.build.podtverdite_izmenenie_ssylki",
+                    warning_block=warning_block,
+                    canonical_name=_h(details.canonical_name),
+                    current=_safe_link(current, limit=limits[0]),
+                    safe_link=_safe_link(value, limit=limits[1]),
                 )
 
             text = _place_value_limits(build, 2)[1]
@@ -2081,8 +2166,16 @@ def _edit_confirm_content(
             return None
     return text, InlineKeyboardMarkup(
         [
-            [InlineKeyboardButton("✅ Подтвердить", callback_data="adm_edit_confirm")],
-            [InlineKeyboardButton("❌ Отмена", callback_data="adm_cancel")],
+            [
+                InlineKeyboardButton(
+                    tr("buttons.admin.podtverdit"), callback_data="adm_edit_confirm"
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    tr("buttons.admin.otmena"), callback_data="adm_cancel"
+                )
+            ],
         ]
     )
 
@@ -2098,15 +2191,15 @@ def _edit_aliases_content(
 
     total = len(aliases)
     if total == 0:
-        text = (
-            f"📝 Альтернативные названия\n\n📍 {_h(details.canonical_name)}\n\n"
-            "Пока нет альтернативных названий. Добавьте первый вариант, чтобы "
-            "место можно было найти по нему."
+        text = tr_safe(
+            "admin.edit_aliases.alternativnye_nazvaniya_poka_net",
+            canonical_name=_h(details.canonical_name),
         )
     else:
-        text = (
-            f"📝 Альтернативные названия\n\n📍 {_h(details.canonical_name)}\n"
-            f"Найдено: {total}\n\n"
+        text = tr_safe(
+            "admin.edit_aliases.alternativnye_nazvaniya_naydeno",
+            canonical_name=_h(details.canonical_name),
+            total=total,
         )
         text += "\n".join(
             f"{index}. {_h(_short(alias.name, 120))}"
@@ -2122,7 +2215,7 @@ def _edit_aliases_content(
                     callback_data=f"adm_alias_rename:{alias.name_id}",
                 ),
                 InlineKeyboardButton(
-                    "🗑 Удалить",
+                    tr("buttons.admin.udalit"),
                     callback_data=f"adm_alias_delete:{alias.name_id}",
                 ),
             ]
@@ -2131,13 +2224,14 @@ def _edit_aliases_content(
     if offset > 0:
         nav.append(
             InlineKeyboardButton(
-                "⬅️ Назад", callback_data=f"adm_alias_page:{offset - ALIAS_PAGE_SIZE}"
+                tr("buttons.nav.prev"),
+                callback_data=f"adm_alias_page:{offset - ALIAS_PAGE_SIZE}",
             )
         )
     if offset + ALIAS_PAGE_SIZE < total:
         nav.append(
             InlineKeyboardButton(
-                "Далее ➡️",
+                tr("buttons.admin.dalee"),
                 callback_data=f"adm_alias_page:{offset + ALIAS_PAGE_SIZE}",
             )
         )
@@ -2146,12 +2240,14 @@ def _edit_aliases_content(
     keyboard.append(
         [
             InlineKeyboardButton(
-                "➕ Добавить название",
+                tr("buttons.admin.dobavit_nazvanie"),
                 callback_data=f"adm_alias_add:{details.place_id}",
             )
         ]
     )
-    keyboard.append([InlineKeyboardButton("◀️ Назад", callback_data="adm_cancel")])
+    keyboard.append(
+        [InlineKeyboardButton(tr("buttons.nav.back"), callback_data="adm_cancel")]
+    )
     return text, InlineKeyboardMarkup(keyboard)
 
 
@@ -2172,13 +2268,14 @@ def _confirmation_content(
     if phase == "confirm_assign":
         if active is not None or target is None:
             return None
-        title = "Подтвердите назначение"
-        action_line = "Назначить этого пользователя администратором места?"
-        text = (
-            f"{title}\n\n"
-            f"📍 {_h(details.canonical_name)}\n"
-            f"Получатель: {_h(_user_label(target, with_id=True))}\n\n"
-            f"{action_line}"
+        title = tr("admin.confirmation.podtverdite_naznachenie")
+        action_line = tr("admin.confirmation.naznachit_etogo_polzovatelya")
+        text = tr_safe(
+            "admin.confirmation.poluchatel",
+            title=title,
+            canonical_name=_h(details.canonical_name),
+            user_label=_h(_user_label(target, with_id=True)),
+            action_line=action_line,
         )
     elif phase == "confirm_replace":
         expected = state.get("expected_admin_telegram_user_id")
@@ -2186,30 +2283,37 @@ def _confirmation_content(
             return None
         if target is None:
             return None
-        title = "Подтвердите замену администратора"
-        text = (
-            f"{title}\n\n"
-            f"📍 {_h(details.canonical_name)}\n"
-            f"Сейчас: {_h(_user_label(active.user, with_id=True))}\n"
-            f"Новый администратор: {_h(_user_label(target, with_id=True))}\n\n"
-            "Текущий администратор будет снят, новый назначен в одной "
-            "транзакции."
+        title = tr("admin.confirmation.podtverdite_zamenu_administratora")
+        text = tr_safe(
+            "admin.confirmation.seychas_novyy_administrator",
+            title=title,
+            canonical_name=_h(details.canonical_name),
+            user_label=_h(_user_label(active.user, with_id=True)),
+            user_label_2=_h(_user_label(target, with_id=True)),
         )
     else:
         expected = state.get("expected_admin_telegram_user_id")
         if active is None or active.user.telegram_user_id != expected:
             return None
-        title = "Подтвердите снятие администратора"
-        text = (
-            f"{title}\n\n"
-            f"📍 {_h(details.canonical_name)}\n"
-            f"Администратор: {_h(_user_label(active.user, with_id=True))}\n\n"
-            "После снятия у места не останется действующего админа."
+        title = tr("admin.confirmation.podtverdite_snyatie_administratora")
+        text = tr_safe(
+            "admin.confirmation.administrator_posle_snyatiya_u",
+            title=title,
+            canonical_name=_h(details.canonical_name),
+            user_label=_h(_user_label(active.user, with_id=True)),
         )
     keyboard = InlineKeyboardMarkup(
         [
-            [InlineKeyboardButton("✅ Подтвердить", callback_data="adm_confirm")],
-            [InlineKeyboardButton("❌ Отмена", callback_data="adm_cancel_confirm")],
+            [
+                InlineKeyboardButton(
+                    tr("buttons.admin.podtverdit"), callback_data="adm_confirm"
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    tr("buttons.admin.otmena"), callback_data="adm_cancel_confirm"
+                )
+            ],
         ]
     )
     return text, keyboard
@@ -2244,7 +2348,7 @@ async def _render_phase(
             state.clear()
             state.update(_new_state())
             phase = "places"
-            notice = notice or "Действие доступно только суперадминистратору."
+            notice = notice or tr("admin.render_phase.deystvie_dostupno_tolko")
 
         place_id = state.get("place_id")
         details = (
@@ -2259,12 +2363,16 @@ async def _render_phase(
             if details is None:
                 state.clear()
                 state.update(_new_state())
-                notice = notice or "Место не существует или было удалено."
+                notice = notice or tr(
+                    "admin.render_phase.mesto_suschestvuet_bylo_udaleno"
+                )
                 text, keyboard = _places_content(session, state, access_kind, user_id)
             elif not can_manage_place(session, user_id, details.place_id):
                 state.clear()
                 state.update(_new_state())
-                notice = notice or "Доступ к этому месту не подтверждён."
+                notice = notice or tr(
+                    "admin.render_phase.dostup_etomu_mestu_podtverzhden"
+                )
                 text, keyboard = _places_content(session, state, access_kind, user_id)
             else:
                 text = _place_text(
@@ -2283,24 +2391,40 @@ async def _render_phase(
             if details is None:
                 state.clear()
                 state.update(_new_state())
-                notice = notice or "Место не существует или было удалено."
+                notice = notice or tr(
+                    "admin.render_phase.mesto_suschestvuet_bylo_udaleno"
+                )
                 text, keyboard = _places_content(session, state, access_kind, user_id)
             else:
                 text = _assign_search_text(details, state)
                 keyboard = InlineKeyboardMarkup(
-                    [[InlineKeyboardButton("◀️ Назад", callback_data="adm_cancel")]]
+                    [
+                        [
+                            InlineKeyboardButton(
+                                tr("buttons.nav.back"), callback_data="adm_cancel"
+                            )
+                        ]
+                    ]
                 )
         elif phase == "assign_results":
             if details is None:
                 state.clear()
                 state.update(_new_state())
-                notice = notice or "Место не существует или было удалено."
+                notice = notice or tr(
+                    "admin.render_phase.mesto_suschestvuet_bylo_udaleno"
+                )
                 text, keyboard = _places_content(session, state, access_kind, user_id)
             elif not state.get("query"):
                 state["phase"] = "assign_search"
                 text = _assign_search_text(details, state)
                 keyboard = InlineKeyboardMarkup(
-                    [[InlineKeyboardButton("◀️ Назад", callback_data="adm_cancel")]]
+                    [
+                        [
+                            InlineKeyboardButton(
+                                tr("buttons.nav.back"), callback_data="adm_cancel"
+                            )
+                        ]
+                    ]
                 )
             else:
                 text, keyboard = _assign_results_content(session, details, state)
@@ -2308,12 +2432,16 @@ async def _render_phase(
             if details is None:
                 state.clear()
                 state.update(_new_state())
-                notice = notice or "Место не существует или было удалено."
+                notice = notice or tr(
+                    "admin.render_phase.mesto_suschestvuet_bylo_udaleno"
+                )
                 text, keyboard = _places_content(session, state, access_kind, user_id)
             elif not can_manage_place(session, user_id, details.place_id):
                 state.clear()
                 state.update(_new_state())
-                notice = notice or "Доступ к этому месту не подтверждён."
+                notice = notice or tr(
+                    "admin.render_phase.dostup_etomu_mestu_podtverzhden"
+                )
                 text, keyboard = _places_content(session, state, access_kind, user_id)
             else:
                 text, keyboard = _edit_menu_content(session, details)
@@ -2328,12 +2456,16 @@ async def _render_phase(
             if details is None:
                 state.clear()
                 state.update(_new_state())
-                notice = notice or "Место не существует или было удалено."
+                notice = notice or tr(
+                    "admin.render_phase.mesto_suschestvuet_bylo_udaleno"
+                )
                 text, keyboard = _places_content(session, state, access_kind, user_id)
             elif not can_manage_place(session, user_id, details.place_id):
                 state.clear()
                 state.update(_new_state())
-                notice = notice or "Доступ к этому месту не подтверждён."
+                notice = notice or tr(
+                    "admin.render_phase.dostup_etomu_mestu_podtverzhden"
+                )
                 text, keyboard = _places_content(session, state, access_kind, user_id)
             else:
                 text, keyboard = _edit_input_content(details, phase, state)
@@ -2351,12 +2483,16 @@ async def _render_phase(
             if details is None:
                 state.clear()
                 state.update(_new_state())
-                notice = notice or "Место не существует или было удалено."
+                notice = notice or tr(
+                    "admin.render_phase.mesto_suschestvuet_bylo_udaleno"
+                )
                 text, keyboard = _places_content(session, state, access_kind, user_id)
             elif not can_manage_place(session, user_id, details.place_id):
                 state.clear()
                 state.update(_new_state())
-                notice = notice or "Доступ к этому месту не подтверждён."
+                notice = notice or tr(
+                    "admin.render_phase.dostup_etomu_mestu_podtverzhden"
+                )
                 text, keyboard = _places_content(session, state, access_kind, user_id)
             else:
                 content = _edit_confirm_content(session, details, phase, state)
@@ -2368,7 +2504,7 @@ async def _render_phase(
                         state["phase"] = "edit_menu"
                         text, keyboard = _edit_menu_content(session, details)
                     notice = notice or (
-                        "Ситуация изменилась: обновите данные и повторите действие."
+                        tr("admin.render_phase.situaciya_izmenilas_obnovite")
                     )
                 else:
                     text, keyboard = content
@@ -2376,12 +2512,16 @@ async def _render_phase(
             if details is None:
                 state.clear()
                 state.update(_new_state())
-                notice = notice or "Место не существует или было удалено."
+                notice = notice or tr(
+                    "admin.render_phase.mesto_suschestvuet_bylo_udaleno"
+                )
                 text, keyboard = _places_content(session, state, access_kind, user_id)
             elif not can_manage_place(session, user_id, details.place_id):
                 state.clear()
                 state.update(_new_state())
-                notice = notice or "Доступ к этому месту не подтверждён."
+                notice = notice or tr(
+                    "admin.render_phase.dostup_etomu_mestu_podtverzhden"
+                )
                 text, keyboard = _places_content(session, state, access_kind, user_id)
             else:
                 text, keyboard = _edit_aliases_content(session, details, state)
@@ -2395,14 +2535,15 @@ async def _render_phase(
             if details is None:
                 state.clear()
                 state.update(_new_state())
-                notice = notice or "Место не существует или было удалено."
+                notice = notice or tr(
+                    "admin.render_phase.mesto_suschestvuet_bylo_udaleno"
+                )
                 text, keyboard = _places_content(session, state, access_kind, user_id)
             elif not is_place_admin(session, user_id, details.place_id):
                 state.clear()
                 state.update(_new_state())
                 notice = notice or (
-                    "Передать админку может только действующий администратор "
-                    "этого места."
+                    tr("admin.render_phase.peredat_adminku_mozhet_tolko")
                 )
                 text, keyboard = _places_content(session, state, access_kind, user_id)
             else:
@@ -2443,7 +2584,9 @@ async def _render_phase(
                     )
                     if not candidates:
                         state["phase"] = "transfer_username_input"
-                        notice = notice or "Выберите получателя заново."
+                        notice = notice or tr(
+                            "admin.render_phase.vyberite_poluchatelya_zanovo"
+                        )
                         text, keyboard = _transfer_username_content(
                             details, active_user
                         )
@@ -2455,7 +2598,9 @@ async def _render_phase(
                     content = _transfer_known_confirm_content(session, details, state)
                     if content is None:
                         state["phase"] = "transfer_username_input"
-                        notice = notice or "Получатель больше не известен боту."
+                        notice = notice or tr(
+                            "admin.render_phase.poluchatel_bolshe_izvesten_botu"
+                        )
                         text, keyboard = _transfer_username_content(
                             details, active_user
                         )
@@ -2464,7 +2609,9 @@ async def _render_phase(
                 elif phase == "transfer_confirm_invite":
                     if not state.get("transfer_username"):
                         state["phase"] = "transfer_username_input"
-                        notice = notice or "Введите username получателя заново."
+                        notice = notice or tr(
+                            "admin.render_phase.vvedite_username_poluchatelya"
+                        )
                         text, keyboard = _transfer_username_content(
                             details, active_user
                         )
@@ -2479,8 +2626,7 @@ async def _render_phase(
                     if content is None:
                         state["phase"] = "transfer_username_input"
                         notice = notice or (
-                            "Активной передачи нет. Введите username, чтобы "
-                            "создать новое предложение."
+                            tr("admin.render_phase.aktivnoy_peredachi_net_vvedite")
                         )
                         text, keyboard = _transfer_username_content(
                             details, active_user
@@ -2497,8 +2643,7 @@ async def _render_phase(
                 state.clear()
                 state.update(_new_state())
                 notice = notice or (
-                    "Сводная очередь предложений мест доступна только "
-                    "суперадминистратору."
+                    tr("admin.render_phase.svodnaya_ochered_predlozheniy_mest")
                 )
                 text, keyboard = _places_content(session, state, access_kind, user_id)
             else:
@@ -2531,7 +2676,9 @@ async def _render_phase(
             ):
                 state.clear()
                 state.update(_new_state())
-                notice = notice or "Доступ к этому месту не подтверждён."
+                notice = notice or tr(
+                    "admin.render_phase.dostup_etomu_mestu_podtverzhden"
+                )
                 text, keyboard = _places_content(session, state, access_kind, user_id)
             elif phase == "conflicts_list":
                 text, keyboard = _conflicts_list_content(
@@ -2539,7 +2686,7 @@ async def _render_phase(
                 )
             elif view is None:
                 state["phase"] = "conflicts_list"
-                notice = notice or "Задача конфликта недоступна."
+                notice = notice or tr("admin.render_phase.zadacha_konflikta_nedostupna")
                 text, keyboard = _conflicts_list_content(
                     session, user_id, None, place_for_conflicts
                 )
@@ -2548,14 +2695,14 @@ async def _render_phase(
             elif phase == "conflict_rename_input":
                 if not view.is_open:
                     state["phase"] = "conflict_card"
-                    notice = notice or "Задача уже решена."
+                    notice = notice or tr("admin.render_phase.zadacha_reshena")
                     text, keyboard = _conflict_card_content(view)
                 else:
                     text, keyboard = _conflict_rename_input_content(view)
             else:
                 if not view.is_open:
                     state["phase"] = "conflict_card"
-                    notice = notice or "Задача уже решена."
+                    notice = notice or tr("admin.render_phase.zadacha_reshena")
                     text, keyboard = _conflict_card_content(view)
                 else:
                     text, keyboard = _conflict_switch_confirm_content(view)
@@ -2577,15 +2724,16 @@ async def _render_phase(
                 state.clear()
                 state.update(_new_state())
                 notice = notice or (
-                    "Предложение недоступно: оно не найдено или полномочия "
-                    "на это место больше не действуют."
+                    tr("admin.render_phase.predlozhenie_nedostupno_ono")
                 )
                 text, keyboard = _places_content(session, state, access_kind, user_id)
             elif phase == "proposal_card":
                 text, keyboard = _proposal_admin_card_content(proposal)
             elif proposal.status != PROPOSAL_STATUS_PENDING:
                 state["phase"] = "proposal_card"
-                notice = notice or "Предложение уже не ожидает решения."
+                notice = notice or tr(
+                    "admin.render_phase.predlozhenie_ozhidaet_resheniya"
+                )
                 text, keyboard = _proposal_admin_card_content(proposal)
             elif phase == "proposal_approve_confirm":
                 text, keyboard = _proposal_approve_confirm_content(proposal)
@@ -2595,14 +2743,16 @@ async def _render_phase(
             if details is None:
                 state.clear()
                 state.update(_new_state())
-                notice = notice or "Место не существует или было удалено."
+                notice = notice or tr(
+                    "admin.render_phase.mesto_suschestvuet_bylo_udaleno"
+                )
                 text, keyboard = _places_content(session, state, access_kind, user_id)
             else:
                 confirmation = _confirmation_content(session, details, state, phase)
                 if confirmation is None:
                     state["phase"] = "place"
                     notice = notice or (
-                        "Ситуация изменилась: обновите выбор администратора."
+                        tr("admin.render_phase.situaciya_izmenilas_obnovite_vybor")
                     )
                     text = _place_text(
                         details,
@@ -2701,7 +2851,9 @@ async def open_place_admin_editor(
     finally:
         session.close()
     if not exists:
-        await query.answer("Место не существует или удалено.", show_alert=True)
+        await query.answer(
+            tr("alerts.admin.mesto_suschestvuet_udaleno"), show_alert=True
+        )
         return
     if not allowed:
         await query.answer(DENIED_ALERT, show_alert=True)
@@ -2737,7 +2889,9 @@ async def open_place_admin_card(
     finally:
         session.close()
     if not exists:
-        await query.answer("Место не существует или удалено.", show_alert=True)
+        await query.answer(
+            tr("alerts.admin.mesto_suschestvuet_udaleno"), show_alert=True
+        )
         return
     await query.answer()
     clear_place_session(user_id)
@@ -2796,7 +2950,7 @@ async def handle_open_place(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     finally:
         session.close()
     if details is None:
-        await query.answer("Место недоступно.", show_alert=True)
+        await query.answer(tr("alerts.admin.mesto_nedostupno"), show_alert=True)
         return
     await query.answer()
     state["place_id"] = place_id
@@ -2825,11 +2979,11 @@ async def handle_assign(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     session = SessionLocal()
     try:
         if get_place_details(session, place_id) is None:
-            await query.answer("Место не найдено.", show_alert=True)
+            await query.answer(tr("alerts.admin.mesto_naydeno"), show_alert=True)
             return
         if get_active_place_admin(session, place_id) is not None:
             await query.answer(
-                "У места уже есть администратор. Используйте замену.",
+                tr("alerts.admin.u_mesta_est_administrator"),
                 show_alert=True,
             )
             return
@@ -2868,7 +3022,7 @@ async def handle_replace(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         session.close()
     if details is None or active is None:
         await query.answer(
-            "Администратор уже изменился. Обновите карточку.", show_alert=True
+            tr("alerts.admin.administrator_izmenilsya_obnovite"), show_alert=True
         )
         return
     await query.answer()
@@ -2904,7 +3058,7 @@ async def handle_revoke(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         session.close()
     if details is None or active is None:
         await query.answer(
-            "Администратор уже изменился. Обновите карточку.", show_alert=True
+            tr("alerts.admin.administrator_izmenilsya_obnovite"), show_alert=True
         )
         return
     await query.answer()
@@ -2964,7 +3118,7 @@ async def handle_pick_user(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     finally:
         session.close()
     if details is None:
-        await query.answer("Место не существует.", show_alert=True)
+        await query.answer(tr("alerts.admin.mesto_suschestvuet"), show_alert=True)
         return
 
     mode = state.get("mode") or "assign"
@@ -2972,7 +3126,7 @@ async def handle_pick_user(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         expected = state.get("expected_admin_telegram_user_id")
         if active is None or active.user.telegram_user_id != expected:
             await query.answer(
-                "Администратор уже изменился. Выберите действие заново.",
+                tr("alerts.admin.administrator_izmenilsya_vyberite"),
                 show_alert=True,
             )
             state["phase"] = "place"
@@ -2980,7 +3134,7 @@ async def handle_pick_user(update: Update, context: ContextTypes.DEFAULT_TYPE) -
             return
     elif active is not None:
         await query.answer(
-            "У места уже появился администратор. Выберите замену.",
+            tr("alerts.admin.u_mesta_poyavilsya_administrator"),
             show_alert=True,
         )
         state["phase"] = "place"
@@ -2995,26 +3149,20 @@ async def handle_pick_user(update: Update, context: ContextTypes.DEFAULT_TYPE) -
 
 def _mutation_notice(result: AdminMutationResult) -> str:
     if result.status == "assigned":
-        return "✅ Администратор назначен."
+        return tr("admin.mutation_notice.administrator_naznachen")
     if result.status == "replaced":
-        return "✅ Администратор заменён."
+        return tr("admin.mutation_notice.administrator_zamenen")
     if result.status == "revoked":
-        return "✅ Администратор снят."
+        return tr("admin.mutation_notice.administrator_snyat")
     if result.status == "already_admin":
-        return "Этот пользователь уже управляет этим местом."
+        return tr("admin.mutation_notice.etot_polzovatel_upravlyaet_etim")
     if result.status == "has_admin":
-        return (
-            "Назначение не выполнено: у места уже есть администратор. "
-            "Используйте замену."
-        )
+        return tr("admin.mutation_notice.naznachenie_vypolneno_u_mesta")
     if result.status == "user_missing":
-        return "Получатель больше не известен боту. Выберите другого."
+        return tr("admin.mutation_notice.poluchatel_bolshe_izvesten_botu")
     if result.status == "place_missing":
-        return "Место не существует или было удалено."
-    return (
-        "Данные изменились во время подтверждения. Действие не выполнено; "
-        "обновите выбор."
-    )
+        return tr("admin.render_phase.mesto_suschestvuet_bylo_udaleno")
+    return tr("admin.mutation_notice.dannye_izmenilis_vremya")
 
 
 async def handle_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -3085,7 +3233,7 @@ async def handle_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             update,
             context,
             state,
-            notice="Не удалось изменить администратора из-за ошибки базы данных.",
+            notice=tr("admin.handle_confirm.ne_udalos_izmenit_administratora"),
         )
         return
     finally:
@@ -3307,7 +3455,7 @@ async def handle_edit_address_delete(
     if details is None or details.address is None:
         # Адрес уже удалён или отсутствует: предлагаем обновить меню.
         await query.answer(
-            "Адрес уже отсутствует: обновите меню редактирования.",
+            tr("alerts.admin.adres_otsutstvuet_obnovite_menyu"),
             show_alert=True,
         )
         return
@@ -3339,7 +3487,7 @@ async def handle_edit_url_delete(
     if details is None or details.url is None:
         # Ссылка уже удалена или отсутствует: предлагаем обновить меню.
         await query.answer(
-            "Ссылка уже отсутствует: обновите меню редактирования.",
+            tr("alerts.admin.ssylka_otsutstvuet_obnovite_menyu"),
             show_alert=True,
         )
         return
@@ -3399,7 +3547,9 @@ async def handle_alias_rename(
     finally:
         session.close()
     if alias is None:
-        await query.answer("Название уже изменено или удалено.", show_alert=True)
+        await query.answer(
+            tr("alerts.admin.nazvanie_izmeneno_udaleno"), show_alert=True
+        )
         return
     await query.answer()
     _clear_edit_keys(state)
@@ -3434,7 +3584,9 @@ async def handle_alias_delete(
     finally:
         session.close()
     if alias is None:
-        await query.answer("Название уже изменено или удалено.", show_alert=True)
+        await query.answer(
+            tr("alerts.admin.nazvanie_izmeneno_udaleno"), show_alert=True
+        )
         return
     await query.answer()
     _clear_edit_keys(state)
@@ -3479,31 +3631,25 @@ def _validate_edit_input(
     if phase == "edit_address_input":
         cleaned = clean_address_text(raw)
         if cleaned == details.address:
-            raise PlaceEditValueError(
-                "Адрес уже такой. Если адрес нужно удалить, используйте "
-                "кнопку «🗑» рядом с адресом в меню редактирования."
-            )
+            raise PlaceEditValueError(tr("admin.validate_edit_input.adres_uzhe_takoy"))
         return "edit_address_confirm", cleaned, ""
     if phase == "edit_city_input":
         cleaned_city = validate_place_city(raw)
         if cleaned_city == details.city:
-            raise PlaceEditValueError(
-                "Город уже такой. Удалить город нельзя — укажите другой город."
-            )
+            raise PlaceEditValueError(tr("admin.validate_edit_input.gorod_uzhe_takoy"))
         return "edit_city_confirm", cleaned_city, ""
     if phase == "edit_url_input":
         normalized = normalize_place_url(raw)
         if normalized == details.url:
             raise PlaceEditValueError(
-                "Ссылка уже такая. Если ссылку нужно удалить, используйте "
-                "кнопку «🗑» рядом со ссылкой в меню редактирования."
+                tr("admin.validate_edit_input.ssylka_uzhe_takaya")
             )
         return "edit_url_confirm", normalized, ""
 
     what = {
-        "edit_name_input": "Название места",
-        "edit_alias_add_input": "Альтернативное название",
-        "edit_alias_rename_input": "Альтернативное название",
+        "edit_name_input": tr("admin.validate_edit_input.nazvanie_mesta"),
+        "edit_alias_add_input": tr("places.handle_place.alternativnoe_nazvanie"),
+        "edit_alias_rename_input": tr("places.handle_place.alternativnoe_nazvanie"),
     }[phase]
     display = validate_place_name(raw, what=what)
     needle = normalize_place_name(display)
@@ -3512,8 +3658,7 @@ def _validate_edit_input(
     if phase == "edit_name_input":
         if needle == normalize_place_name(details.canonical_name):
             raise PlaceEditValueError(
-                "Такое название уже является каноническим у этого места. "
-                "Введите другое название."
+                tr("admin.validate_edit_input.nazvanie_uzhe_kanonicheskoe")
             )
         existing_names = [alias.name for alias in aliases]
     elif phase == "edit_alias_add_input":
@@ -3526,8 +3671,7 @@ def _validate_edit_input(
                 break
         if target is None:
             raise PlaceEditValueError(
-                "Название уже изменено или удалено другим администратором. "
-                "Вернитесь к списку названий."
+                tr("admin.validate_edit_input.nazvanie_uzhe_izmeneno_udaleno")
             )
         existing_names = [details.canonical_name] + [
             alias.name for alias in aliases if alias.name_id != rename_name_id
@@ -3535,19 +3679,23 @@ def _validate_edit_input(
     for name in existing_names:
         if normalize_place_name(name) == needle:
             raise PlaceEditValueError(
-                f"Такое название уже есть у этого места: «{name}». Введите другое."
+                tr("admin.validate_edit_input.takoe_nazvanie_uzhe_est_u", name=name)
             )
 
     conflicts = find_name_conflicts(session, display, exclude_place_id=details.place_id)
     warning = ""
     if conflicts:
         other = conflicts[0]
-        warning = (
-            f"Похожее название у другого места: «{other.matched_name}» "
-            f"в месте «{other.canonical_name}»."
+        warning = tr(
+            "admin.validate_edit_input.pohozhee_nazvanie_u_drugogo",
+            matched_name=other.matched_name,
+            canonical_name=other.canonical_name,
         )
         if len(conflicts) > 1:
-            warning += f" Похожих мест: {len(conflicts)}."
+            warning += tr(
+                "admin.validate_edit_input.pohozhih_mest",
+                count_conflicts=len(conflicts),
+            )
 
     next_phase = {
         "edit_name_input": "edit_name_confirm",
@@ -3581,7 +3729,7 @@ async def handle_edit_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -
                 update,
                 context,
                 state,
-                notice="Место не существует или было удалено.",
+                notice=tr("admin.render_phase.mesto_suschestvuet_bylo_udaleno"),
                 drop_input=True,
             )
             return
@@ -3651,45 +3799,45 @@ def _edit_result_notice(
     ok_phase = "edit_aliases" if alias_phase else "edit_menu"
     if result.status == "ok":
         if phase == "edit_name_confirm":
-            return "✅ Название места изменено.", "place"
+            return tr("admin.edit_result_notice.nazvanie_mesta_izmeneno"), "place"
         if phase == "edit_alias_add_confirm":
-            return "✅ Альтернативное название добавлено.", "edit_aliases"
+            return (
+                tr("admin.edit_result_notice.alternativnoe_nazvanie_dobavleno"),
+                "edit_aliases",
+            )
         if phase == "edit_alias_rename_confirm":
-            return "✅ Альтернативное название переименовано.", "edit_aliases"
+            return tr("admin.edit_result_notice.alternativnoe_nazvanie"), "edit_aliases"
         if phase == "edit_alias_delete_confirm":
-            return "✅ Альтернативное название удалено.", "edit_aliases"
+            return (
+                tr("admin.edit_result_notice.alternativnoe_nazvanie_udaleno"),
+                "edit_aliases",
+            )
         if phase == "edit_address_confirm":
-            return "✅ Адрес места обновлён.", "edit_menu"
+            return tr("admin.edit_result_notice.adres_mesta_obnovlen"), "edit_menu"
         if phase == "edit_address_delete_confirm":
-            return "✅ Адрес места удалён.", "edit_menu"
+            return tr("admin.edit_result_notice.adres_mesta_udalen"), "edit_menu"
         if phase == "edit_city_confirm":
-            return "✅ Город места обновлён.", "edit_menu"
+            return tr("admin.edit_result_notice.gorod_mesta_obnovlen"), "edit_menu"
         if phase == "edit_url_confirm":
-            return "✅ Ссылка места обновлена.", "edit_menu"
-        return "✅ Ссылка места удалена.", "edit_menu"
+            return tr("admin.edit_result_notice.ssylka_mesta_obnovlena"), "edit_menu"
+        return tr("admin.edit_result_notice.ssylka_mesta_udalena"), "edit_menu"
     if result.status == "unchanged":
-        return "Значение уже было таким. Изменений нет.", ok_phase
+        return tr("admin.edit_result_notice.znachenie_bylo_takim_izmeneniy"), ok_phase
     if result.status == "changed":
-        return (
-            "Значение изменилось во время подтверждения: другой администратор "
-            "обновил это поле. Откройте меню редактирования заново."
-        ), ok_phase
+        return (tr("admin.edit_result_notice.znachenie_izmenilos_vremya")), ok_phase
     if result.status == "duplicate":
-        return "Такое название уже есть у этого места. Введите другое.", ok_phase
+        return tr("admin.edit_result_notice.takoe_nazvanie_est_u"), ok_phase
     if result.status == "not_found":
         return (
-            "Название уже изменено или удалено другим администратором."
+            tr("admin.edit_result_notice.nazvanie_izmeneno_udaleno_drugim")
         ), "edit_aliases"
     if result.status == "canonical":
-        return (
-            "Каноническое название изменяется отдельным действием «Изменить "
-            "название»."
-        ), ok_phase
+        return (tr("admin.edit_result_notice.kanonicheskoe_nazvanie")), ok_phase
     if result.status == "conflict":
         return (
-            "Название похоже на название другого места. Повторите действие."
+            tr("admin.edit_result_notice.nazvanie_pohozhe_nazvanie_drugogo")
         ), ok_phase
-    return "Место не существует или было удалено.", None
+    return tr("admin.render_phase.mesto_suschestvuet_bylo_udaleno"), None
 
 
 def _expected_field_from_state(state: dict, fresh_value: str | None) -> str | None:
@@ -3745,7 +3893,7 @@ async def handle_edit_confirm(
                 update,
                 context,
                 state,
-                notice="Место не существует или было удалено.",
+                notice=tr("admin.render_phase.mesto_suschestvuet_bylo_udaleno"),
             )
             return
         actor_telegram_user_id = user.id
@@ -3844,7 +3992,7 @@ async def handle_edit_confirm(
                 update,
                 context,
                 state,
-                notice="Не удалось изменить данные места из-за ошибки базы данных.",
+                notice=tr("admin.handle_edit_confirm.ne_udalos_izmenit_dannye"),
             )
             return
     finally:
@@ -4131,7 +4279,7 @@ async def handle_transfer_text(
                 update,
                 context,
                 state,
-                notice="Место не существует или было удалено.",
+                notice=tr("admin.render_phase.mesto_suschestvuet_bylo_udaleno"),
                 drop_input=True,
             )
             return
@@ -4172,10 +4320,7 @@ async def handle_transfer_text(
                     update,
                     context,
                     state,
-                    notice=(
-                        "Нельзя передать админку самому себе. Введите username "
-                        "другого человека."
-                    ),
+                    notice=(tr("admin.handle_transfer.nelzya_peredat_adminku_samomu")),
                     cleanup_ids=cleanup,
                     drop_input=True,
                 )
@@ -4257,14 +4402,17 @@ async def handle_transfer_confirm(
             update,
             context,
             state,
-            notice="Выберите получателя заново.",
+            notice=tr("admin.render_phase.vyberite_poluchatelya_zanovo"),
         )
         return
     if not username:
         state["phase"] = "transfer_username_input"
         await query.answer()
         await _render_phase(
-            update, context, state, notice="Введите username получателя заново."
+            update,
+            context,
+            state,
+            notice=tr("admin.render_phase.vvedite_username_poluchatelya"),
         )
         return
 
@@ -4290,7 +4438,7 @@ async def handle_transfer_confirm(
     except Exception as e:  # noqa: BLE001 — безопасный экран вместо падения
         logger.error("Не удалось создать предложение передачи: %s", e)
         result = None
-        notice = "Не удалось создать предложение. Повторите позже."
+        notice = tr("admin.handle_transfer_confirm.ne_udalos_sozdat_predlozhenie")
     else:
         notice = ""
 
@@ -4313,13 +4461,9 @@ async def handle_transfer_confirm(
                 finally:
                     session.close()
         notice = (
-            "✅ Предложение создано. Получатель получил уведомление."
+            tr("admin.handle_transfer_confirm.predlozhenie_sozdano_poluchatel")
             if delivered
-            else (
-                "✅ Предложение создано, но личное уведомление не доставлено. "
-                "Откройте передачу и нажмите «Уведомить получателя ещё раз» "
-                "после восстановления связи."
-            )
+            else (tr("admin.handle_transfer_confirm.predlozhenie_sozdano_no_lichnoe"))
         )
         _clear_transfer_keys(state)
         state["phase"] = "transfer_outgoing"
@@ -4346,32 +4490,26 @@ async def handle_transfer_confirm(
                 session.close()
             _clear_transfer_keys(state)
             state["phase"] = "transfer_username_input"
-            notice = (
-                "Не удалось сформировать ссылку-приглашение. Предложение "
-                "отменено; повторите попытку."
-            )
+            notice = tr("admin.handle_transfer_confirm.ne_udalos_sformirovat_ssylku")
         else:
             _clear_transfer_keys(state)
             state["phase"] = "transfer_outgoing"
-            notice = (
-                "✅ Ссылка-приглашение создана на 24 часа. Она показана ниже "
-                "один раз."
-            )
+            notice = tr("admin.handle_transfer_confirm.ssylka_priglashenie_sozdana_24")
     elif result.status == "active_exists":
         _clear_transfer_keys(state)
         state["phase"] = "transfer_outgoing"
-        notice = "У этого места уже есть активное предложение передачи."
+        notice = tr("admin.handle_transfer_confirm.u_etogo_mesta_est")
     elif result.status == "self":
-        notice = "Нельзя передать админку самому себе."
+        notice = tr("admin.handle_transfer_confirm.nelzya_peredat_adminku_samomu")
     elif result.status == "user_missing":
-        notice = "Получатель больше не известен боту. Введите username заново."
+        notice = tr("admin.handle_transfer_confirm.poluchatel_bolshe_izvesten_botu")
         state["phase"] = "transfer_username_input"
     elif result.status == "place_missing":
         state.clear()
         state.update(_new_state())
-        notice = "Место не существует или было удалено."
+        notice = tr("admin.render_phase.mesto_suschestvuet_bylo_udaleno")
     else:
-        notice = "Предложение не создано: состояние изменилось. Повторите."
+        notice = tr("admin.handle_transfer_confirm.predlozhenie_sozdano_sostoyanie")
 
     await query.answer()
     await _render_phase(update, context, state, notice=notice, invite_url=invite_url)
@@ -4439,13 +4577,22 @@ async def handle_transfer_approve(
     if result.status != "approved":
         await query.answer()
         notice = {
-            "not_opened": "Ссылку ещё никто не открыл.",
-            "already_approved": "Получатель уже утверждён.",
-            "not_initiator": "Утвердить получателя может только инициатор.",
-            "superseded": "Предложение недействительно: администратор изменился.",
-            "expired": "Срок предложения истёк.",
-            "self": "Нельзя утвердить самого себя.",
-        }.get(result.status, "Состояние изменилось. Обновите экран.")
+            "not_opened": tr("admin.handle_transfer_approve.ssylku_nikto_otkryl"),
+            "already_approved": tr(
+                "admin.handle_transfer_approve.poluchatel_utverzhden_2"
+            ),
+            "not_initiator": tr(
+                "admin.handle_transfer_approve.utverdit_poluchatelya_mozhet_tol"
+            ),
+            "superseded": tr(
+                "admin.handle_transfer_approve.predlozhenie_nedeystvitelno"
+            ),
+            "expired": tr("admin.handle_transfer_approve.srok_predlozheniya_istek"),
+            "self": tr("admin.handle_transfer_approve.nelzya_utverdit_samogo_sebya"),
+        }.get(
+            result.status,
+            tr("admin.handle_transfer_approve.sostoyanie_izmenilos_obnovite"),
+        )
         await _render_phase(update, context, state, notice=notice)
         return
 
@@ -4461,12 +4608,9 @@ async def handle_transfer_approve(
             finally:
                 session.close()
     await query.answer()
-    notice = "✅ Получатель утверждён."
+    notice = tr("admin.handle_transfer_approve.poluchatel_utverzhden")
     if not delivered:
-        notice += (
-            " Личное уведомление не доставлено; получатель может открыть "
-            "ссылку повторно или вы нажмёте «Уведомить получателя ещё раз»."
-        )
+        notice += tr("admin.handle_transfer_approve.lichnoe_uvedomlenie_dostavleno")
     await _render_phase(update, context, state, notice=notice)
 
 
@@ -4500,7 +4644,7 @@ async def handle_transfer_notify(
             return
         if not view.awaiting_recipient:
             await query.answer(
-                "Уведомление больше не требуется: состояние передачи изменилось.",
+                tr("alerts.admin.uvedomlenie_bolshe_trebuetsya"),
                 show_alert=True,
             )
             await _render_phase(update, context, state)
@@ -4519,9 +4663,9 @@ async def handle_transfer_notify(
             session.close()
     await query.answer()
     notice = (
-        "✅ Уведомление доставлено."
+        tr("admin.handle_transfer_notify.uvedomlenie_dostavleno")
         if delivered
-        else "Не удалось доставить уведомление. Получатель может открыть ссылку повторно."
+        else tr("admin.handle_transfer_notify.ne_udalos_dostavit_uvedomlenie")
     )
     await _render_phase(update, context, state, notice=notice)
 
@@ -4572,23 +4716,37 @@ async def handle_transfer_cancel(
                 context,
                 recipient.telegram_user_id,
                 (
-                    "❌ Передача администрации отменена\n\n"
-                    f"📍 {_h(result.transfer.place_name if result.transfer else '')}"
-                    "\n\nПолномочия не изменились."
+                    tr_safe(
+                        "admin.handle_transfer_cancel.peredacha_administracii_otmenena",
+                        place_name=_h(
+                            result.transfer.place_name if result.transfer else ""
+                        ),
+                    )
                 ),
             )
         _clear_transfer_keys(state)
         state["phase"] = "place"
-        notice = "✅ Передача отменена. Права остались у вас."
+        notice = tr("admin.handle_transfer_cancel.peredacha_otmenena_prava_ostalis")
     else:
         notice = {
-            "not_initiator": "Отменить передачу может только её инициатор.",
-            "expired": "Срок предложения уже истёк.",
-            "superseded": "Предложение уже недействительно: администратор изменился.",
-            "cancelled": "Передача уже отменена.",
-            "confirmed": "Передача уже подтверждена и не может быть отменена.",
-            "rejected": "Получатель уже отклонил предложение.",
-        }.get(result.status, "Состояние изменилось. Обновите экран.")
+            "not_initiator": tr(
+                "admin.handle_transfer_cancel.otmenit_peredachu_mozhet_tolko"
+            ),
+            "expired": tr("admin.handle_transfer_cancel.srok_predlozheniya_istek"),
+            "superseded": tr(
+                "admin.handle_transfer_cancel.predlozhenie_nedeystvitelno"
+            ),
+            "cancelled": tr("admin.handle_transfer_cancel.peredacha_otmenena"),
+            "confirmed": tr(
+                "admin.handle_transfer_cancel.peredacha_podtverzhdena_mozhet_by"
+            ),
+            "rejected": tr(
+                "admin.handle_transfer_cancel.poluchatel_otklonil_predlozhenie"
+            ),
+        }.get(
+            result.status,
+            tr("admin.handle_transfer_approve.sostoyanie_izmenilos_obnovite"),
+        )
         if result.transfer is None:
             state["phase"] = "place"
         else:
@@ -4620,21 +4778,19 @@ async def handle_transfer_accept(
     except Exception as e:  # noqa: BLE001 — отказ безопаснее ложного подтверждения
         logger.error("Не удалось подтвердить передачу: %s", e)
         await query.answer(
-            "Не удалось подтвердить передачу. Повторите позже.", show_alert=True
+            tr("alerts.admin.ne_udalos_podtverdit_peredachu"), show_alert=True
         )
         return
     finally:
         session.close()
 
     if result.status == "confirmed":
-        await query.answer("Передача подтверждена")
+        await query.answer(tr("alerts.admin.peredacha_podtverzhdena"))
         view = result.transfer
         if view is not None:
-            text = (
-                "✅ Вы теперь администратор места\n\n"
-                f"📍 {_h(view.place_name)}\n\n"
-                "Права прежнего администратора сняты. Его открытые экраны "
-                "этого места больше не действуют: права проверяются заново."
+            text = tr_safe(
+                "admin.handle_transfer_accept.vy_teper_administrator_mesta",
+                place_name=_h(view.place_name),
             )
             await _edit_notification_message(
                 query,
@@ -4643,13 +4799,14 @@ async def handle_transfer_accept(
                     [
                         [
                             InlineKeyboardButton(
-                                "🛡 Открыть кабинет",
+                                tr("buttons.admin.otkryt_kabinet"),
                                 callback_data="admin_panel",
                             )
                         ],
                         [
                             InlineKeyboardButton(
-                                "🏠 Главное меню", callback_data="main_menu"
+                                tr("buttons.admin.glavnoe_menyu"),
+                                callback_data="main_menu",
                             )
                         ],
                     ]
@@ -4659,33 +4816,43 @@ async def handle_transfer_accept(
                 context,
                 view,
                 (
-                    "✅ Передача администрации завершена\n\n"
-                    f"📍 {_h(view.place_name)}\n"
-                    f"Новый администратор: "
-                    f"{_h(_transfer_user_label(view.to_user)) if view.to_user else '—'}\n\n"
-                    "Ваши полномочия на это место сняты."
+                    tr_safe(
+                        "admin.handle_transfer_accept.peredacha_administracii_zavershen",
+                        place_name=_h(view.place_name),
+                        transfer_user_label=(
+                            _h(_transfer_user_label(view.to_user))
+                            if view.to_user
+                            else "—"
+                        ),
+                    )
                 ),
             )
         return
 
     if result.status == "already_confirmed":
-        await query.answer("Передача уже подтверждена")
+        await query.answer(tr("alerts.admin.peredacha_podtverzhdena_2"))
         await _edit_notification_message(
             query,
-            "✅ Это предложение уже подтверждено. Повторно права не меняются.",
+            tr("admin.handle_transfer_accept.eto_predlozhenie_podtverzhdeno"),
             InlineKeyboardMarkup(
-                [[InlineKeyboardButton("🏠 Главное меню", callback_data="main_menu")]]
+                [
+                    [
+                        InlineKeyboardButton(
+                            tr("buttons.admin.glavnoe_menyu"), callback_data="main_menu"
+                        )
+                    ]
+                ]
             ),
         )
         return
 
     if result.status == "not_recipient":
         await query.answer(
-            "Предложение адресовано другому пользователю.", show_alert=True
+            tr("alerts.admin.predlozhenie_adresovano_drugomu"), show_alert=True
         )
         return
 
-    await query.answer("Передача не может быть подтверждена")
+    await query.answer(tr("alerts.admin.peredacha_mozhet_byt_podtverzhdena"))
     text, keyboard = _incoming_transfer_content(result.status, result.transfer, user.id)
     await _edit_notification_message(query, text, keyboard)
 
@@ -4713,24 +4880,31 @@ async def handle_transfer_decline(
     except Exception as e:  # noqa: BLE001
         logger.error("Не удалось отклонить передачу: %s", e)
         await query.answer(
-            "Не удалось отклонить передачу. Повторите позже.", show_alert=True
+            tr("alerts.admin.ne_udalos_otklonit_peredachu"), show_alert=True
         )
         return
     finally:
         session.close()
 
     if result.status == "rejected":
-        await query.answer("Предложение отклонено")
+        await query.answer(tr("alerts.admin.predlozhenie_otkloneno"))
         view = result.transfer
         await _edit_notification_message(
             query,
             (
-                "❌ Вы отклонили передачу администрации\n\n"
-                f"📍 {_h(view.place_name) if view else ''}\n\n"
-                "Полномочия не изменились."
+                tr_safe(
+                    "admin.handle_transfer_decline.vy_otklonili_peredachu",
+                    place_name=_h(view.place_name) if view else "",
+                )
             ),
             InlineKeyboardMarkup(
-                [[InlineKeyboardButton("🏠 Главное меню", callback_data="main_menu")]]
+                [
+                    [
+                        InlineKeyboardButton(
+                            tr("buttons.admin.glavnoe_menyu"), callback_data="main_menu"
+                        )
+                    ]
+                ]
             ),
         )
         if view is not None:
@@ -4738,21 +4912,21 @@ async def handle_transfer_decline(
                 context,
                 view,
                 (
-                    "❌ Получатель отклонил передачу администрации\n\n"
-                    f"📍 {_h(view.place_name)}\n\n"
-                    "Вы остаётесь администратором. Можно создать новое "
-                    "предложение."
+                    tr_safe(
+                        "admin.handle_transfer_decline.poluchatel_otklonil_peredachu",
+                        place_name=_h(view.place_name),
+                    )
                 ),
             )
         return
 
     if result.status == "not_recipient":
         await query.answer(
-            "Предложение адресовано другому пользователю.", show_alert=True
+            tr("alerts.admin.predlozhenie_adresovano_drugomu"), show_alert=True
         )
         return
 
-    await query.answer("Предложение уже нельзя отклонить")
+    await query.answer(tr("alerts.admin.predlozhenie_nelzya_otklonit"))
     text, keyboard = _incoming_transfer_content(result.status, result.transfer, user.id)
     await _edit_notification_message(query, text, keyboard)
 
@@ -4987,12 +5161,12 @@ async def handle_brick_proposals_open(
     finally:
         session.close()
     if proposal is None:
-        await query.answer("Предложение недоступно.", show_alert=True)
+        await query.answer(tr("alerts.admin.predlozhenie_nedostupno"), show_alert=True)
         await _render_phase(
             update,
             context,
             state,
-            notice="Предложение не найдено или недоступно.",
+            notice=tr("admin.handle_brick_proposals.predlozhenie_naydeno_nedostupno"),
         )
         return
     await query.answer()
@@ -5021,17 +5195,14 @@ async def handle_brick_proposal_approve(
         session.close()
     if proposal is None:
         await query.answer(
-            "Предложение недоступно: полномочия изменились.",
+            tr("alerts.admin.predlozhenie_nedostupno_2"),
             show_alert=True,
         )
         await _render_phase(
             update,
             context,
             state,
-            notice=(
-                "Предложение недоступно или полномочия на это место больше "
-                "не действуют."
-            ),
+            notice=(tr("admin.handle_brick_proposal.predlozhenie_nedostupno")),
         )
         return
     await query.answer()
@@ -5041,7 +5212,7 @@ async def handle_brick_proposal_approve(
             update,
             context,
             state,
-            notice="Предложение уже не ожидает решения.",
+            notice=tr("admin.render_phase.predlozhenie_ozhidaet_resheniya"),
         )
         return
     state["phase"] = "proposal_approve_confirm"
@@ -5067,17 +5238,14 @@ async def handle_brick_proposal_reject(
         session.close()
     if proposal is None:
         await query.answer(
-            "Предложение недоступно: полномочия изменились.",
+            tr("alerts.admin.predlozhenie_nedostupno_2"),
             show_alert=True,
         )
         await _render_phase(
             update,
             context,
             state,
-            notice=(
-                "Предложение недоступно или полномочия на это место больше "
-                "не действуют."
-            ),
+            notice=(tr("admin.handle_brick_proposal.predlozhenie_nedostupno")),
         )
         return
     await query.answer()
@@ -5087,7 +5255,7 @@ async def handle_brick_proposal_reject(
             update,
             context,
             state,
-            notice="Предложение уже не ожидает решения.",
+            notice=tr("admin.render_phase.predlozhenie_ozhidaet_resheniya"),
         )
         return
     state["phase"] = "proposal_reject_confirm"
@@ -5103,26 +5271,29 @@ async def _notify_proposal_author(
 ) -> bool:
     """Best-effort уведомление после уже зафиксированного решения."""
     if approved:
-        text = (
-            f"✅ Ваше предложение кирпичика «{_h(proposal.title)}» "
-            f"<code>[{_h(proposal.code)}]</code> одобрено.\n\n"
-            f"Область: {_h(_proposal_target_label(proposal))}.\n"
-            "Создан отдельный кирпичик; ваш исходный личный кирпичик и "
-            "шаблоны не изменены."
+        text = tr_safe(
+            "admin.notify_proposal_author.vashe_predlozhenie_kirpichik_html",
+            title=_h(proposal.title),
+            code=_h(proposal.code),
+            proposal_target_label=_h(_proposal_target_label(proposal)),
         )
         if brick_id is not None:
-            text += f"\nНовый кирпичик: #{brick_id}."
+            text += tr(
+                "admin.notify_proposal_author.novyy_kirpichik", brick_id=brick_id
+            )
     else:
-        text = (
-            f"❌ Ваше предложение кирпичика «{_h(proposal.title)}» "
-            f"<code>[{_h(proposal.code)}]</code> отклонено.\n\n"
-            f"Область: {_h(_proposal_target_label(proposal))}.\n"
-            "Личный кирпичик и шаблоны не изменены. Новое предложение можно "
-            "отправить позже."
+        text = tr_safe(
+            "admin.notify_proposal_author.vashe_predlozhenie_kirpichik_2_html",
+            title=_h(proposal.title),
+            code=_h(proposal.code),
+            proposal_target_label=_h(_proposal_target_label(proposal)),
         )
         if proposal.decision_note:
-            text += f"\nПричина: {_h(proposal.decision_note)}"
-    text += "\n\nСтатус доступен в разделе «Мои кирпичики» → «Мои предложения»."
+            text += tr_safe(
+                "admin.notify_proposal_author.prichina",
+                decision_note=_h(proposal.decision_note),
+            )
+    text += tr("admin.notify_proposal_author.status_dostupen_razdele_moi")
     return await _send_user_notification(
         context, proposal.author_telegram_user_id, text
     )
@@ -5171,10 +5342,7 @@ async def _handle_brick_proposal_decision(
             update,
             context,
             state,
-            notice=(
-                "Полномочия изменились или предложение недоступно; решение "
-                "не принято."
-            ),
+            notice=(tr("admin.handle_brick_proposal.polnomochiya_izmenilis")),
         )
         return
     finally:
@@ -5188,7 +5356,8 @@ async def _handle_brick_proposal_decision(
             update,
             context,
             state,
-            notice=result.message or "Предложение не найдено.",
+            notice=result.message
+            or tr("admin.handle_brick_proposal.predlozhenie_naydeno"),
         )
         return
     if result.status in {"already_decided", "stale"}:
@@ -5197,7 +5366,8 @@ async def _handle_brick_proposal_decision(
             update,
             context,
             state,
-            notice=result.message or "Предложение уже рассмотрено.",
+            notice=result.message
+            or tr("admin.handle_brick_proposal.predlozhenie_rassmotreno"),
         )
         return
     if result.status in {"conflict", "error", "invalid"}:
@@ -5206,7 +5376,8 @@ async def _handle_brick_proposal_decision(
             update,
             context,
             state,
-            notice=result.message or "Решение не принято.",
+            notice=result.message
+            or tr("admin.handle_brick_proposal.reshenie_prinyato"),
         )
         return
 
@@ -5241,7 +5412,9 @@ async def _handle_brick_proposal_decision(
     if result.proposal is not None:
         state["proposal_id"] = result.proposal.id
     notice = result.message or (
-        "Предложение одобрено." if approved else "Предложение отклонено."
+        tr("admin.handle_brick_proposal.predlozhenie_odobreno")
+        if approved
+        else tr("admin.handle_brick_proposal.predlozhenie_otkloneno")
     )
     notice += notice_extra
     if delivered:
@@ -5373,12 +5546,12 @@ async def handle_conflict_open(
     finally:
         session.close()
     if view is None:
-        await query.answer("Задача недоступна.", show_alert=True)
+        await query.answer(tr("alerts.admin.zadacha_nedostupna"), show_alert=True)
         await _render_phase(
             update,
             context,
             state,
-            notice="Задача конфликта не найдена или полномочия изменились.",
+            notice=tr("admin.handle_conflict_open.zadacha_konflikta_naydena"),
         )
         return
     await query.answer()
@@ -5406,12 +5579,12 @@ async def handle_conflict_rename(
     finally:
         session.close()
     if view is None:
-        await query.answer("Задача недоступна.", show_alert=True)
+        await query.answer(tr("alerts.admin.zadacha_nedostupna"), show_alert=True)
         await _render_phase(
             update,
             context,
             state,
-            notice="Задача конфликта не найдена или полномочия изменились.",
+            notice=tr("admin.handle_conflict_open.zadacha_konflikta_naydena"),
         )
         return
     await query.answer()
@@ -5420,7 +5593,7 @@ async def handle_conflict_rename(
             update,
             context,
             state,
-            notice="Задача уже решена.",
+            notice=tr("admin.render_phase.zadacha_reshena"),
         )
         return
     state["phase"] = "conflict_rename_input"
@@ -5445,17 +5618,19 @@ async def handle_conflict_switch(
     finally:
         session.close()
     if view is None:
-        await query.answer("Задача недоступна.", show_alert=True)
+        await query.answer(tr("alerts.admin.zadacha_nedostupna"), show_alert=True)
         await _render_phase(
             update,
             context,
             state,
-            notice="Задача конфликта не найдена или полномочия изменились.",
+            notice=tr("admin.handle_conflict_open.zadacha_konflikta_naydena"),
         )
         return
     await query.answer()
     if not view.is_open:
-        await _render_phase(update, context, state, notice="Задача уже решена.")
+        await _render_phase(
+            update, context, state, notice=tr("admin.render_phase.zadacha_reshena")
+        )
         return
     state["phase"] = "conflict_switch_confirm"
     await _render_phase(update, context, state)
@@ -5463,12 +5638,16 @@ async def handle_conflict_switch(
 
 def _conflict_result_notice(result: ConflictResolutionResult) -> str:
     if result.ok:
-        return f"✅ {result.message}" if result.message else "✅ Задача решена."
+        return (
+            f"✅ {result.message}"
+            if result.message
+            else tr("admin.conflict_result_notice.zadacha_reshena")
+        )
     if result.status == "already_resolved":
-        return "Задачу уже решили в другом окне; повторное решение не применено."
+        return tr("admin.conflict_result_notice.zadachu_reshili_drugom_okne")
     if result.status == "superseded":
-        return "Местный кирпичик уже не держит этот код; задача закрыта."
-    return result.message or "Решение не принято."
+        return tr("admin.conflict_result_notice.mestnyy_kirpichik_derzhit_etot")
+    return result.message or tr("admin.handle_brick_proposal.reshenie_prinyato")
 
 
 async def handle_conflict_switch_confirm(
@@ -5500,7 +5679,9 @@ async def handle_conflict_switch_confirm(
                 update,
                 context,
                 state,
-                notice="Полномочия изменились; решение не принято.",
+                notice=tr(
+                    "admin.handle_conflict_switch.polnomochiya_izmenilis_reshenie"
+                ),
             )
             return
     finally:
@@ -5548,7 +5729,7 @@ async def handle_conflict_text(
                 update,
                 context,
                 state,
-                notice=f"Код не принят: {exc}",
+                notice=tr("admin.handle_conflict.kod_prinyat", exc=exc),
                 cleanup_ids=cleanup,
                 drop_input=True,
             )
@@ -5558,7 +5739,7 @@ async def handle_conflict_text(
                 update,
                 context,
                 state,
-                notice=f"Код не принят: {exc}",
+                notice=tr("admin.handle_conflict.kod_prinyat", exc=exc),
                 cleanup_ids=cleanup,
                 drop_input=True,
             )
@@ -5582,7 +5763,8 @@ async def handle_conflict_text(
             update,
             context,
             state,
-            notice=_conflict_result_notice(result) + " Введите другой код.",
+            notice=_conflict_result_notice(result)
+            + tr("admin.handle_conflict.vvedite_drugoy_kod"),
             cleanup_ids=cleanup,
             drop_input=True,
         )
@@ -5600,7 +5782,9 @@ async def handle_conflict_text(
 
 def _conflict_notification_text(notification) -> str:
     """Плашка-уведомление администратору места (шаблон с разметкой в каталоге)."""
-    place = notification.place_name or f"место #{notification.place_id}"
+    place = notification.place_name or tr(
+        "admin.conflict_short_label.mesto", place_id=notification.place_id
+    )
     return tr(
         "admin.conflict.notification_html",
         place=place,

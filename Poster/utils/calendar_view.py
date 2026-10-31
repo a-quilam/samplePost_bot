@@ -33,6 +33,7 @@ import calendar
 from datetime import date, timedelta
 
 from utils.parsers import APP_TZ, app_today
+from utils.ui_texts import tr
 
 # Горизонт выбора: календарных месяцев от текущей даты включительно
 HORIZON_MONTHS = 12
@@ -49,22 +50,30 @@ QUICK_DAYS = 8
 FOLLOWUP_RANGE_DAYS = 7
 
 # Дни недели: 0 — понедельник (как date.weekday())
-WEEKDAYS_SHORT = ("пн", "вт", "ср", "чт", "пт", "сб", "вс")
+WEEKDAYS_SHORT = (
+    tr("calendar.weekday.pn"),
+    tr("calendar.weekday.vt"),
+    tr("calendar.weekday.sr"),
+    tr("calendar.weekday.cht"),
+    tr("calendar.weekday.pt"),
+    tr("calendar.weekday.sb"),
+    tr("calendar.weekday.vs"),
+)
 
 # Названия месяцев в именительном падеже (кнопки «Ноябрь 2026»)
 MONTH_NAMES = {
-    1: "Январь",
-    2: "Февраль",
-    3: "Март",
-    4: "Апрель",
-    5: "Май",
-    6: "Июнь",
-    7: "Июль",
-    8: "Август",
-    9: "Сентябрь",
-    10: "Октябрь",
-    11: "Ноябрь",
-    12: "Декабрь",
+    1: tr("calendar.month.yanvar"),
+    2: tr("calendar.month.fevral"),
+    3: tr("calendar.month.mart"),
+    4: tr("calendar.month.aprel"),
+    5: tr("calendar.month.may"),
+    6: tr("calendar.month.iyun"),
+    7: tr("calendar.month.iyul"),
+    8: tr("calendar.month.avgust"),
+    9: tr("calendar.month.sentyabr"),
+    10: tr("calendar.month.oktyabr"),
+    11: tr("calendar.month.noyabr"),
+    12: tr("calendar.month.dekabr"),
 }
 
 # Тип интервала дат: (первый день, последний день) включительно
