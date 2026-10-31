@@ -69,7 +69,7 @@ try:
         get_standard_template,
         list_personal_templates,
         render_template_version,
-        update_template_section,
+        update_template_content,
     )
     from tests.integration_harness import (
         DEFAULT_USER_ID,
@@ -154,9 +154,7 @@ def _seed_personal_template(
     *,
     name: str = "Личный шаблон",
     actor_tg: int = DEFAULT_USER_ID,
-    header: str = "**[название]**",
-    body: str = "[описание]",
-    footer: str = "",
+    content: str = "**[название]**\n[описание]",
 ) -> int:
     """Личный шаблон без снимков и анонсов — его можно удалить."""
     with h.session_factory() as session:
@@ -165,9 +163,7 @@ def _seed_personal_template(
             session,
             actor_telegram_user_id=actor_tg,
             name=name,
-            header=header,
-            body=body,
-            footer=footer,
+            content=content,
         )
         session.commit()
         return int(template.template_id)
@@ -409,12 +405,11 @@ class TemplateSectionOnlyManagesTests(unittest.TestCase):
         await h.callback(f"tp_delete:{template_id}")
 
         with h.session_factory() as session:
-            result = update_template_section(
+            result = update_template_content(
                 session,
                 actor_telegram_user_id=DEFAULT_USER_ID,
                 template_id=template_id,
                 expected_revision=1,
-                section="body",
                 content="правка из другого окна",
             )
             self.assertEqual(result.status, "updated")
@@ -426,7 +421,7 @@ class TemplateSectionOnlyManagesTests(unittest.TestCase):
         self.assertIsNotNone(row)
         assert row is not None
         self.assertEqual(row.revision, 2)
-        self.assertEqual(row.current_version.body, "правка из другого окна")
+        self.assertEqual(row.current_version.content, "правка из другого окна")
         state = load_template_session(DEFAULT_USER_ID)
         self.assertIsNotNone(state)
         assert state is not None
@@ -444,9 +439,7 @@ class TemplateSectionOnlyManagesTests(unittest.TestCase):
                 session,
                 actor_telegram_user_id=OTHER_TG,
                 name="Чужой",
-                header="**[название]**",
-                body="[описание]",
-                footer="",
+                content="\n".join(p for p in ("**[название]**", "[описание]", "") if p),
             )
             foreign_id = int(foreign.template_id)
             session.commit()

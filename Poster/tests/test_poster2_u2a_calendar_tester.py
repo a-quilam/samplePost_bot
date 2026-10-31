@@ -67,9 +67,7 @@ def _seed(h, *, rules: dict | None = None) -> int:
             session,
             actor_telegram_user_id=DEFAULT_USER_ID,
             name="Тест U2a",
-            header="",
-            body="[title] — [day]",
-            footer="",
+            content="\n".join(p for p in ("", "[title] — [day]", "") if p),
         )
         session.commit()
         return template.template_id
@@ -202,7 +200,7 @@ class ExtraBrickCalendarTests(unittest.TestCase):
                     ("main", "Основное", "short_text", {}),
                     ("extra", "Доп. дата", "date", {}),
                 ],
-                body="[main]",
+                content="[main]",
             )
             await _start_to_template(h, place_id)
             await _choose_personal(h, template_id)
@@ -236,9 +234,8 @@ class ExtraBrickCalendarTests(unittest.TestCase):
                 await h.callback(pages[-1])
             self.assertIsNotNone(chosen, "кирпичик доп. поля не найден")
             await h.callback(str(chosen))
-            await h.callback(_first(h, "aw_exsec"))
-            await h.callback(_first(h, "aw_expos"))
-
+            # H2: выбора секции/позиции больше нет — кирпичик сразу ведёт на
+            # экран значения, у даты это компактный календарь.
             self.assertIn("Выберите дату", h.screen_text())
             self.assertEqual(len(_days(h)), 8)
             self.assertEqual(len(_data(h, "aw_calrange")), 2)

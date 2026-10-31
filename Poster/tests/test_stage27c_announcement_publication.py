@@ -42,8 +42,7 @@ from announcement_wizard import (
     AnnouncementValueError,
     WizardStage,
 )
-from template_store import update_template_section
-from template_types import TEMPLATE_SECTION_BODY
+from template_store import update_template_content
 from tests.stage27_helpers import OTHER_TG, OWNER_TG, AnnouncementDatabaseTestCase
 
 TODAY = date(2026, 5, 1)
@@ -57,9 +56,7 @@ class AnnouncementPublicationTestCase(AnnouncementDatabaseTestCase):
         template = self.make_personal_template(
             self.owner,
             "Личный анонс",
-            header="",
-            body=body,
-            footer="",
+            content="\n".join(p for p in ("", body, "") if p),
         )
         draft = self.start_draft()
         confirmed = confirm_announcement_place(
@@ -226,12 +223,11 @@ class AnnouncementPublicationServiceTests(AnnouncementPublicationTestCase):
         self.assertIsNotNone(publication.draft.publication_started_at)
 
         # Исходный шаблон можно менять, но замороженный payload — нет.
-        update_template_section(
+        update_template_content(
             self.session,
             actor_telegram_user_id=OWNER_TG,
             template_id=template.template_id,
             expected_revision=template.revision,
-            section=TEMPLATE_SECTION_BODY,
             content="НОВЫЙ ТЕКСТ [main]",
         )
         resumed = resume_announcement_publication(
@@ -559,16 +555,10 @@ class AnnouncementPublicationTriggerTests(AnnouncementPublicationTestCase):
 
 
 class AnnouncementPublicationContentTests(AnnouncementDatabaseTestCase):
-    def test_seven_types_and_extras_in_all_sections_are_frozen(self) -> None:
+    def test_seven_types_and_extras_are_frozen(self) -> None:
         from announcement_store import add_announcement_extra
-        from announcement_wizard import EXTRA_POSITION_END, EXTRA_POSITION_START
         from brick_store import create_personal_brick
         from template_store import create_personal_template
-        from template_types import (
-            TEMPLATE_SECTION_BODY,
-            TEMPLATE_SECTION_FOOTER,
-            TEMPLATE_SECTION_HEADER,
-        )
 
         specs: list[tuple[str, str, dict[str, object], str]] = [
             ("короткий", "short_text", {}, "короткий текст"),
@@ -593,9 +583,15 @@ class AnnouncementPublicationContentTests(AnnouncementDatabaseTestCase):
             self.session,
             actor_telegram_user_id=OWNER_TG,
             name="Все типы и extras",
-            header="ЗАГОЛОВОК",
-            body=" ".join(f"[{code}]" for code, _t, _r, _v in specs),
-            footer="ПОДВАЛ",
+            content="\n".join(
+                p
+                for p in (
+                    "ЗАГОЛОВОК",
+                    " ".join(f"[{code}]" for code, _t, _r, _v in specs),
+                    "ПОДВАЛ",
+                )
+                if p
+            ),
         )
         draft = self.start_at_questions(template_id=template.template_id)
         revision = draft.revision
@@ -611,22 +607,14 @@ class AnnouncementPublicationContentTests(AnnouncementDatabaseTestCase):
             )
             revision = saved.revision
 
+        # H2: доп. кирпичики дописываются строками в конец текста в порядке
+        # добавления — секций и позиций больше нет.
         extras = [
-            (
-                "экстра_заголовок",
-                TEMPLATE_SECTION_HEADER,
-                EXTRA_POSITION_START,
-                "ЭКСТРА-ЗАГОЛОВОК",
-            ),
-            ("экстра_тело", TEMPLATE_SECTION_BODY, EXTRA_POSITION_END, "ЭКСТРА-ТЕЛО"),
-            (
-                "экстра_подвал",
-                TEMPLATE_SECTION_FOOTER,
-                EXTRA_POSITION_START,
-                "ЭКСТРА-ПОДВАЛ",
-            ),
+            ("экстра_заголовок", "ЭКСТРА-ЗАГОЛОВОК"),
+            ("экстра_тело", "ЭКСТРА-ТЕЛО"),
+            ("экстра_подвал", "ЭКСТРА-ПОДВАЛ"),
         ]
-        for code, section, position, value in extras:
+        for code, value in extras:
             brick_id = create_personal_brick(
                 self.session,
                 actor_telegram_user_id=OWNER_TG,
@@ -639,8 +627,6 @@ class AnnouncementPublicationContentTests(AnnouncementDatabaseTestCase):
                 actor_telegram_user_id=OWNER_TG,
                 draft_id=draft.draft_id,
                 brick_id=brick_id,
-                section=section,
-                position=position,
                 value=value,
                 expected_revision=revision,
             )
@@ -665,11 +651,11 @@ class AnnouncementPublicationContentTests(AnnouncementDatabaseTestCase):
         self.assertIn("ЭКСТРА-ТЕЛО", publication.text)
         self.assertIn("ЭКСТРА-ПОДВАЛ", publication.text)
         self.assertLess(
+            publication.text.index("ПОДВАЛ"),
             publication.text.index("ЭКСТРА-ЗАГОЛОВОК"),
-            publication.text.index("короткий текст"),
         )
         self.assertLess(
-            publication.text.index("короткий текст"),
+            publication.text.index("ЭКСТРА-ЗАГОЛОВОК"),
             publication.text.index("ЭКСТРА-ТЕЛО"),
         )
         self.assertLess(

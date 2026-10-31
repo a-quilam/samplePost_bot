@@ -7,7 +7,7 @@
 - стандартный шаблон места и его атомарное создание вместе с местом;
 - идемпотентный backfill существующих мест;
 - личные шаблоны, изолированные по владельцу;
-- три независимые секции: header/body/footer;
+- один канонический текст `content` и необязательный `extended_content`;
 - неизменяемые версии и оптимистичную блокировку;
 - явные связи версии/снимка с постоянными `bricks.id`;
 - самостоятельные неизменяемые снимки для будущих черновиков;
@@ -61,15 +61,13 @@ from template_types import (
     BUILTIN_TEMPLATE_VERSION,
     INITIAL_PERSONAL_TEMPLATE_NAME,
     STANDARD_TEMPLATE_DISPLAY_NAME,
+    TEMPLATE_CONTENT,
+    TEMPLATE_EXTENDED_CONTENT,
     TEMPLATE_KIND_PERSONAL,
     TEMPLATE_KIND_STANDARD,
-    TEMPLATE_SECTION_BODY,
-    TEMPLATE_SECTION_FOOTER,
-    TEMPLATE_SECTION_HEADER,
     BuiltinTemplateDefinition,
+    validate_template_content,
     validate_template_name,
-    validate_template_section_name,
-    validate_template_sections,
 )
 
 if TYPE_CHECKING:
@@ -131,9 +129,8 @@ class TemplateVersionDetails:
     version_id: int
     template_id: int
     version: int
-    header: str
-    body: str
-    footer: str
+    content: str
+    extended_content: str | None
     created_by_user_id: int | None
     created_at: datetime
     builtin_version: int | None
@@ -182,9 +179,8 @@ class TemplateSnapshotDetails:
     source_name: str | None
     source_place_id: int | None
     source_owner_user_id: int | None
-    header: str
-    body: str
-    footer: str
+    content: str
+    extended_content: str | None
     builtin_version: int | None
     created_at: datetime
     bindings: tuple[TemplateBrickBinding, ...] = field(default_factory=tuple)
@@ -384,9 +380,8 @@ def _version_details(session: Session, row: TemplateVersion) -> TemplateVersionD
         version_id=row.id,
         template_id=row.template_id,
         version=row.version,
-        header=row.header,
-        body=row.body,
-        footer=row.footer,
+        content=row.content,
+        extended_content=row.extended_content,
         created_by_user_id=row.created_by_user_id,
         created_at=row.created_at,
         builtin_version=row.builtin_version,
@@ -428,9 +423,8 @@ def _snapshot_details(
         source_name=row.source_name,
         source_place_id=row.source_place_id,
         source_owner_user_id=row.source_owner_user_id,
-        header=row.header,
-        body=row.body,
-        footer=row.footer,
+        content=row.content,
+        extended_content=row.extended_content,
         builtin_version=row.builtin_version,
         created_at=row.created_at,
         bindings=_binding_views_for_snapshot(session, row.id),
@@ -552,11 +546,7 @@ def _builtin_binding_pairs(
 
     compiled = resolve_template_bindings(
         session,
-        {
-            TEMPLATE_SECTION_HEADER: BUILTIN_TEMPLATE.header,
-            TEMPLATE_SECTION_BODY: BUILTIN_TEMPLATE.body,
-            TEMPLATE_SECTION_FOOTER: BUILTIN_TEMPLATE.footer,
-        },
+        BUILTIN_TEMPLATE.texts,
         actor_telegram_user_id=None,
         place_id=place_id,
     )
@@ -614,9 +604,8 @@ def _insert_standard_template(
     version = TemplateVersion(
         template_id=template.id,
         version=1,
-        header=BUILTIN_TEMPLATE.header,
-        body=BUILTIN_TEMPLATE.body,
-        footer=BUILTIN_TEMPLATE.footer,
+        content=BUILTIN_TEMPLATE.content,
+        extended_content=BUILTIN_TEMPLATE.extended_content,
         created_by_user_id=None,
         created_at=now,
         builtin_version=BUILTIN_TEMPLATE.version,
@@ -782,7 +771,7 @@ def get_standard_template(
     Стандарт места доступен любому зарегистрированному пользователю Poster.
 
     Создатель места не получает права редактирования автоматически: проверка
-    записи выполняется отдельно в `update_template_section`.
+    записи выполняется отдельно в `update_template_content`.
     """
     _require_actor_user(session, actor_telegram_user_id)
     _require_place(session, place_id)
@@ -804,7 +793,7 @@ def list_personal_templates(
     session: Session,
     actor_telegram_user_id: int | None,
 ) -> list[TemplateDetails]:
-    """Личные шаблоны только этого владельца, включая текущие секции."""
+    """Личные шаблоны только этого владельца с их текущим текстом."""
     actor = _require_actor_user(session, actor_telegram_user_id)
     rows = session.scalars(
         select(Template)
@@ -822,9 +811,8 @@ def create_personal_template(
     *,
     actor_telegram_user_id: int | None,
     name: object,
-    header: object,
-    body: object,
-    footer: object,
+    content: object,
+    extended_content: object = None,
     chosen_brick_ids: Mapping[str, int] | None = None,
 ) -> TemplateDetails:
     """
@@ -833,24 +821,24 @@ def create_personal_template(
     Владелец всегда берётся из Telegram user ID → `users.id`; клиент не может
     передать чужой owner_id. Названия могут повторяться, в том числе у одного
     владельца. Привязки кирпичиков всегда выводятся из реального текста
-    секций компилятором Stage 24; произвольный список ID невозможен.
+    `content`/`extended_content` компилятором Stage 24; произвольный список ID
+    невозможен.
 
     `chosen_brick_ids` — явный выбор для неоднозначных кодов.
     """
     actor = _require_actor_user(session, actor_telegram_user_id)
     checked_name = validate_template_name(name)
-    checked_header, checked_body, checked_footer = validate_template_sections(
-        header, body, footer
+    checked_content, checked_extended = validate_template_content(
+        content, extended_content
     )
     from template_compiler import TemplateCompileError, resolve_template_bindings
 
+    texts = {TEMPLATE_CONTENT: checked_content}
+    if checked_extended is not None:
+        texts[TEMPLATE_EXTENDED_CONTENT] = checked_extended
     compiled = resolve_template_bindings(
         session,
-        {
-            TEMPLATE_SECTION_HEADER: checked_header,
-            TEMPLATE_SECTION_BODY: checked_body,
-            TEMPLATE_SECTION_FOOTER: checked_footer,
-        },
+        texts,
         actor_telegram_user_id=actor.telegram_user_id,
         place_id=None,
         chosen_brick_ids=chosen_brick_ids,
@@ -864,7 +852,7 @@ def create_personal_template(
         for amb in compiled.ambiguous_codes:
             candidates = ", ".join(f"#{c.brick_id} ({c.scope})" for c in amb.candidates)
             issues.append(
-                f"Код [код={amb.code}] неоднозначен (секция {amb.section}); "
+                f"Код [код={amb.code}] неоднозначен; "
                 f"кандидаты: {candidates}. Требуется явный выбор."
             )
         raise TemplateCompileError("; ".join(issues))
@@ -888,9 +876,8 @@ def create_personal_template(
         version = TemplateVersion(
             template_id=template.id,
             version=1,
-            header=checked_header,
-            body=checked_body,
-            footer=checked_footer,
+            content=checked_content,
+            extended_content=checked_extended,
             created_by_user_id=actor.id,
             created_at=now,
             builtin_version=None,
@@ -1037,9 +1024,8 @@ def _commit_new_version(
     row: Template,
     actor: User,
     expected_revision: int,
-    header: str,
-    body: str,
-    footer: str,
+    content: str,
+    extended_content: str | None,
     bindings: Sequence[tuple[str, int]],
     builtin_version: int | None,
 ) -> TemplateMutationResult:
@@ -1084,9 +1070,8 @@ def _commit_new_version(
         version = TemplateVersion(
             template_id=row.id,
             version=expected_revision + 1,
-            header=header,
-            body=body,
-            footer=footer,
+            content=content,
+            extended_content=extended_content,
             created_by_user_id=actor.id,
             created_at=now,
             builtin_version=builtin_version,
@@ -1127,24 +1112,27 @@ def _commit_new_version(
     )
 
 
-def update_template_section(
+def update_template_content(
     session: Session,
     *,
     actor_telegram_user_id: int | None,
     template_id: int,
     expected_revision: int,
-    section: object,
     content: object,
+    extended_content: object = _UNSET,
     chosen_brick_ids: Mapping[str, int] | None = None,
 ) -> TemplateMutationResult:
     """
-    Меняет одну секцию, сохраняя две другие и историю.
+    Меняет текст шаблона, сохраняя историю.
 
-    Реальное содержимое ВСЕХ трёх секций разбирается компилятором Stage 24:
+    `content` — канонический текст; `extended_content` — необязательное
+    расширение. Если аргумент не передан, расширение остаётся прежним;
+    `None` означает «у шаблона нет расширения». Оба текста разбираются
+    компилятором Stage 24 (весь текст целиком, а не отдельная секция):
     синтаксис, доступность кирпичиков и неоднозначность проверяются до
     создания новой версии. При ошибке версия не создаётся.
 
-    - `chosen_brick_ids=None` — привязки всегда выводятся из текста секций;
+    - `chosen_brick_ids=None` — привязки всегда выводятся из текста;
     - передан отображение «код → brick_id» — используется ТОЛЬКО для
       неоднозначных кодов; для однозначных кодов выбор вызывающего кода
       игнорируется, так что обход проверки произвольным списком невозможен.
@@ -1154,9 +1142,6 @@ def update_template_section(
     Создатель места, обычный пользователь и чужая админка получают отказ.
     """
     actor = _require_actor_user(session, actor_telegram_user_id)
-    section_name = validate_template_section_name(section)
-    if not isinstance(content, str):
-        raise TemplateError("Содержимое секции должно быть строкой.")
     if not _valid_positive_id(expected_revision):
         raise TemplateError("expected_revision должен быть положительным числом.")
 
@@ -1188,29 +1173,23 @@ def update_template_section(
         )
 
     current = _version_details(session, _version_row(session, row))
-    sections = {
-        TEMPLATE_SECTION_HEADER: current.header,
-        TEMPLATE_SECTION_BODY: current.body,
-        TEMPLATE_SECTION_FOOTER: current.footer,
-    }
-    sections[section_name] = content
-    checked_header, checked_body, checked_footer = validate_template_sections(
-        sections[TEMPLATE_SECTION_HEADER],
-        sections[TEMPLATE_SECTION_BODY],
-        sections[TEMPLATE_SECTION_FOOTER],
+    requested_extended = (
+        current.extended_content if extended_content is _UNSET else extended_content
+    )
+    checked_content, checked_extended = validate_template_content(
+        content, requested_extended
     )
 
-    # --- Stage 24: разбор и привязка реального содержимого всех секций ---
+    # --- Stage 24: разбор и привязка реального текста шаблона ---
     from template_compiler import TemplateCompileError, resolve_template_bindings
 
+    texts = {TEMPLATE_CONTENT: checked_content}
+    if checked_extended is not None:
+        texts[TEMPLATE_EXTENDED_CONTENT] = checked_extended
     try:
         compiled = resolve_template_bindings(
             session,
-            {
-                TEMPLATE_SECTION_HEADER: checked_header,
-                TEMPLATE_SECTION_BODY: checked_body,
-                TEMPLATE_SECTION_FOOTER: checked_footer,
-            },
+            texts,
             actor_telegram_user_id=actor.telegram_user_id,
             place_id=row.place_id,
             chosen_brick_ids=chosen_brick_ids,
@@ -1230,7 +1209,7 @@ def update_template_section(
         for amb in compiled.ambiguous_codes:
             candidates = ", ".join(f"#{c.brick_id} ({c.scope})" for c in amb.candidates)
             issues.append(
-                f"Код [код={amb.code}] неоднозначен (секция {amb.section}); "
+                f"Код [код={amb.code}] неоднозначен; "
                 f"кандидаты: {candidates}. Требуется явный выбор."
             )
         return _mutation(
@@ -1247,7 +1226,11 @@ def update_template_section(
     )
     bindings_changed = new_bindings != old_bindings
 
-    changed = content != getattr(current, section_name) or bindings_changed
+    changed = (
+        checked_content != current.content
+        or checked_extended != current.extended_content
+        or bindings_changed
+    )
     if not changed:
         return _mutation(
             "unchanged",
@@ -1260,74 +1243,10 @@ def update_template_section(
         row=row,
         actor=actor,
         expected_revision=expected_revision,
-        header=checked_header,
-        body=checked_body,
-        footer=checked_footer,
+        content=checked_content,
+        extended_content=checked_extended,
         bindings=new_bindings,
         builtin_version=None,
-    )
-
-
-def update_template_header(
-    session: Session,
-    *,
-    actor_telegram_user_id: int | None,
-    template_id: int,
-    expected_revision: int,
-    content: object,
-    chosen_brick_ids: Mapping[str, int] | None = None,
-) -> TemplateMutationResult:
-    """Безопасно меняет только шапку."""
-    return update_template_section(
-        session,
-        actor_telegram_user_id=actor_telegram_user_id,
-        template_id=template_id,
-        expected_revision=expected_revision,
-        section=TEMPLATE_SECTION_HEADER,
-        content=content,
-        chosen_brick_ids=chosen_brick_ids,
-    )
-
-
-def update_template_body(
-    session: Session,
-    *,
-    actor_telegram_user_id: int | None,
-    template_id: int,
-    expected_revision: int,
-    content: object,
-    chosen_brick_ids: Mapping[str, int] | None = None,
-) -> TemplateMutationResult:
-    """Безопасно меняет только тело."""
-    return update_template_section(
-        session,
-        actor_telegram_user_id=actor_telegram_user_id,
-        template_id=template_id,
-        expected_revision=expected_revision,
-        section=TEMPLATE_SECTION_BODY,
-        content=content,
-        chosen_brick_ids=chosen_brick_ids,
-    )
-
-
-def update_template_footer(
-    session: Session,
-    *,
-    actor_telegram_user_id: int | None,
-    template_id: int,
-    expected_revision: int,
-    content: object,
-    chosen_brick_ids: Mapping[str, int] | None = None,
-) -> TemplateMutationResult:
-    """Безопасно меняет только подвал."""
-    return update_template_section(
-        session,
-        actor_telegram_user_id=actor_telegram_user_id,
-        template_id=template_id,
-        expected_revision=expected_revision,
-        section=TEMPLATE_SECTION_FOOTER,
-        content=content,
-        chosen_brick_ids=chosen_brick_ids,
     )
 
 
@@ -1384,11 +1303,7 @@ def _reset_to_builtin(
 
     compiled = resolve_template_bindings(
         session,
-        {
-            TEMPLATE_SECTION_HEADER: BUILTIN_TEMPLATE.header,
-            TEMPLATE_SECTION_BODY: BUILTIN_TEMPLATE.body,
-            TEMPLATE_SECTION_FOOTER: BUILTIN_TEMPLATE.footer,
-        },
+        BUILTIN_TEMPLATE.texts,
         actor_telegram_user_id=actor.telegram_user_id,
         place_id=row.place_id,
     )
@@ -1407,9 +1322,8 @@ def _reset_to_builtin(
         sorted(compiled.resolved_brick_ids.items())
     )
     unchanged = (
-        current.header == BUILTIN_TEMPLATE.header
-        and current.body == BUILTIN_TEMPLATE.body
-        and current.footer == BUILTIN_TEMPLATE.footer
+        current.content == BUILTIN_TEMPLATE.content
+        and current.extended_content == BUILTIN_TEMPLATE.extended_content
         and tuple(sorted((b.code, b.brick_id) for b in current.bindings))
         == binding_pairs
     )
@@ -1425,9 +1339,8 @@ def _reset_to_builtin(
         row=row,
         actor=actor,
         expected_revision=expected_revision,
-        header=BUILTIN_TEMPLATE.header,
-        body=BUILTIN_TEMPLATE.body,
-        footer=BUILTIN_TEMPLATE.footer,
+        content=BUILTIN_TEMPLATE.content,
+        extended_content=BUILTIN_TEMPLATE.extended_content,
         bindings=binding_pairs,
         builtin_version=BUILTIN_TEMPLATE_VERSION,
     )
@@ -1463,9 +1376,8 @@ def ensure_initial_personal_template(
         session,
         actor_telegram_user_id=actor.telegram_user_id,
         name=INITIAL_PERSONAL_TEMPLATE_NAME,
-        header=BUILTIN_TEMPLATE.header,
-        body=BUILTIN_TEMPLATE.body,
-        footer=BUILTIN_TEMPLATE.footer,
+        content=BUILTIN_TEMPLATE.content,
+        extended_content=BUILTIN_TEMPLATE.extended_content,
     )
     # Метка выдачи (Poster 2.0, S2). Строка `templates` — не единственный
     # след: снимок переживает её удаление и служит признаком «стартовый
@@ -1614,9 +1526,8 @@ def create_template_snapshot(
         source_name=template.name,
         source_place_id=template.place_id,
         source_owner_user_id=template.owner_user_id,
-        header=version.header,
-        body=version.body,
-        footer=version.footer,
+        content=version.content,
+        extended_content=version.extended_content,
         builtin_version=version.builtin_version,
         idempotency_key=key,
         created_at=now,
@@ -1919,20 +1830,21 @@ def render_template_version(
     version_row = _version_row(session, template, version)
     binding_views = _binding_views_for_version(session, version_row.id)
     bindings_by_code = {b.code: b.brick_id for b in binding_views}
+    from template_compiler import render_template
     from template_parser import parse_template  # ленивый импорт
 
-    tokens_by_section = {
-        TEMPLATE_SECTION_HEADER: parse_template(version_row.header, section="header"),
-        TEMPLATE_SECTION_BODY: parse_template(version_row.body, section="body"),
-        TEMPLATE_SECTION_FOOTER: parse_template(version_row.footer, section="footer"),
+    tokens_by_text = {
+        TEMPLATE_CONTENT: parse_template(version_row.content),
     }
+    if version_row.extended_content is not None:
+        tokens_by_text[TEMPLATE_EXTENDED_CONTENT] = parse_template(
+            version_row.extended_content
+        )
     brick_ids = set(bindings_by_code.values())
     definitions = _load_brick_definitions(session, brick_ids)
-    for tokens in tokens_by_section.values():
+    for tokens in tokens_by_text.values():
         _restore_bindings_on_tokens(tokens, bindings_by_code)
-    from template_compiler import render_template
-
-    return render_template(tokens_by_section, values_by_id, definitions)
+    return render_template(tokens_by_text, values_by_id, definitions)
 
 
 def render_template_snapshot(
@@ -1967,17 +1879,18 @@ def render_template_snapshot(
         )
     binding_views = _binding_views_for_snapshot(session, snapshot_row.id)
     bindings_by_code = {b.code: b.brick_id for b in binding_views}
+    from template_compiler import render_template
     from template_parser import parse_template  # ленивый импорт
 
-    tokens_by_section = {
-        TEMPLATE_SECTION_HEADER: parse_template(snapshot_row.header, section="header"),
-        TEMPLATE_SECTION_BODY: parse_template(snapshot_row.body, section="body"),
-        TEMPLATE_SECTION_FOOTER: parse_template(snapshot_row.footer, section="footer"),
+    tokens_by_text = {
+        TEMPLATE_CONTENT: parse_template(snapshot_row.content),
     }
+    if snapshot_row.extended_content is not None:
+        tokens_by_text[TEMPLATE_EXTENDED_CONTENT] = parse_template(
+            snapshot_row.extended_content
+        )
     brick_ids = set(bindings_by_code.values())
     definitions = _load_brick_definitions(session, brick_ids)
-    for tokens in tokens_by_section.values():
+    for tokens in tokens_by_text.values():
         _restore_bindings_on_tokens(tokens, bindings_by_code)
-    from template_compiler import render_template
-
-    return render_template(tokens_by_section, values_by_id, definitions)
+    return render_template(tokens_by_text, values_by_id, definitions)

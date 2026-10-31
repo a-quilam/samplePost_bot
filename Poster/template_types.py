@@ -1,18 +1,25 @@
 # template_types.py
 """
-Чистые контракты шаблонов анонсов Stage 23.
+Чистые контракты шаблонов анонсов (Stage 23 → Poster 2.3 H2).
 
 Здесь нет SQLAlchemy и Telegram: только закрытый каталог видов шаблонов,
-три текстовые секции, контролируемое встроенное содержимое Poster и
+каноническое содержимое шаблона (одна строка `content`), опциональное
+расширенное содержимое, контролируемое встроенное содержимое Poster и
 стабильные ID системных кирпичиков, на которые оно ссылается.
 
-Границы Stage 23:
+Границы:
 
 - шаблон хранит авторский текст без разбора и нормализации;
-- `[код]` пока остаётся частью текста, а не исполняемым выражением;
-- синтаксис ссылок и подстановка кирпичиков появятся в Stage 24;
+- `[код]` остаётся частью текста до разбора компилятором (Stage 24);
 - встроенный стандарт имеет собственную версию, чтобы будущий сброс не
   зависел от случайного изменения констант.
+
+Poster 2.3 H2: три секции (`header`/`body`/`footer`) заменены одной строкой
+`content`. Пустые строки между блоками теперь часть самого текста, поэтому
+переносы сохраняются ровно так, как их видит автор. `extended_content` —
+необязательный расширенный вариант того же текста: он рендерится, когда в
+анонсе выбраны дополнительные кирпичики (H2), и отсутствует (`None`) у
+шаблонов, которым расширение не нужно.
 """
 
 from __future__ import annotations
@@ -25,14 +32,11 @@ TEMPLATE_KIND_STANDARD = "standard"
 TEMPLATE_KIND_PERSONAL = "personal"
 TEMPLATE_KINDS = (TEMPLATE_KIND_STANDARD, TEMPLATE_KIND_PERSONAL)
 
-TEMPLATE_SECTION_HEADER = "header"
-TEMPLATE_SECTION_BODY = "body"
-TEMPLATE_SECTION_FOOTER = "footer"
-TEMPLATE_SECTIONS = (
-    TEMPLATE_SECTION_HEADER,
-    TEMPLATE_SECTION_BODY,
-    TEMPLATE_SECTION_FOOTER,
-)
+# Ключи текстов шаблона. Используются в компиляторе, снимках и представлении
+# мастера вместо прежних имён секций.
+TEMPLATE_CONTENT = "content"
+TEMPLATE_EXTENDED_CONTENT = "extended_content"
+TEMPLATE_TEXTS = (TEMPLATE_CONTENT, TEMPLATE_EXTENDED_CONTENT)
 
 STANDARD_TEMPLATE_DISPLAY_NAME = "Стандартный шаблон места"
 
@@ -58,18 +62,24 @@ INITIAL_PERSONAL_TEMPLATE_NAME = "Дефолтный шаблон"
 # заголовком (без пустой строки между ними), площадка — отдельным блоком
 # через пустую строку, тело содержит ТОЛЬКО описание, подвал — ТОЛЬКО контакт.
 #
-# Пустые строки между блоками живут в НАЧАЛЕ следующей секции: `render_template`
-# склеивает секции ровно одним `"\n"`, поэтому `"\n"` в начале тела и подвала
-# даёт ровно одну пустую строку между блоками (а не `\n\n\n` и не их отсутствие).
-# Заголовок остаётся без хвостовых переводов строк.
-#
-# Синтаксис `[место]([ссылка_места])` — поддерживаемая парсером условная
-# гиперссылка: без URL остаётся только подпись, без пустых скобок.
+# Poster 2.3 H2: версия остаётся 4, но текст хранится одной строкой. Значение
+# `BUILTIN_TEMPLATE_CONTENT` побайтово совпадает с прежней склейкой секций
+# `header + "\n" + body + "\n" + footer`, поэтому миграция 24 и рендер
+# заполненного анонса не меняют ни одного символа эталона.
 BUILTIN_TEMPLATE_VERSION = 4
 
-BUILTIN_TEMPLATE_HEADER = "**[название]**\n\n**[дата] // [время_начала]**\n**[место]([ссылка_места])**\n[адрес]"
-BUILTIN_TEMPLATE_BODY = "\n[описание]"
-BUILTIN_TEMPLATE_FOOTER = "\n[контакт]"
+BUILTIN_TEMPLATE_CONTENT = (
+    "**[название]**\n"
+    "\n"
+    "**[дата] // [время_начала]**\n"
+    "**[место]([ссылка_места])**\n"
+    "[адрес]\n"
+    "\n"
+    "[описание]\n"
+    "\n"
+    "[контакт]"
+)
+BUILTIN_TEMPLATE_EXTENDED_CONTENT: str | None = None
 
 
 @dataclass(frozen=True)
@@ -102,26 +112,36 @@ class BuiltinTemplateDefinition:
     """Неизменяемый встроенный стандарт и его контролируемая версия."""
 
     version: int
-    header: str
-    body: str
-    footer: str
+    content: str
+    extended_content: str | None = None
     bindings: tuple[BuiltinBrickBinding, ...] = BUILTIN_TEMPLATE_BINDINGS
 
     @property
     def brick_ids(self) -> tuple[int, ...]:
         return tuple(binding.brick_id for binding in self.bindings)
 
+    @property
+    def texts(self) -> dict[str, str]:
+        """Тексты стандарта в виде, который принимает компилятор."""
+        return {
+            TEMPLATE_CONTENT: self.content,
+            **(
+                {TEMPLATE_EXTENDED_CONTENT: self.extended_content}
+                if self.extended_content is not None
+                else {}
+            ),
+        }
+
 
 BUILTIN_TEMPLATE = BuiltinTemplateDefinition(
     version=BUILTIN_TEMPLATE_VERSION,
-    header=BUILTIN_TEMPLATE_HEADER,
-    body=BUILTIN_TEMPLATE_BODY,
-    footer=BUILTIN_TEMPLATE_FOOTER,
+    content=BUILTIN_TEMPLATE_CONTENT,
+    extended_content=BUILTIN_TEMPLATE_EXTENDED_CONTENT,
 )
 
 
 class TemplateValidationError(ValueError):
-    """Некорректное название или текстовые секции шаблона."""
+    """Некорректное название или текст шаблона."""
 
 
 def _validate_catalog() -> None:
@@ -159,33 +179,32 @@ def validate_template_name(name: object) -> str:
     return name
 
 
-def validate_template_section_name(section: object) -> str:
-    """Имя одной из трёх независимо изменяемых секций."""
-    if section not in TEMPLATE_SECTIONS:
-        raise TemplateValidationError(
-            "Секция должна быть одной из: header, body, footer."
-        )
-    return str(section)
-
-
-def validate_template_sections(
-    header: object,
-    body: object,
-    footer: object,
-) -> tuple[str, str, str]:
+def validate_template_content(
+    content: object,
+    extended_content: object = None,
+) -> tuple[str, str | None]:
     """
-    Проверяет три секции, сохраняя их символы один в один.
+    Проверяет каноническое и (необязательное) расширенное содержимое.
 
-    Пустая отдельная секция допустима; недопустим только шаблон, в котором
-    все три секции состоят из одних пробельных символов. `.strip()` здесь
-    используется ТОЛЬКО для проверки и никогда не меняет сохраняемое значение.
+    Символы сохраняются один в один: `.strip()` используется ТОЛЬКО для
+    проверки и никогда не меняет сохраняемое значение. Пустое каноническое
+    содержимое недопустимо; расширенное — либо `None`, либо непустое.
     """
-    values = (header, body, footer)
-    if any(not isinstance(value, str) for value in values):
-        raise TemplateValidationError("Секции шаблона должны быть строками.")
-    checked = (str(header), str(body), str(footer))
-    if not any(value.strip() for value in checked):
+    if not isinstance(content, str):
+        raise TemplateValidationError("Содержимое шаблона должно быть строкой.")
+    if not content.strip():
         raise TemplateValidationError(
-            "Шаблон не должен состоять только из пустых секций."
+            "Шаблон не должен состоять только из пустых строк."
         )
-    return checked
+    if extended_content is None:
+        return content, None
+    if not isinstance(extended_content, str):
+        raise TemplateValidationError(
+            "Расширенное содержимое шаблона должно быть строкой."
+        )
+    if not extended_content.strip():
+        raise TemplateValidationError(
+            "Расширенное содержимое шаблона не должно быть пустым; "
+            "отсутствие расширения — это None."
+        )
+    return content, extended_content

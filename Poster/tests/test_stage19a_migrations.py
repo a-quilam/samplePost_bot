@@ -106,6 +106,7 @@ class MigrationMechanismTests(unittest.TestCase):
                 (21, "place_city"),
                 (22, "builtin_templates_v4"),
                 (23, "place_invite_links"),
+                (24, "template_content_and_extras_without_sections"),
             ],
         )
 
@@ -213,6 +214,7 @@ class MigrationMechanismTests(unittest.TestCase):
                 (21, "place_city"),
                 (22, "builtin_templates_v4"),
                 (23, "place_invite_links"),
+                (24, "template_content_and_extras_without_sections"),
             ],
         )
 

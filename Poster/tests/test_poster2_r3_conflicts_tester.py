@@ -74,7 +74,7 @@ from template_store import (
     get_standard_template,
     get_template_snapshot,
     render_template_snapshot,
-    update_template_section,
+    update_template_content,
 )
 from tests.integration_harness import HARNESS_IMPORT_ERROR, scenario_test
 from tests.stage19a_helpers import make_engine, temp_db_path
@@ -114,12 +114,11 @@ class R3Base(BrickDatabaseTestCase):
             template = get_standard_template(
                 self.session, author.telegram_user_id, place.id
             )
-            prepared = update_template_section(
+            prepared = update_template_content(
                 self.session,
                 actor_telegram_user_id=author.telegram_user_id,
                 template_id=template.template_id,
                 expected_revision=template.revision,
-                section="body",
                 content=f"[{code}]",
             )
             self.assertEqual(prepared.status, "updated", prepared.message)
@@ -220,14 +219,13 @@ class R3FullConflictTests(R3Base):
         self.assertEqual(candidates.selected.id, system.id)
         self.assertEqual(candidates.selected.scope, "system")
 
-        updated = update_template_section(
+        updated = update_template_content(
             self.session,
             actor_telegram_user_id=author.telegram_user_id,
             template_id=template_before.template_id,
             expected_revision=get_standard_template(
                 self.session, author.telegram_user_id, place.id
             ).revision,
-            section="body",
             content=f"текст [{code}]",
         )
         self.assertEqual(updated.status, "updated", updated.message)
@@ -789,12 +787,11 @@ class R3UiTests(unittest.TestCase):
             # Привязка кода к местному кирпичику ДО одобрения глобального:
             # именно такую версию должен переключить исход «на глобальный».
             template = get_standard_template(session, AUTHOR_TG, place.id)
-            prepared = update_template_section(
+            prepared = update_template_content(
                 session,
                 actor_telegram_user_id=AUTHOR_TG,
                 template_id=template.template_id,
                 expected_revision=template.revision,
-                section="body",
                 content=f"текст [{code}]",
             )
             assert prepared.status == "updated", prepared.message
@@ -1080,12 +1077,11 @@ class R3TemplateIsolationTests(R3Base):
         template = get_standard_template(
             self.session, author.telegram_user_id, place.id
         )
-        prepared = update_template_section(
+        prepared = update_template_content(
             self.session,
             actor_telegram_user_id=author.telegram_user_id,
             template_id=template.template_id,
             expected_revision=template.revision,
-            section="body",
             content="[цена_пар1] и [цена_пар2]",
         )
         self.assertEqual(prepared.status, "updated", prepared.message)
@@ -1403,12 +1399,11 @@ class R3ManualEditConflictTests(R3Base):
         template = get_standard_template(
             self.session, author.telegram_user_id, place.id
         )
-        prepared = update_template_section(
+        prepared = update_template_content(
             self.session,
             actor_telegram_user_id=author.telegram_user_id,
             template_id=template.template_id,
             expected_revision=template.revision,
-            section="body",
             content="[цена_ручная_правка]",
         )
         self.assertEqual(prepared.status, "updated", prepared.message)
@@ -1475,7 +1470,7 @@ class R3MigrationTests(unittest.TestCase):
         return None if row is None else str(row[0])
 
     def test_latest_version_is_19(self) -> None:
-        self.assertEqual(LATEST_VERSION, 23)
+        self.assertEqual(LATEST_VERSION, 24)
 
     def test_fresh_database_has_conflict_tables_and_integrity(self) -> None:
         from migrations import run_migrations
@@ -1572,6 +1567,15 @@ class R3MigrationTests(unittest.TestCase):
         # (миграция 21). Для них проверяется «прежние колонки дословно плюс
         # ровно одна новая».
         extended_tables = {"brick_proposals", "places"}
+        # H2 (миграция 24) осознанно пересоздаёт таблицы шаблонных текстов и
+        # их привязок: секции header/body/footer заменяются на content +
+        # extended_content. Колонки-«соседи» сохраняются дословно.
+        rebuilt_tables = {
+            "template_versions",
+            "template_snapshots",
+            "template_version_bricks",
+            "template_snapshot_bricks",
+        }
         with self.engine.connect() as connection:
             # Остальные существующие таблицы не перестраивались (ни DDL,
             # ни колонки).
@@ -1579,26 +1583,43 @@ class R3MigrationTests(unittest.TestCase):
                 {
                     name: self._schema(connection, name)
                     for name in old_tables
-                    if name not in extended_tables
+                    if name not in extended_tables | rebuilt_tables
                 },
                 {
                     name: schema_before[name]
                     for name in old_tables
-                    if name not in extended_tables
+                    if name not in extended_tables | rebuilt_tables
                 },
             )
             self.assertEqual(
                 {
                     name: self._rows(connection, f"PRAGMA table_info({name})")
                     for name in old_tables
-                    if name not in extended_tables
+                    if name not in extended_tables | rebuilt_tables
                 },
                 {
                     name: columns_before[name]
                     for name in old_tables
-                    if name not in extended_tables
+                    if name not in extended_tables | rebuilt_tables
                 },
             )
+            # Миграция 24: у обеих таблиц текстов ровно content +
+            # extended_content вместо трёх секций; привязки не изменились.
+            for table in ("template_versions", "template_snapshots"):
+                columns = [
+                    row[1]
+                    for row in self._rows(connection, f"PRAGMA table_info({table})")
+                ]
+                for section in ("header", "body", "footer"):
+                    self.assertNotIn(section, columns, f"{table}: секция осталась")
+                self.assertIn("content", columns)
+                self.assertIn("extended_content", columns)
+            for table in ("template_version_bricks", "template_snapshot_bricks"):
+                self.assertEqual(
+                    self._rows(connection, f"PRAGMA table_info({table})"),
+                    columns_before[table],
+                    f"{table}: колонки привязок не должны меняться",
+                )
             places_columns = self._rows(connection, "PRAGMA table_info(places)")
             self.assertEqual(
                 [(row[1], row[2], row[3], row[4]) for row in places_columns][

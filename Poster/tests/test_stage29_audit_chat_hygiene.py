@@ -240,7 +240,7 @@ class ScreenHtmlEscapingTests(unittest.TestCase):
         await h.text("/start")
         place_id, _alias = _seed_place(h)
         template_id, _rev, _bricks = _seed_personal_template(
-            h, specs=[("main", "Основное", "short_text", {})], body="[main]"
+            h, specs=[("main", "Основное", "short_text", {})], content="[main]"
         )
         await _start_to_template(h, place_id)
         await _choose_personal(h, template_id)
@@ -302,8 +302,7 @@ class ScreenHtmlEscapingTests(unittest.TestCase):
         self.assertIn("Заголовок &lt;b&gt;с тегом&lt;/b&gt;", raw_section)
         self.assertNotIn("<b>с тегом", raw_section)
 
-        await h.callback(_callbacks(h, "aw_exsec")[0])
-        await h.callback(_callbacks(h, "aw_expos")[0])
+        # H2: выбора секции/позиции больше нет — кирпичик сразу ждёт значение.
         raw_prompt = h.screen()["text"]
         self.assertIn("Заголовок &lt;b&gt;с тегом&lt;/b&gt;", raw_prompt)
         self.assertNotIn("<b>с тегом", raw_prompt)
@@ -323,7 +322,7 @@ class ScreenHtmlEscapingTests(unittest.TestCase):
 
         place_id, _alias = _seed_place(h)
         template_id, _rev, _bricks = _seed_personal_template(
-            h, specs=[("when", "Дата <i>событ</i>ия", "date", {})], body="[when]"
+            h, specs=[("when", "Дата <i>событ</i>ия", "date", {})], content="[when]"
         )
         await _start_to_template(h, place_id)
         await _choose_personal(h, template_id)
@@ -349,7 +348,7 @@ class ScreenHtmlEscapingTests(unittest.TestCase):
         template_id, _rev, _bricks = _seed_personal_template(
             h,
             specs=[("main", "Поле <u>с тегом</u>", "short_text", {})],
-            body="[main]",
+            content="[main]",
         )
         await _start_to_template(h, place_id)
         await _choose_personal(h, template_id)

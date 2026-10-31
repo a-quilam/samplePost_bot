@@ -31,6 +31,7 @@ from template_compiler import (
     resolve_template_bindings,
 )
 from template_parser import FormatNode, TextNode, parse_template
+from template_types import TEMPLATE_CONTENT
 
 
 class _FakeBrick:
@@ -109,7 +110,7 @@ class TemplateBindingTests(unittest.TestCase):
         ):
             return resolve_template_bindings(
                 cast(Session, MagicMock()),
-                {"body": text},
+                {TEMPLATE_CONTENT: text},
                 actor_telegram_user_id=1,
                 place_id=None,
             )
@@ -193,7 +194,7 @@ class TemplateRenderTests(unittest.TestCase):
         ):
             bindings = resolve_template_bindings(
                 cast(Session, MagicMock()),
-                {"body": text},
+                {TEMPLATE_CONTENT: text},
                 actor_telegram_user_id=1,
                 place_id=None,
             )
@@ -201,21 +202,29 @@ class TemplateRenderTests(unittest.TestCase):
             raise TemplateCompileError(bindings.parse_errors or bindings.unknown_codes)
         # Используем уже связанные токены из bindings: повторный парсинг
         # создал бы новые BrickNode без brick_id.
-        tokens = bindings.tokens_by_section.get("body", [])
+        tokens = bindings.tokens_by_text.get(TEMPLATE_CONTENT, [])
         definitions_by_id: dict[int, Any] = {}
         for code, brick_id in bindings.resolved_brick_ids.items():
             brick = self.brick_store.bricks.get(code)
             if brick is not None:
                 definitions_by_id[brick_id] = brick
-        return render_template({"body": tokens}, values, definitions_by_id)
+        return render_template({TEMPLATE_CONTENT: tokens}, values, definitions_by_id)
 
     def test_render_short_text_value(self) -> None:
         result = self._render("Название: [название]", {1: "Анонс"})
         self.assertEqual(result, "Название: Анонс")
 
     def test_render_missing_brick_is_skipped(self) -> None:
+        # H2: строка с токеном кирпичика, отрендерившимся пустым, скрывается
+        # целиком — вместе с висящим литералом.
         result = self._render("Название: [название] и всё", {})
-        self.assertEqual(result, "Название:  и всё")
+        self.assertEqual(result, "")
+
+    def test_render_literal_line_without_bricks_is_preserved(self) -> None:
+        # Строки без токенов остаются буквальными, даже если соседняя
+        # строка с пустым кирпичиком скрыта.
+        result = self._render("Название: [название]\nПросто текст", {})
+        self.assertEqual(result, "Просто текст")
 
     def test_render_url_value(self) -> None:
         result = self._render(
@@ -254,31 +263,31 @@ class TemplateFormatTests(unittest.TestCase):
     """Форматирование Telegram entities: жирный, курсив, ссылки, вложенность."""
 
     def test_bold_formatting(self) -> None:
-        tokens = parse_template("**жирный текст**", section="body")
+        tokens = parse_template("**жирный текст**")
         self.assertEqual(len(tokens), 1)
         node = tokens[0]
         self.assertEqual(getattr(node, "marker", None), "**")
 
     def test_italic_formatting(self) -> None:
-        tokens = parse_template("*курсив*", section="body")
+        tokens = parse_template("*курсив*")
         self.assertEqual(len(tokens), 1)
         node = tokens[0]
         self.assertEqual(getattr(node, "marker", None), "*")
 
     def test_strike_formatting(self) -> None:
-        tokens = parse_template("~~зачёркнутый~~", section="body")
+        tokens = parse_template("~~зачёркнутый~~")
         self.assertEqual(len(tokens), 1)
         node = tokens[0]
         self.assertEqual(getattr(node, "marker", None), "~~")
 
     def test_underline_formatting(self) -> None:
-        tokens = parse_template("__подчёркивание__", section="body")
+        tokens = parse_template("__подчёркивание__")
         self.assertEqual(len(tokens), 1)
         node = tokens[0]
         self.assertEqual(getattr(node, "marker", None), "__")
 
     def test_nested_formatting(self) -> None:
-        tokens = parse_template("**жирный *курсив***", section="body")
+        tokens = parse_template("**жирный *курсив***")
         outer = tokens[0]
         assert isinstance(outer, FormatNode)
         self.assertEqual(outer.marker, "**")
@@ -287,7 +296,7 @@ class TemplateFormatTests(unittest.TestCase):
         self.assertTrue(inner)
 
     def test_link_inside_bold(self) -> None:
-        tokens = parse_template("**[место](https://example.com)**", section="body")
+        tokens = parse_template("**[место](https://example.com)**")
         self.assertEqual(len(tokens), 1)
         node = tokens[0]
         assert isinstance(node, FormatNode)
@@ -297,7 +306,7 @@ class TemplateFormatTests(unittest.TestCase):
         self.assertTrue(inner)
 
     def test_html_escaping(self) -> None:
-        tokens = parse_template("Символы < > &", section="body")
+        tokens = parse_template("Символы < > &")
         # Простой текст сохраняется дословно
         self.assertEqual(len(tokens), 1)
         assert isinstance(tokens[0], TextNode)
@@ -305,7 +314,7 @@ class TemplateFormatTests(unittest.TestCase):
 
     def test_universal_symbols(self) -> None:
         text = "Строка 1\nСтрока 2 🎉"
-        tokens = parse_template(text, section="body")
+        tokens = parse_template(text)
         # Лексер объединяет соседний текст в один узел.
         self.assertEqual(len(tokens), 1)
         assert isinstance(tokens[0], TextNode)

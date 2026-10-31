@@ -155,7 +155,7 @@ def _seed_personal_template(
     *,
     name: str = "Личный шаблон",
     actor_tg: int = DEFAULT_USER_ID,
-    body: str = "[название]",
+    content: str = "[название]",
 ):
     with h.session_factory() as session:
         get_or_create_user(session, actor_tg, username=f"user-{actor_tg}")
@@ -163,9 +163,7 @@ def _seed_personal_template(
             session,
             actor_telegram_user_id=actor_tg,
             name=name,
-            header="",
-            body=body,
-            footer="",
+            content=content,
         )
         session.commit()
         return template.template_id
@@ -409,8 +407,8 @@ class TemplatePickTests(unittest.TestCase):
         await h.text("/start")
         await h.callback("pick_template")
         await h.callback(f"tp_open:{template_id}")
-        await h.callback(f"tp_edit_h:{template_id}")
-        await h.text("Новая шапка")
+        await h.callback(f"tp_edit:{template_id}")
+        await h.text("Новый текст")
         await h.callback("tp_save")
 
         with h.session_factory() as session:
@@ -421,7 +419,7 @@ class TemplatePickTests(unittest.TestCase):
                 .where(TemplateVersion.template_id == template_id)
                 .order_by(TemplateVersion.id.desc())
             )
-        self.assertEqual(version.header, "Новая шапка")
+        self.assertEqual(version.content, "Новый текст")
 
     @scenario_test
     async def test_personal_template_starts_regardless_of_place_absence(self, h):
@@ -582,9 +580,9 @@ class PersonalPlaceLineTests(unittest.TestCase):
                 session,
                 actor_telegram_user_id=DEFAULT_USER_ID,
                 name="Без места",
-                header="",
-                body="Постоянный текст [название]",
-                footer="",
+                content="\n".join(
+                    p for p in ("", "Постоянный текст [название]", "") if p
+                ),
             )
             session.commit()
             template_id = template.template_id
@@ -654,9 +652,9 @@ class PersonalPlaceLineTests(unittest.TestCase):
                 session,
                 actor_telegram_user_id=DEFAULT_USER_ID,
                 name="Без места",
-                header="",
-                body="Постоянный текст [название]",
-                footer="",
+                content="\n".join(
+                    p for p in ("", "Постоянный текст [название]", "") if p
+                ),
             )
             session.commit()
             template_id = template.template_id

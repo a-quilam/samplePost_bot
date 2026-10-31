@@ -109,10 +109,11 @@ def render_live_text(
             draft_id=draft_id,
         )
     return render_announcement(
-        payload.tokens_by_section,
+        payload.tokens_by_text,
         payload.values_by_id,
         payload.definitions_by_id,
         has_photos=has_photos,
+        use_extended=payload.use_extended,
     )
 
 

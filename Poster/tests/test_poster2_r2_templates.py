@@ -47,15 +47,13 @@ from template_store import (
     get_standard_template,
     list_template_versions,
     reset_personal_template,
-    update_template_header,
+    update_template_content,
 )
 from template_types import (
     BUILTIN_TEMPLATE,
     BUILTIN_TEMPLATE_VERSION,
     INITIAL_PERSONAL_TEMPLATE_NAME,
-    TEMPLATE_SECTION_BODY,
-    TEMPLATE_SECTION_FOOTER,
-    TEMPLATE_SECTION_HEADER,
+    TEMPLATE_CONTENT,
 )
 from tests.stage19a_helpers import make_engine, temp_db_path
 from tests.stage23_helpers import OWNER_TG
@@ -99,6 +97,12 @@ V3_BODY = (
 V3_FOOTER = "\n[контакт]"
 
 
+def _join(*parts: str) -> str:
+    """Склейка секций миграцией 24: trim краёв + один перевод строки."""
+    present = [part for part in parts if part.strip()]
+    return "\n".join([present[0].strip(), *(part for part in present[1:])])
+
+
 def _bind(tokens, definitions_by_code) -> None:
     """Проставляет brick_id по коду — как это делает компилятор версии."""
     for node in tokens:
@@ -127,11 +131,8 @@ class BuiltinTemplateV3RenderTests(unittest.TestCase):
         self.definitions = {item.id: item for item in list_system_bricks(self.session)}
         self.by_code = {item.code: item for item in list_system_bricks(self.session)}
         self.tokens = {
-            section: parse_template(text, section=section)
-            for section, text in (
-                (TEMPLATE_SECTION_HEADER, BUILTIN_TEMPLATE.header),
-                (TEMPLATE_SECTION_BODY, BUILTIN_TEMPLATE.body),
-                (TEMPLATE_SECTION_FOOTER, BUILTIN_TEMPLATE.footer),
+            TEMPLATE_CONTENT: parse_template(
+                BUILTIN_TEMPLATE.content, section=TEMPLATE_CONTENT
             )
         }
         for tokens in self.tokens.values():
@@ -163,13 +164,14 @@ class BuiltinTemplateV3RenderTests(unittest.TestCase):
         )
         self.assertEqual(rendered, EXPECTED_ANNOUNCEMENT)
 
-    def test_skipped_bricks_keep_literal_separator(self) -> None:
-        """`//` — буквальная статика: пропуски кирпичиков её не удаляют."""
+    def test_skipped_bricks_hide_their_line(self) -> None:
+        """H2: строка с пустыми кирпичиками скрывается целиком."""
         values = {self.by_code["название"].id: "Только название"}
         rendered = render_template(self.tokens, values, self.definitions)
-        self.assertIn("//", rendered)
-        self.assertIn("\n\n", rendered)
-        # Литеральный `//` делает анонс видимым: заглушка не подставляется.
+        # Висящий литерал `//` не остаётся: вся строка даты ушла.
+        self.assertNotIn("//", rendered)
+        self.assertEqual(rendered, "<b>Только название</b>")
+        # Рендер анонса совпадает с рендером шаблона (заглушка не нужна).
         self.assertEqual(
             render_announcement(self.tokens, values, self.definitions),
             rendered,
@@ -272,7 +274,7 @@ class MigrationEighteenTests(_MigrationEighteenTestCase):
     """Миграция 18 обновляет только доказуемо нетронутые копии."""
 
     def test_untouched_personal_copy_is_updated_and_renamed(self) -> None:
-        self.assertEqual(LATEST_VERSION, 23)
+        self.assertEqual(LATEST_VERSION, 24)
         template = self.session.get(Template, 1)
         assert template is not None
         self.assertEqual(template.name, "Дефолтный шаблон")
@@ -280,13 +282,10 @@ class MigrationEighteenTests(_MigrationEighteenTestCase):
         versions = list_template_versions(self.session, OWNER_TG, 1)
         self.assertEqual([item.version for item in versions], [1, 2, 3])
         # Миграция 18 записала v3, миграция 22 — текущую v4.
-        self.assertEqual(versions[1].header, V3_HEADER)
-        self.assertEqual(versions[1].body, V3_BODY)
-        self.assertEqual(versions[1].footer, V3_FOOTER)
+        # Миграция 24 склеивает секции в один текст без потери байтов.
+        self.assertEqual(versions[1].content, _join(V3_HEADER, V3_BODY, V3_FOOTER))
         self.assertEqual(versions[1].builtin_version, 3)
-        self.assertEqual(versions[2].header, BUILTIN_TEMPLATE.header)
-        self.assertEqual(versions[2].body, BUILTIN_TEMPLATE.body)
-        self.assertEqual(versions[2].footer, BUILTIN_TEMPLATE.footer)
+        self.assertEqual(versions[2].content, BUILTIN_TEMPLATE.content)
         self.assertEqual(versions[2].builtin_version, 4)
         self.assertEqual(
             {binding.code for binding in versions[2].bindings},
@@ -302,9 +301,8 @@ class MigrationEighteenTests(_MigrationEighteenTestCase):
             },
         )
         # Старая версия v2 не переписана (иммутабельность истории).
-        self.assertEqual(versions[0].header, V2_HEADER)
-        self.assertEqual(versions[0].body, V2_BODY)
-        self.assertEqual(versions[0].footer, V2_FOOTER)
+        self.assertEqual(versions[0].content, _join(V2_HEADER, V2_BODY, V2_FOOTER))
+        self.assertIsNone(versions[0].extended_content)
         self.assertEqual(versions[0].builtin_version, 2)
 
     def test_standard_copy_is_updated_with_previous_name(self) -> None:
@@ -314,8 +312,7 @@ class MigrationEighteenTests(_MigrationEighteenTestCase):
         self.assertEqual(template.revision, 3)
         current = get_standard_template(self.session, OWNER_TG, 1).current_version
         self.assertEqual(current.version, 3)
-        self.assertEqual(current.body, BUILTIN_TEMPLATE.body)
-        self.assertEqual(current.footer, BUILTIN_TEMPLATE.footer)
+        self.assertEqual(current.content, BUILTIN_TEMPLATE.content)
         self.assertEqual(current.builtin_version, 4)
 
     def test_edited_copy_is_not_touched(self) -> None:
@@ -325,7 +322,10 @@ class MigrationEighteenTests(_MigrationEighteenTestCase):
         self.assertEqual(template.revision, 1)
         versions = list_template_versions(self.session, OWNER_TG, 3)
         self.assertEqual([item.version for item in versions], [1])
-        self.assertEqual(versions[0].header, "**[название]** — моя правка")
+        self.assertEqual(
+            versions[0].content,
+            _join("**[название]** — моя правка", V2_BODY, V2_FOOTER),
+        )
         self.assertEqual(versions[0].builtin_version, 2)
 
     def test_renamed_but_untouched_copy_is_not_updated(self) -> None:
@@ -336,7 +336,7 @@ class MigrationEighteenTests(_MigrationEighteenTestCase):
         self.assertEqual(template.revision, 1)
         versions = list_template_versions(self.session, OWNER_TG, 2)
         self.assertEqual([item.version for item in versions], [1])
-        self.assertEqual(versions[0].body, V2_BODY)
+        self.assertEqual(versions[0].content, _join(V2_HEADER, V2_BODY, V2_FOOTER))
         self.assertEqual(versions[0].builtin_version, 2)
 
     def test_untouched_initial_copy_without_marker_is_updated(self) -> None:
@@ -348,7 +348,7 @@ class MigrationEighteenTests(_MigrationEighteenTestCase):
         versions = list_template_versions(self.session, OWNER_TG, 5)
         self.assertEqual([item.version for item in versions], [1, 2, 3])
         self.assertIsNone(versions[0].builtin_version)
-        self.assertEqual(versions[2].body, BUILTIN_TEMPLATE.body)
+        self.assertEqual(versions[2].content, BUILTIN_TEMPLATE.content)
         self.assertEqual(versions[2].builtin_version, 4)
 
     def test_user_copy_already_v3_keeps_old_name(self) -> None:
@@ -363,14 +363,11 @@ class MigrationEighteenTests(_MigrationEighteenTestCase):
                 "'2026-01-02 00:00:00', '2026-01-02 00:00:00')"
             )
             connection.execute(
-                "INSERT INTO template_versions (id, template_id, version, header, "
-                "body, footer, created_by_user_id, created_at, builtin_version) "
-                "VALUES (100, 100, 1, ?, ?, ?, 1, '2026-01-02 00:00:00', 3)",
-                (
-                    BUILTIN_TEMPLATE.header,
-                    BUILTIN_TEMPLATE.body,
-                    BUILTIN_TEMPLATE.footer,
-                ),
+                "INSERT INTO template_versions (id, template_id, version, content, "
+                "extended_content, created_by_user_id, created_at, "
+                "builtin_version) "
+                "VALUES (100, 100, 1, ?, NULL, 1, '2026-01-02 00:00:00', 3)",
+                (BUILTIN_TEMPLATE.content,),
             )
             connection.commit()
         finally:
@@ -383,14 +380,14 @@ class MigrationEighteenTests(_MigrationEighteenTestCase):
 
     def test_repeat_run_changes_nothing(self) -> None:
         before = self._rows(
-            "SELECT id, template_id, version, header, body, footer, builtin_version "
-            "FROM template_versions ORDER BY id"
+            "SELECT id, template_id, version, content, extended_content, "
+            "builtin_version FROM template_versions ORDER BY id"
         )
         revisions = self._rows("SELECT id, name, revision FROM templates ORDER BY id")
         self.assertEqual(run_migrations(self.engine), LATEST_VERSION)
         self.assertEqual(
             self._rows(
-                "SELECT id, template_id, version, header, body, footer, "
+                "SELECT id, template_id, version, content, extended_content, "
                 "builtin_version FROM template_versions ORDER BY id"
             ),
             before,
@@ -427,7 +424,7 @@ class MigrationEighteenTests(_MigrationEighteenTestCase):
         )
         row = self.session.get(TemplateSnapshot, snapshot.snapshot_id)
         assert row is not None
-        self.assertEqual(row.body, BUILTIN_TEMPLATE.body)
+        self.assertEqual(row.content, BUILTIN_TEMPLATE.content)
         self.assertEqual(self._rows("SELECT count(*) FROM template_snapshots"), [(1,)])
 
 
@@ -435,7 +432,7 @@ class ResetToBuiltinAfterMigrationTests(_MigrationEighteenTestCase):
     """«Восстановить стандарт» после v4 создаёт версию с `builtin_version=4`."""
 
     def test_personal_reset_creates_v4_version(self) -> None:
-        updated = update_template_header(
+        updated = update_template_content(
             self.session,
             actor_telegram_user_id=OWNER_TG,
             template_id=1,
@@ -454,9 +451,7 @@ class ResetToBuiltinAfterMigrationTests(_MigrationEighteenTestCase):
         assert result.template is not None
         current = result.template.current_version
         self.assertEqual(current.version, 5)
-        self.assertEqual(current.header, BUILTIN_TEMPLATE.header)
-        self.assertEqual(current.body, BUILTIN_TEMPLATE.body)
-        self.assertEqual(current.footer, BUILTIN_TEMPLATE.footer)
+        self.assertEqual(current.content, BUILTIN_TEMPLATE.content)
         self.assertEqual(current.builtin_version, BUILTIN_TEMPLATE_VERSION)
 
     def test_untouched_personal_copy_is_unchanged_on_reset(self) -> None:
@@ -502,9 +497,8 @@ class InitialPersonalTemplateV3Tests(unittest.TestCase):
         self.assertEqual(INITIAL_PERSONAL_TEMPLATE_NAME, "Дефолтный шаблон")
         self.assertEqual(created.name, "Дефолтный шаблон")
         version = created.current_version
-        self.assertEqual(version.header, BUILTIN_TEMPLATE.header)
-        self.assertEqual(version.body, BUILTIN_TEMPLATE.body)
-        self.assertEqual(version.footer, BUILTIN_TEMPLATE.footer)
+        self.assertEqual(version.content, BUILTIN_TEMPLATE.content)
+        self.assertIsNone(version.extended_content)
         # Стартовая копия — не «сброс»: маркер построенной версии пуст.
         self.assertIsNone(version.builtin_version)
         # Привязки: системные коды резолвятся по коду, а не хардкодом ID.
@@ -530,14 +524,13 @@ class InitialPersonalTemplateV3Tests(unittest.TestCase):
 class BuiltinBindingCatalogTests(unittest.TestCase):
     """BUILTIN v4 использует те же восемь системных кодов, что и v2."""
 
-    def test_builtin_header_has_no_trailing_newline(self) -> None:
-        self.assertFalse(BUILTIN_TEMPLATE.header.endswith("\n"))
-        self.assertTrue(BUILTIN_TEMPLATE.body.startswith("\n"))
-        self.assertTrue(BUILTIN_TEMPLATE.footer.startswith("\n"))
+    def test_builtin_content_has_no_trailing_newline(self) -> None:
+        # H2: переносы — часть единого текста; хвостового перевода нет.
+        self.assertFalse(BUILTIN_TEMPLATE.content.endswith("\n"))
+        self.assertNotIn("\n\n\n", BUILTIN_TEMPLATE.content)
 
     def test_bindings_are_codes_of_builtin_text(self) -> None:
-        combined = BUILTIN_TEMPLATE.header + BUILTIN_TEMPLATE.body
-        combined += BUILTIN_TEMPLATE.footer
+        combined = BUILTIN_TEMPLATE.content
         for binding in BUILTIN_TEMPLATE.bindings:
             with self.subTest(code=binding.code):
                 self.assertIn(f"[{binding.code}]", combined)

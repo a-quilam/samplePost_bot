@@ -65,6 +65,26 @@ V4_HEADER = "**[название]**\n\n**[дата] // [время_начала]
 V4_BODY = "\n[описание]"
 V4_FOOTER = "\n[контакт]"
 
+
+def _join(header: str, body: str, footer: str) -> str:
+    """
+    Склейка прежних секций в единый `content` — формула backfill миграции 24.
+
+    Разделитель ставится только между непустыми (по `.strip()`) соседними
+    частями, поэтому канонические эталоны остаются побайтово прежними.
+    Записан здесь литерально, независимо от констант продукта.
+    """
+    if not (header.strip() or body.strip() or footer.strip()):
+        return header + body + footer
+    text = header.strip()
+    if text and (body.strip() or footer.strip()):
+        text += "\n"
+    text += body
+    if body.strip() and footer.strip():
+        text += "\n"
+    return text + footer
+
+
 OLD_INITIAL_NAME = "Мой шаблон"
 NEW_INITIAL_NAME = "Дефолтный шаблон"
 
@@ -252,9 +272,10 @@ class _Base(unittest.TestCase):
         )
 
     def versions(self, template_id: int) -> list[tuple]:
+        """Версия → единый текст: после миграции 24 секций в схеме нет."""
         return _sql(
             self.path,
-            "SELECT version, header, body, footer, builtin_version "
+            "SELECT version, content, builtin_version "
             "FROM template_versions WHERE template_id = ? ORDER BY version",
             (template_id,),
         )
@@ -267,23 +288,27 @@ class MigrationEighteenContentTests(_Base):
         super().setUp()
         self.assertEqual(self.migrate(), LATEST_VERSION)
 
-    def test_latest_version_is_twenty(self) -> None:
+    def test_latest_version_is_twenty_four(self) -> None:
         # R3 добавил миграцию 19, R4 — миграцию 20; миграция 18 остаётся
         # на своём месте, а последняя в журнале — 20.
-        self.assertEqual(LATEST_VERSION, 23)
+        self.assertEqual(LATEST_VERSION, 24)
         versions = _sql(
             self.path,
             "SELECT version, name FROM schema_migrations ORDER BY version",
         )
         self.assertIn((18, "builtin_templates_v3"), versions)
-        self.assertEqual(versions[-1], (23, "place_invite_links"))
+        self.assertEqual(
+            versions[-1], (24, "template_content_and_extras_without_sections")
+        )
 
     def test_untouched_initial_copy_gets_v4_and_new_name(self) -> None:
         rows = self.versions(1)
         self.assertEqual(len(rows), 3, "обе прежние версии остаются в истории")
-        self.assertEqual(rows[0], (1, V2_HEADER, V2_BODY, V2_FOOTER, 2))
-        self.assertEqual(rows[1], (2, V3_HEADER, V3_BODY, V3_FOOTER, 3))
-        self.assertEqual(rows[2], (3, V4_HEADER, V4_BODY, V4_FOOTER, 4))
+        self.assertEqual(rows[0], (1, _join(V2_HEADER, V2_BODY, V2_FOOTER), 2))
+        self.assertEqual(rows[1], (2, _join(V3_HEADER, V3_BODY, V3_FOOTER), 3))
+        self.assertEqual(rows[2], (3, _join(V4_HEADER, V4_BODY, V4_FOOTER), 4))
+        # Заполненный эталон v4 побайтово прежний: H2 не меняет ни символа.
+        self.assertEqual(rows[2][1], V4_HEADER + "\n" + V4_BODY + "\n" + V4_FOOTER)
         self.assertEqual(
             _sql(self.path, "SELECT name, revision FROM templates WHERE id = 1"),
             [(NEW_INITIAL_NAME, 3)],
@@ -292,8 +317,8 @@ class MigrationEighteenContentTests(_Base):
     def test_untouched_initial_copy_without_marker_is_updated(self) -> None:
         rows = self.versions(2)
         self.assertEqual([row[0] for row in rows], [1, 2, 3])
-        self.assertEqual(rows[1][1:], (V3_HEADER, V3_BODY, V3_FOOTER, 3))
-        self.assertEqual(rows[2][1:], (V4_HEADER, V4_BODY, V4_FOOTER, 4))
+        self.assertEqual(rows[1][1:], (_join(V3_HEADER, V3_BODY, V3_FOOTER), 3))
+        self.assertEqual(rows[2][1:], (_join(V4_HEADER, V4_BODY, V4_FOOTER), 4))
         self.assertEqual(
             _sql(self.path, "SELECT name, revision FROM templates WHERE id = 2"),
             [(NEW_INITIAL_NAME, 3)],
@@ -302,8 +327,8 @@ class MigrationEighteenContentTests(_Base):
     def test_untouched_standard_is_updated_and_keeps_null_name(self) -> None:
         rows = self.versions(7)
         self.assertEqual(len(rows), 3)
-        self.assertEqual(rows[1][1:], (V3_HEADER, V3_BODY, V3_FOOTER, 3))
-        self.assertEqual(rows[2][1:], (V4_HEADER, V4_BODY, V4_FOOTER, 4))
+        self.assertEqual(rows[1][1:], (_join(V3_HEADER, V3_BODY, V3_FOOTER), 3))
+        self.assertEqual(rows[2][1:], (_join(V4_HEADER, V4_BODY, V4_FOOTER), 4))
         self.assertEqual(
             _sql(self.path, "SELECT name, revision FROM templates WHERE id = 7"),
             [(None, 3)],
@@ -318,7 +343,28 @@ class MigrationEighteenContentTests(_Base):
             with self.subTest(template_id=template_id):
                 rows = self.versions(template_id)
                 self.assertEqual(len(rows), 1, "новой версии быть не должно")
-                self.assertEqual(rows[0][4], 2)
+                self.assertEqual(rows[0][2], 2)
+                # Правка человека сохранена буквально.
+                self.assertEqual(
+                    rows[0][1],
+                    _join(
+                        {
+                            3: "**[название] — моё**",
+                            4: V2_HEADER,
+                            5: V2_HEADER,
+                        }[template_id],
+                        {
+                            3: V2_BODY,
+                            4: V2_BODY + "\n\nмоя подпись",
+                            5: V2_BODY,
+                        }[template_id],
+                        {
+                            3: V2_FOOTER,
+                            4: V2_FOOTER,
+                            5: V2_FOOTER + " · мой",
+                        }[template_id],
+                    ),
+                )
                 self.assertEqual(
                     _sql(
                         self.path,
@@ -359,7 +405,11 @@ class MigrationEighteenContentTests(_Base):
         """У копии 8 текущая версия — 2 (правка), а v2-текст лежит в v1."""
         rows = self.versions(8)
         self.assertEqual([row[0] for row in rows], [1, 2])
-        self.assertEqual(rows[1][4], None)
+        self.assertEqual(rows[1][2], None)
+        self.assertEqual(rows[0][1], _join(V2_HEADER, V2_BODY, V2_FOOTER))
+        self.assertEqual(
+            rows[1][1], _join("**[название]** — правка", V2_BODY, V2_FOOTER)
+        )
         self.assertEqual(
             _sql(self.path, "SELECT revision FROM templates WHERE id = 8"), [(2,)]
         )
@@ -404,8 +454,8 @@ class MigrationEighteenRepeatTests(_Base):
         templates = self.templates()
         versions = _sql(
             self.path,
-            "SELECT id, template_id, version, header, body, footer, "
-            "builtin_version FROM template_versions ORDER BY id",
+            "SELECT id, template_id, version, content, builtin_version "
+            "FROM template_versions ORDER BY id",
         )
         bindings = _sql(
             self.path,
@@ -417,7 +467,7 @@ class MigrationEighteenRepeatTests(_Base):
         self.assertEqual(
             _sql(
                 self.path,
-                "SELECT id, template_id, version, header, body, footer, "
+                "SELECT id, template_id, version, content, "
                 "builtin_version FROM template_versions ORDER BY id",
             ),
             versions,

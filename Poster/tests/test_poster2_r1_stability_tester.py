@@ -128,9 +128,7 @@ def make_personal_template(h, *, actor_tg: int = 7, name: str = "Личный") 
             session,
             actor_telegram_user_id=actor_tg,
             name=name,
-            header="",
-            body="[название]",
-            footer="",
+            content="\n".join(p for p in ("", "[название]", "") if p),
         )
         return int(template.template_id)
 

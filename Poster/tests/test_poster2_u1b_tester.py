@@ -132,17 +132,17 @@ class SafeHtmlSeamTests(unittest.TestCase):
 
     def _render(self, value: object) -> str:
         from template_compiler import (  # noqa: PLC0415 — локальный импорт теста
-            TEMPLATE_SECTION_BODY,
             render_announcement,
         )
         from template_parser import BrickNode, parse_template
+        from template_types import TEMPLATE_CONTENT
 
-        tokens = parse_template("[main]", section=TEMPLATE_SECTION_BODY)
+        tokens = parse_template("[main]", section=TEMPLATE_CONTENT)
         for node in tokens:
             if isinstance(node, BrickNode):
                 node.brick_id = 1
         return render_announcement(
-            {TEMPLATE_SECTION_BODY: tokens},
+            {TEMPLATE_CONTENT: tokens},
             {1: value},
             {1: self._definition()},
         )
@@ -179,14 +179,12 @@ class SafeHtmlSeamTests(unittest.TestCase):
     def test_url_value_as_link_label_keeps_single_anchor(self) -> None:
         """U1b-fix: подпись-ссылка не даёт вложенных `<a>` (Telegram их отвергает)."""
         from template_compiler import (  # noqa: PLC0415 — локальный импорт теста
-            TEMPLATE_SECTION_BODY,
             render_announcement,
         )
         from template_parser import BrickNode, FormatNode, LinkNode, parse_template
+        from template_types import TEMPLATE_CONTENT
 
-        tokens = parse_template(
-            "[main](https://example.com)", section=TEMPLATE_SECTION_BODY
-        )
+        tokens = parse_template("[main](https://example.com)", section=TEMPLATE_CONTENT)
 
         def bind(nodes: list[Any]) -> None:
             for node in nodes:
@@ -202,7 +200,7 @@ class SafeHtmlSeamTests(unittest.TestCase):
             '<a href="https://example.com/x">https://example.com/x</a> и <b>жир</b>'
         )
         rendered = render_announcement(
-            {TEMPLATE_SECTION_BODY: tokens},
+            {TEMPLATE_CONTENT: tokens},
             {1: value},
             {1: self._definition()},
         )
@@ -324,7 +322,7 @@ class MutationCaptureTests(unittest.TestCase):
             h,
             name="Многострочный",
             specs=[("main", "Основное", "long_text", {})],
-            body="[main]",
+            content="[main]",
         )
         await _start_to_template(h, place_id)
         await _choose_personal(h, template_id)
@@ -384,7 +382,7 @@ class MutationCaptureTests(unittest.TestCase):
             h,
             name="Ссылки",
             specs=[("main", "Основное", "short_text", {})],
-            body="Сайт: [main]",
+            content="Сайт: [main]",
         )
         await _start_to_template(h, place_id)
         await _choose_personal(h, template_id)
@@ -479,7 +477,7 @@ class MutationCaptureTests(unittest.TestCase):
             h,
             name="Ссылка в подписи",
             specs=[("main", "Основное", "short_text", {})],
-            body="[main](https://example.com)",
+            content="[main](https://example.com)",
         )
         await _start_to_template(h, place_id)
         await _choose_personal(h, template_id)
@@ -524,7 +522,7 @@ class LongValueScreenTests(unittest.TestCase):
                 ("main", "Основное", "long_text", {}),
                 ("second", "Второе", "short_text", {}),
             ],
-            body="[main] [second]",
+            content="[main] [second]",
         )
         await _start_to_template(h, place_id)
         await _choose_personal(h, template_id)
@@ -590,7 +588,7 @@ class LongValueScreenTests(unittest.TestCase):
                 ("main", "Основное", "short_text", {}),
                 ("extra", "Дополнительное", "long_text", {}),
             ],
-            body="[main]",
+            content="[main]",
         )
         await _start_to_template(h, place_id)
         await _choose_personal(h, template_id)
@@ -601,8 +599,7 @@ class LongValueScreenTests(unittest.TestCase):
         await h.callback(_callback(h, "aw_extras"))
         await h.callback(_callback(h, "aw_exadd"))
         await self._choose_extra_brick(h, bricks["extra"])
-        await h.callback(_callback(h, "aw_exsec", ":body"))
-        await h.callback(_callback(h, "aw_expos", ":start"))
+        # H2: секций и позиций нет — после выбора кирпичика сразу значение.
 
         text = "ж" * LONG_TEXT_LENGTH
         await h.text(text, entities=[ent(MessageEntity.BOLD, 0, LONG_TEXT_LENGTH)])
@@ -659,7 +656,7 @@ class EmptyStoredHtmlTests(unittest.TestCase):
             h,
             name="Пустой HTML",
             specs=[("main", "Основное", "short_text", {})],
-            body="[main]",
+            content="[main]",
         )
         await _start_to_template(h, place_id)
         await _choose_personal(h, template_id)
@@ -727,7 +724,6 @@ class FieldStateRenderingTests(unittest.TestCase):
             "code": "main",
             "title": "Основное",
             "value_type": "short_text",
-            "section": "body",
             "status": "valid",
             "raw_value": "<b>x</b>",
             "rules": {},
@@ -771,7 +767,6 @@ class LongValueTruncationTests(unittest.TestCase):
             "code": "main",
             "title": "Основное",
             "value_type": "long_text",
-            "section": "body",
             "status": "valid",
             "raw_value": "",
             "rules": {},
@@ -847,17 +842,17 @@ class EmptyHtmlRenderingTests(unittest.TestCase):
 
     def _render(self, value: object) -> str:
         from template_compiler import (  # noqa: PLC0415 — локальный импорт теста
-            TEMPLATE_SECTION_BODY,
             render_announcement,
         )
         from template_parser import BrickNode, parse_template
+        from template_types import TEMPLATE_CONTENT
 
-        tokens = parse_template("[main]", section=TEMPLATE_SECTION_BODY)
+        tokens = parse_template("[main]", section=TEMPLATE_CONTENT)
         for node in tokens:
             if isinstance(node, BrickNode):
                 node.brick_id = 1
         return render_announcement(
-            {TEMPLATE_SECTION_BODY: tokens},
+            {TEMPLATE_CONTENT: tokens},
             {1: value},
             {1: self._definition()},
         )

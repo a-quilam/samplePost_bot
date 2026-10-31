@@ -338,7 +338,9 @@ def _copies(h, text: str | None) -> list[int]:
     ]
 
 
-async def _to_photo_step(h, *, body: str | None = None, value: str | None = "Значение"):
+async def _to_photo_step(
+    h, *, content: str | None = None, value: str | None = "Значение"
+):
     """
     Доводит мастер до шага фото: анонс ещё НЕ доставлен.
 
@@ -353,7 +355,7 @@ async def _to_photo_step(h, *, body: str | None = None, value: str | None = "З�
     )
 
     place_id, _alias = _seed_place(h)
-    template_id, _revision, _bricks = _seed_personal_template(h, body=body)
+    template_id, _revision, _bricks = _seed_personal_template(h, content=content)
     await _start_to_template(h, place_id)
     await _choose_personal(h, template_id)
     if value is None:
@@ -418,7 +420,7 @@ class AnnouncementDeliveryScenarioTests(unittest.TestCase):
         from tests.test_stage27c_announcement_ui import _post_types
 
         await h.text("/start")
-        draft = await _to_photo_step(h, body="[main]", value=None)
+        draft = await _to_photo_step(h, content="[main]", value=None)
         live_ids = set(_stored(h, draft.id).live_message_ids)
         self.assertTrue(live_ids, "текстовый блок «.» показан до фото")
         self.assertEqual(h.posts(), [], "до фото готового поста нет")
@@ -516,7 +518,7 @@ class AnnouncementDeliveryScenarioTests(unittest.TestCase):
         await h.text("/start")
         # Длинный кирпичик (не литерал шаблона): сокращать нужно именно его.
         long_value = "Длинный текст анонса " * 150
-        draft = await _to_photo_step(h, body="[main]", value=long_value)
+        draft = await _to_photo_step(h, content="[main]", value=long_value)
         photo_update = await h.photo("over-limit-photo")
 
         screen = h.screen_text()
@@ -547,7 +549,7 @@ class AnnouncementDeliveryScenarioTests(unittest.TestCase):
 
         await h.text("/start")
         long_value = "Длинный текст анонса " * 150
-        draft = await _to_photo_step(h, body="[main]", value=long_value)
+        draft = await _to_photo_step(h, content="[main]", value=long_value)
         await h.photo("dropped-photo")
         self.assertIn("из 1024", h.screen_text())
 

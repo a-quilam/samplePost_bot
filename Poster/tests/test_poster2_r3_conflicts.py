@@ -68,7 +68,7 @@ from models import (
     utcnow,
 )
 from place_store import create_place
-from template_store import get_standard_template, update_template_section
+from template_store import get_standard_template, update_template_content
 from tests.integration_harness import HARNESS_IMPORT_ERROR, scenario_test
 from tests.stage22a_helpers import BrickDatabaseTestCase
 from user_store import get_or_create_user
@@ -153,12 +153,11 @@ class ConflictModelTests(BrickDatabaseTestCase):
         template = get_standard_template(
             self.session, author.telegram_user_id, place.id
         )
-        updated = update_template_section(
+        updated = update_template_content(
             self.session,
             actor_telegram_user_id=author.telegram_user_id,
             template_id=template.template_id,
             expected_revision=template.revision,
-            section="body",
             content="[цена_новая]",
         )
         self.assertEqual(updated.status, "updated", updated.message)
@@ -174,12 +173,11 @@ class ConflictModelTests(BrickDatabaseTestCase):
         template = get_standard_template(
             self.session, author.telegram_user_id, place.id
         )
-        updated = update_template_section(
+        updated = update_template_content(
             self.session,
             actor_telegram_user_id=author.telegram_user_id,
             template_id=template.template_id,
             expected_revision=template.revision,
-            section="body",
             content="[цена_снимок]",
         )
         assert updated.template is not None
@@ -343,12 +341,11 @@ class ConflictResolutionTests(BrickDatabaseTestCase):
             template = get_standard_template(
                 self.session, author.telegram_user_id, place.id
             )
-            prepared = update_template_section(
+            prepared = update_template_content(
                 self.session,
                 actor_telegram_user_id=author.telegram_user_id,
                 template_id=template.template_id,
                 expected_revision=template.revision,
-                section="body",
                 content=f"[{code}]",
             )
             assert prepared.template is not None
@@ -1022,12 +1019,11 @@ class ConflictSameTemplateRaceTests(BrickDatabaseTestCase):
         template = get_standard_template(
             self.session, author.telegram_user_id, place.id
         )
-        prepared = update_template_section(
+        prepared = update_template_content(
             self.session,
             actor_telegram_user_id=author.telegram_user_id,
             template_id=template.template_id,
             expected_revision=template.revision,
-            section="body",
             content=f"x [{codes[0]}] y [{codes[1]}]",
         )
         self.assertEqual(prepared.status, "updated", prepared.message)
@@ -1193,7 +1189,7 @@ class ConflictMigrationTests(unittest.TestCase):
     def test_latest_version_is_twenty_three(self) -> None:
         # U1a добавил 21 (`place_city`) и 22 (`builtin_templates_v4`)
         # поверх R4-овской 20; все применяются штатно.
-        self.assertEqual(LATEST_VERSION, 23)
+        self.assertEqual(LATEST_VERSION, 24)
 
     def test_migration_19_on_filled_database_keeps_data(self) -> None:
         from sqlalchemy import text

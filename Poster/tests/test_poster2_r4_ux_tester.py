@@ -271,9 +271,7 @@ class R4TesterCase(unittest.TestCase):
                 session,
                 actor_telegram_user_id=OWNER,
                 name="Шаблон",
-                header="",
-                body=body,
-                footer="",
+                content="\n".join(p for p in ("", body, "") if p),
             )
             return int(template.template_id)
 

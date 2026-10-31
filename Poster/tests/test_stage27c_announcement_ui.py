@@ -53,14 +53,14 @@ except Exception as exc:  # noqa: BLE001 — причина попадает в 
 async def _personal_delivered(
     h,
     *,
-    body: str | None = None,
+    content: str | None = None,
     specs: list[tuple[str, str, str, dict[str, object]]] | None = None,
 ):
     """Личный шаблон: последний ответ сразу доставляет анонс в этот чат."""
     place_id, _alias_id = _seed_place(h)
     template_id, _revision, bricks = _seed_personal_template(
         h,
-        body=body,
+        content=content,
         specs=specs,
     )
     await _start_to_template(h, place_id)
@@ -641,7 +641,7 @@ class AnnouncementRedeliveryTests(unittest.TestCase):
             ("main", "Основное", "short_text", {}),
             ("extra0", "Доп 0", "short_text", {}),
         ]
-        draft, bricks = await _personal_delivered(h, specs=specs, body="[main]")
+        draft, bricks = await _personal_delivered(h, specs=specs, content="[main]")
         first_ids = tuple(_stored(h, draft.id).delivered_message_ids)
         await _open_edit(h)
         await h.callback(_callback(h, "aw_extras"))
@@ -658,8 +658,7 @@ class AnnouncementRedeliveryTests(unittest.TestCase):
                 break
             await h.callback(next_page[0])
         await h.callback(_callback(h, "aw_exbrick", f":{bricks['extra0']}"))
-        await h.callback(_callback(h, "aw_exsec", ":body"))
-        await h.callback(_callback(h, "aw_expos", ":start"))
+        # H2: секций и позиций больше нет — кирпичик сразу ждёт значение.
         await h.text("Дополнительно")
         self.assertIn("Дополнительно", h.screen_text())
 

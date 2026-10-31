@@ -176,9 +176,9 @@ class PreviewTests(AnnouncementDatabaseTestCase):
             self.session,
             actor_telegram_user_id=OWNER_TG,
             name="Только заголовок",
-            header="",
-            body="Постоянный текст [заголовок]",
-            footer="",
+            # H2: строка, у которой кирпичик отрендерился пустым, скрывается
+            # целиком, поэтому постоянный текст живёт отдельной строкой.
+            content="Постоянный текст\n[заголовок]",
         )
         draft = self.start_at_questions(template_id=template.template_id)
         self.session.expire_all()
@@ -196,7 +196,7 @@ class PreviewTests(AnnouncementDatabaseTestCase):
         self.assertEqual(
             [question.brick_id for question in preview.missing], [brick_id]
         )
-        self.assertIn("Постоянный текст", preview.visible_text)
+        self.assertEqual(preview.visible_text, "Постоянный текст")
 
         saved = save_announcement_value(
             self.session,
@@ -225,9 +225,7 @@ class PreviewTests(AnnouncementDatabaseTestCase):
             self.session,
             actor_telegram_user_id=OWNER_TG,
             name="Статический",
-            header="",
-            body="Только постоянный текст",
-            footer="",
+            content="\n".join(p for p in ("", "Только постоянный текст", "") if p),
         )
         draft = self.start_at_questions(template_id=template.template_id)
         self.session.expire_all()

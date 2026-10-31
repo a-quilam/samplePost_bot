@@ -51,6 +51,23 @@ V4_HEADER = "**[название]**\n\n**[дата] // [время_начала]
 V4_BODY = "\n[описание]"
 V4_FOOTER = "\n[контакт]"
 
+
+def _join(header: str, body: str, footer: str) -> str:
+    """Склейка секций в единый `content` — формула backfill миграции 24."""
+    if not (header.strip() or body.strip() or footer.strip()):
+        return header + body + footer
+    text = header.strip()
+    if text and (body.strip() or footer.strip()):
+        text += "\n"
+    text += body
+    if body.strip() and footer.strip():
+        text += "\n"
+    return text + footer
+
+
+V3_CONTENT = _join(V3_HEADER, V3_BODY, V3_FOOTER)
+V4_CONTENT = _join(V4_HEADER, V4_BODY, V4_FOOTER)
+
 # Восемь системных кодов обеих версий: набор привязок не меняется.
 EXPECTED_CODES = {
     "название",
@@ -178,13 +195,15 @@ class PlaceCityMigrationTests(_Base):
             "'2026-01-01 00:00:00', '2026-01-01 00:00:00')",
         )
 
-    def test_latest_version_is_twenty_three(self) -> None:
-        self.assertEqual(LATEST_VERSION, 23)
+    def test_latest_version_is_twenty_four(self) -> None:
+        self.assertEqual(LATEST_VERSION, 24)
         self.assertEqual(self.migrate(), LATEST_VERSION)
         journal = self.journal()
         self.assertIn((21, "place_city"), journal)
         self.assertIn((22, "builtin_templates_v4"), journal)
-        self.assertEqual(journal[-1], (23, "place_invite_links"))
+        self.assertEqual(
+            journal[-1], (24, "template_content_and_extras_without_sections")
+        )
 
     def test_columns_are_added_nullable_and_rows_keep_null_city(self) -> None:
         self.migrate()
@@ -463,7 +482,7 @@ class BuiltinTemplatesV4MigrationTests(_Base):
     def versions(self, template_id: int) -> list[tuple]:
         return _sql(
             self.path,
-            "SELECT version, header, body, footer, builtin_version "
+            "SELECT version, content, builtin_version "
             "FROM template_versions WHERE template_id = ? ORDER BY version",
             (template_id,),
         )
@@ -481,23 +500,25 @@ class BuiltinTemplatesV4MigrationTests(_Base):
         self.migrate()
         rows = self.versions(1)
         self.assertEqual(len(rows), 2, "v3 остаётся в истории")
-        self.assertEqual(rows[0], (1, V3_HEADER, V3_BODY, V3_FOOTER, 3))
-        self.assertEqual(rows[1], (2, V4_HEADER, V4_BODY, V4_FOOTER, 4))
+        self.assertEqual(rows[0], (1, V3_CONTENT, 3))
+        self.assertEqual(rows[1], (2, V4_CONTENT, 4))
+        # H2 не меняет ни символа в эталоне v4.
+        self.assertEqual(rows[1][1], V4_HEADER + "\n" + V4_BODY + "\n" + V4_FOOTER)
         self.assertEqual(self.template_row(1), (INITIAL_TEMPLATE_NAME, 2))
 
     def test_untouched_default_named_copy_without_marker_is_updated(self) -> None:
         self.migrate()
         rows = self.versions(2)
         self.assertEqual([row[0] for row in rows], [1, 2])
-        self.assertEqual(rows[1][1:], (V4_HEADER, V4_BODY, V4_FOOTER, 4))
+        self.assertEqual(rows[1][1:], (V4_CONTENT, 4))
         self.assertEqual(self.template_row(2), (INITIAL_TEMPLATE_NAME, 2))
 
     def test_edited_default_named_copy_is_not_touched(self) -> None:
         self.migrate()
         rows = self.versions(3)
         self.assertEqual(len(rows), 1, "правленый текст не перезаписывается")
-        self.assertEqual(rows[0][1], "**[название]** — моё")
-        self.assertIsNone(rows[0][4])
+        self.assertEqual(rows[0][1], _join("**[название]** — моё", V3_BODY, V3_FOOTER))
+        self.assertIsNone(rows[0][2])
         self.assertEqual(self.template_row(3), (INITIAL_TEMPLATE_NAME, 1))
 
     def test_untouched_copy_with_other_name_is_not_touched(self) -> None:
@@ -509,8 +530,11 @@ class BuiltinTemplatesV4MigrationTests(_Base):
         self.migrate()
         rows = self.versions(5)
         self.assertEqual(len(rows), 1)
-        self.assertEqual(rows[0][4], 3)
-        self.assertEqual(rows[0][2], V3_BODY + "\n\nмоя подпись")
+        self.assertEqual(rows[0][2], 3)
+        # Правка человека сохранена: backfill просто переносит её в content.
+        self.assertEqual(
+            rows[0][1], _join(V3_HEADER, V3_BODY + "\n\nмоя подпись", V3_FOOTER)
+        )
         self.assertEqual(self.template_row(5), (INITIAL_TEMPLATE_NAME, 1))
 
     def test_renamed_copy_with_marker_is_not_touched(self) -> None:
@@ -522,7 +546,7 @@ class BuiltinTemplatesV4MigrationTests(_Base):
         self.migrate()
         rows = self.versions(6)
         self.assertEqual(len(rows), 2)
-        self.assertEqual(rows[1][1:], (V4_HEADER, V4_BODY, V4_FOOTER, 4))
+        self.assertEqual(rows[1][1:], (V4_CONTENT, 4))
         self.assertEqual(self.template_row(6), (None, 2))
 
     def test_new_version_bindings_are_complete_and_resolved_by_code(self) -> None:
@@ -551,19 +575,19 @@ class BuiltinTemplatesV4MigrationTests(_Base):
         self.assertEqual(
             _sql(
                 self.path,
-                "SELECT header, body, footer, builtin_version, "
+                "SELECT content, extended_content, builtin_version, "
                 "source_template_version FROM template_snapshots WHERE id = 90",
             ),
-            [(V3_HEADER, V3_BODY, V3_FOOTER, 3, 1)],
+            [(V3_CONTENT, None, 3, 1)],
         )
         # Версия-предок осталась на месте и не изменилась.
         self.assertEqual(
             _sql(
                 self.path,
-                "SELECT header, body, footer FROM template_versions "
+                "SELECT content, extended_content FROM template_versions "
                 "WHERE template_id = 1 AND version = 1",
             ),
-            [(V3_HEADER, V3_BODY, V3_FOOTER)],
+            [(V3_CONTENT, None)],
         )
         # Ни одного шаблона без текущей версии.
         self.assertEqual(
@@ -584,8 +608,8 @@ class BuiltinTemplatesV4MigrationTests(_Base):
         )
         versions = _sql(
             self.path,
-            "SELECT id, template_id, version, header, body, footer, "
-            "builtin_version FROM template_versions ORDER BY id",
+            "SELECT id, template_id, version, content, builtin_version "
+            "FROM template_versions ORDER BY id",
         )
         bindings = _sql(
             self.path,
@@ -603,8 +627,8 @@ class BuiltinTemplatesV4MigrationTests(_Base):
         self.assertEqual(
             _sql(
                 self.path,
-                "SELECT id, template_id, version, header, body, footer, "
-                "builtin_version FROM template_versions ORDER BY id",
+                "SELECT id, template_id, version, content, builtin_version "
+                "FROM template_versions ORDER BY id",
             ),
             versions,
         )

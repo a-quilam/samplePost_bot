@@ -27,7 +27,7 @@ from template_store import (
     create_template_snapshot,
     get_builtin_template,
     get_template_version,
-    update_template_header,
+    update_template_content,
 )
 from template_types import BUILTIN_TEMPLATE
 from tests.integration_harness import (
@@ -87,9 +87,7 @@ class TemplatesUiTests(unittest.TestCase):
                 session,
                 actor_telegram_user_id=h.user_id,
                 name="Личный для теста",
-                header="",
-                body="[ttl]",
-                footer="",
+                content="\n".join(p for p in ("", "[ttl]", "") if p),
             )
             session.commit()
             return template.template_id
@@ -164,9 +162,9 @@ class TemplatesUiTests(unittest.TestCase):
                 session,
                 actor_telegram_user_id=OWNER_TG,
                 name="Первый",
-                header="Шапка",
-                body="Тело [название]",
-                footer="Подвал",
+                content="\n".join(
+                    p for p in ("Шапка", "Тело [название]", "Подвал") if p
+                ),
             )
         await h.text("/templates", user_id=OWNER_TG)
         self.assertIn("Первый", h.screen_text())
@@ -213,16 +211,16 @@ class TemplatesUiTests(unittest.TestCase):
                 session,
                 actor_telegram_user_id=OWNER_TG,
                 name="Редактируемый",
-                header="Шапка",
-                body="Старое тело [название]",
-                footer="Подвал",
+                content="\n".join(
+                    p for p in ("Шапка", "Старое тело [название]", "Подвал") if p
+                ),
             )
         tid = created.template_id
         await h.text("/templates", user_id=OWNER_TG)
         await h.callback(f"tp_open:{tid}", user_id=OWNER_TG)
         self.assertIn("Редактируемый", h.screen_text())
-        await h.callback(f"tp_edit_b:{tid}", user_id=OWNER_TG)
-        self.assertIn("Редактирование тела", h.screen_text())
+        await h.callback(f"tp_edit:{tid}", user_id=OWNER_TG)
+        self.assertIn("Редактирование текста", h.screen_text())
         await h.text("Новое тело [дата]", user_id=OWNER_TG)
         self.assertIn("Новое тело", h.screen_text())
         await h.callback("tp_save", user_id=OWNER_TG)
@@ -240,9 +238,11 @@ class TemplatesUiTests(unittest.TestCase):
                 session,
                 actor_telegram_user_id=OWNER_TG,
                 name="Сбрасываемый",
-                header="Кастомная шапка",
-                body="Кастомное тело",
-                footer="Кастомный подвал",
+                content="\n".join(
+                    p
+                    for p in ("Кастомная шапка", "Кастомное тело", "Кастомный подвал")
+                    if p
+                ),
             )
         tid = created.template_id
         await h.text("/templates", user_id=OWNER_TG)
@@ -255,9 +255,8 @@ class TemplatesUiTests(unittest.TestCase):
         self.assertEqual(rows[0].revision, 2)
         # Контент сброшен к встроенному.
         v2 = get_template_version_direct(h, rows[0].id, 2)
-        self.assertEqual(v2.header, BUILTIN_TEMPLATE.header)
-        self.assertEqual(v2.body, BUILTIN_TEMPLATE.body)
-        self.assertEqual(v2.footer, BUILTIN_TEMPLATE.footer)
+        self.assertEqual(v2.content, BUILTIN_TEMPLATE.content)
+        self.assertEqual(v2.extended_content, BUILTIN_TEMPLATE.extended_content)
 
     @scenario_test
     async def test_other_user_cannot_access_foreign_template(self, h) -> None:
@@ -268,9 +267,7 @@ class TemplatesUiTests(unittest.TestCase):
                 session,
                 actor_telegram_user_id=OWNER_TG,
                 name="Секретный",
-                header="Шапка",
-                body="Тело",
-                footer="Подвал",
+                content="\n".join(p for p in ("Шапка", "Тело", "Подвал") if p),
             )
         other_tg = OWNER_TG + 100
         self.make_user(h, other_tg)
@@ -292,14 +289,14 @@ class TemplatesUiTests(unittest.TestCase):
                 session,
                 actor_telegram_user_id=OWNER_TG,
                 name="Валидация",
-                header="Шапка",
-                body="Тело [название]",
-                footer="Подвал",
+                content="\n".join(
+                    p for p in ("Шапка", "Тело [название]", "Подвал") if p
+                ),
             )
         tid = created.template_id
         await h.text("/templates", user_id=OWNER_TG)
         await h.callback(f"tp_open:{tid}", user_id=OWNER_TG)
-        await h.callback(f"tp_edit_b:{tid}", user_id=OWNER_TG)
+        await h.callback(f"tp_edit:{tid}", user_id=OWNER_TG)
         await h.text("Текст [несуществующий]", user_id=OWNER_TG)
         self.assertIn("несуществующий", h.screen_text())
         await h.callback("tp_save", user_id=OWNER_TG)
@@ -352,11 +349,11 @@ class TemplatesUiTests(unittest.TestCase):
         self.assertIn("Стандартный шаблон места", h.screen_text())
         self.assertIn("Версия: 1", h.screen_text())
         buttons = self.screen_callbacks(h)
-        self.assertIn(f"tp_edit_b:{template_id}", buttons)
+        self.assertIn(f"tp_edit:{template_id}", buttons)
         self.assertIn(f"tp_back_place:{place_id}", buttons)
 
-        await h.callback(f"tp_edit_b:{template_id}", user_id=admin_tg)
-        self.assertIn("Редактирование тела", h.screen_text())
+        await h.callback(f"tp_edit:{template_id}", user_id=admin_tg)
+        self.assertIn("Редактирование текста", h.screen_text())
         await h.text("Своё тело [название]", user_id=admin_tg)
         self.assertIn("Своё тело", h.screen_text())
         await h.callback("tp_save", user_id=admin_tg)
@@ -379,15 +376,15 @@ class TemplatesUiTests(unittest.TestCase):
         self.assertEqual(row.revision, 3)
         versions = self.template_versions(h, template_id)
         self.assertEqual([item.version for item in versions], [1, 2, 3])
-        self.assertEqual(versions[1].body, "Своё тело [название]")
+        self.assertEqual(versions[1].content, "Своё тело [название]")
         builtin = get_builtin_template()
-        self.assertEqual(versions[2].body, builtin.body)
+        self.assertEqual(versions[2].content, builtin.content)
         self.assertEqual(versions[2].builtin_version, builtin.version)
         with h.session_factory() as session:
             snapshot_row = session.get(TemplateSnapshot, snapshot.snapshot_id)
         assert snapshot_row is not None
         self.assertEqual(snapshot_row.source_template_version, 2)
-        self.assertEqual(snapshot_row.body, "Своё тело [название]")
+        self.assertEqual(snapshot_row.content, "Своё тело [название]")
 
         await h.callback(f"tp_back_place:{place_id}", user_id=admin_tg)
         self.assertIn(f"Место {admin_tg}", h.screen_text())
@@ -426,7 +423,7 @@ class TemplatesUiTests(unittest.TestCase):
         admin_tg = OWNER_TG
         place_id, template_id = self.make_place_with_admin(h, admin_tg)
         await h.callback(f"tp_std:{place_id}", user_id=admin_tg)
-        await h.callback(f"tp_edit_b:{template_id}", user_id=admin_tg)
+        await h.callback(f"tp_edit:{template_id}", user_id=admin_tg)
         await h.text("Текст до отзыва прав [название]", user_id=admin_tg)
         self.assertIn("Текст до отзыва прав", h.screen_text())
 
@@ -485,17 +482,17 @@ class TemplatesUiTests(unittest.TestCase):
                 session,
                 actor_telegram_user_id=owner_tg,
                 name="Конфликт",
-                header="Шапка",
-                body="Старое тело [название]",
-                footer="Подвал",
+                content="\n".join(
+                    p for p in ("Шапка", "Старое тело [название]", "Подвал") if p
+                ),
             )
         template_id = created.template_id
         await h.text("/templates", user_id=owner_tg)
         await h.callback(f"tp_open:{template_id}", user_id=owner_tg)
-        await h.callback(f"tp_edit_b:{template_id}", user_id=owner_tg)
+        await h.callback(f"tp_edit:{template_id}", user_id=owner_tg)
 
         with h.session_factory() as session:
-            updated = update_template_header(
+            updated = update_template_content(
                 session,
                 actor_telegram_user_id=owner_tg,
                 template_id=template_id,
@@ -513,7 +510,9 @@ class TemplatesUiTests(unittest.TestCase):
         with h.session_factory() as session:
             current = get_template_version(session, owner_tg, template_id, 2)
         assert current is not None
-        self.assertEqual(current.body, "Старое тело [название]")
+        # H2: текст один, поэтому версия 2 — ровно чужая правка целиком;
+        # наш черновик в неё не попал.
+        self.assertEqual(current.content, "Чужая правка")
 
         await h.callback("tp_refresh", user_id=owner_tg)
         self.assertIn("Версия обновлена до 2", h.screen_text())
@@ -529,7 +528,7 @@ class TemplatesUiTests(unittest.TestCase):
         with h.session_factory() as session:
             saved = get_template_version(session, owner_tg, template_id, 3)
         assert saved is not None
-        self.assertEqual(saved.body, "Мой новый текст [дата]")
+        self.assertEqual(saved.content, "Мой новый текст [дата]")
 
         # Повторное/устаревшее «Сохранить» после успеха не создаёт версию.
         await h.callback("tp_save", user_id=owner_tg)
@@ -549,14 +548,14 @@ class TemplatesUiTests(unittest.TestCase):
                 session,
                 actor_telegram_user_id=owner_tg,
                 name="После рестарта",
-                header="Шапка",
-                body="Тело [название]",
-                footer="Подвал",
+                content="\n".join(
+                    p for p in ("Шапка", "Тело [название]", "Подвал") if p
+                ),
             )
         template_id = created.template_id
         await h.text("/templates", user_id=owner_tg)
         await h.callback(f"tp_open:{template_id}", user_id=owner_tg)
-        await h.callback(f"tp_edit_b:{template_id}", user_id=owner_tg)
+        await h.callback(f"tp_edit:{template_id}", user_id=owner_tg)
         await h.text("Текст после рестарта [дата]", user_id=owner_tg)
         state = load_template_session(owner_tg)
         assert state is not None
@@ -575,7 +574,7 @@ class TemplatesUiTests(unittest.TestCase):
         with h.session_factory() as session:
             saved = get_template_version(session, owner_tg, template_id, 2)
         assert saved is not None
-        self.assertEqual(saved.body, "Текст после рестарта [дата]")
+        self.assertEqual(saved.content, "Текст после рестарта [дата]")
 
     @scenario_test
     async def test_ambiguity_pick_saves_concrete_brick_id(self, h) -> None:
@@ -599,7 +598,7 @@ class TemplatesUiTests(unittest.TestCase):
                 value_type="short_text",
             )
         await h.callback(f"tp_std:{place_id}", user_id=admin_tg)
-        await h.callback(f"tp_edit_b:{template_id}", user_id=admin_tg)
+        await h.callback(f"tp_edit:{template_id}", user_id=admin_tg)
         await h.text("[тестовый]", user_id=admin_tg)
         self.assertIn("Неоднозначный кирпичик", h.screen_text())
         state = load_template_session(admin_tg)
@@ -621,7 +620,7 @@ class TemplatesUiTests(unittest.TestCase):
         with h.session_factory() as session:
             saved = get_template_version(session, admin_tg, template_id, 2)
         assert saved is not None
-        self.assertEqual(saved.body, "[тестовый]")
+        self.assertEqual(saved.content, "[тестовый]")
         self.assertIn(place_brick.id, saved.brick_ids)
 
     @scenario_test
@@ -646,7 +645,7 @@ class TemplatesUiTests(unittest.TestCase):
                 value_type="short_text",
             )
         await h.callback(f"tp_std:{place_id}", user_id=admin_tg)
-        await h.callback(f"tp_edit_b:{template_id}", user_id=admin_tg)
+        await h.callback(f"tp_edit:{template_id}", user_id=admin_tg)
         await h.text("[тестовый]", user_id=admin_tg)
         self.assertIn("Неоднозначный кирпичик", h.screen_text())
         self.assertIn(f"tp_bricks:{template_id}", self.screen_callbacks(h))
@@ -672,14 +671,14 @@ class TemplatesUiTests(unittest.TestCase):
                 session,
                 actor_telegram_user_id=owner_tg,
                 name="Фото",
-                header="Шапка",
-                body="Исходное тело [название]",
-                footer="Подвал",
+                content="\n".join(
+                    p for p in ("Шапка", "Исходное тело [название]", "Подвал") if p
+                ),
             )
         template_id = created.template_id
         await h.text("/templates", user_id=owner_tg)
         await h.callback(f"tp_open:{template_id}", user_id=owner_tg)
-        await h.callback(f"tp_edit_b:{template_id}", user_id=owner_tg)
+        await h.callback(f"tp_edit:{template_id}", user_id=owner_tg)
         before = load_template_session(owner_tg)
         assert before is not None
 
@@ -710,9 +709,9 @@ class TemplatesUiTests(unittest.TestCase):
                 session,
                 actor_telegram_user_id=owner_tg,
                 name="Unicode",
-                header="Шапка",
-                body="Старое [название]",
-                footer="Старый подвал",
+                content="\n".join(
+                    p for p in ("Шапка", "Старое [название]", "Старый подвал") if p
+                ),
             )
         template_id = created.template_id
         full_text = (
@@ -723,24 +722,28 @@ class TemplatesUiTests(unittest.TestCase):
         )
         await h.text("/templates", user_id=owner_tg)
         await h.callback(f"tp_open:{template_id}", user_id=owner_tg)
-        await h.callback(f"tp_edit_b:{template_id}", user_id=owner_tg)
+        await h.callback(f"tp_edit:{template_id}", user_id=owner_tg)
         await h.text(full_text, user_id=owner_tg)
         self.assertIn("Юникод: 🎭", h.screen_text())
         await h.callback("tp_save", user_id=owner_tg)
         with h.session_factory() as session:
             saved = get_template_version(session, owner_tg, template_id, 2)
         assert saved is not None
-        self.assertEqual(saved.body, full_text)
+        self.assertEqual(saved.content, full_text)
 
-        await h.callback(f"tp_edit_f:{template_id}", user_id=owner_tg)
+        # H2: текст шаблона один, поэтому «Очистить» оставляет пустой
+        # черновик — сохранить его нельзя, прежняя версия остаётся.
+        await h.callback(f"tp_edit:{template_id}", user_id=owner_tg)
         await h.callback("tp_clear", user_id=owner_tg)
-        self.assertIn("Секция очищена", h.screen_text())
-        await h.callback("tp_save", user_id=owner_tg)
+        self.assertIn("Текст не сохранён", h.screen_text())
+        self.assertIn("пустых строк", h.screen_text())
+        row = self.template_row(h, template_id)
+        assert row is not None
+        self.assertEqual(row.revision, 2)
         with h.session_factory() as session:
-            cleared = get_template_version(session, owner_tg, template_id, 3)
-        assert cleared is not None
-        self.assertEqual(cleared.footer, "")
-        self.assertEqual(cleared.body, full_text)
+            unchanged = get_template_version(session, owner_tg, template_id, 2)
+        assert unchanged is not None
+        self.assertEqual(unchanged.content, full_text)
 
     @scenario_test
     async def test_brick_list_scoping_and_pagination(self, h) -> None:
@@ -778,9 +781,7 @@ class TemplatesUiTests(unittest.TestCase):
                 session,
                 actor_telegram_user_id=owner_tg,
                 name="Кирпичики",
-                header="Шапка",
-                body="[мой_код]",
-                footer="Подвал",
+                content="\n".join(p for p in ("Шапка", "[мой_код]", "Подвал") if p),
             )
         template_id = created.template_id
         await h.text("/templates", user_id=owner_tg)
@@ -844,9 +845,9 @@ class TemplatesUiTests(unittest.TestCase):
                     session,
                     actor_telegram_user_id=owner_tg,
                     name=f"Шаблон {index + 1:02d}",
-                    header="Шапка",
-                    body="[название]",
-                    footer="Подвал",
+                    content="\n".join(
+                        p for p in ("Шапка", "[название]", "Подвал") if p
+                    ),
                 )
         await h.text("/templates", user_id=owner_tg)
         self.assertIn("Шаблон 01", h.screen_text())

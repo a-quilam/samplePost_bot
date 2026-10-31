@@ -1075,9 +1075,8 @@ class TemplateVersion(Base):
         nullable=False,
     )
     version: Mapped[int] = mapped_column(Integer, nullable=False)
-    header: Mapped[str] = mapped_column(Text, nullable=False)
-    body: Mapped[str] = mapped_column(Text, nullable=False)
-    footer: Mapped[str] = mapped_column(Text, nullable=False)
+    content: Mapped[str] = mapped_column(Text, nullable=False)
+    extended_content: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_by_user_id: Mapped[int | None] = mapped_column(
         Integer,
         ForeignKey("users.id", ondelete="SET NULL"),
@@ -1098,8 +1097,12 @@ class TemplateVersion(Base):
             name="ck_template_versions_builtin_version",
         ),
         CheckConstraint(
-            "header <> '' OR body <> '' OR footer <> ''",
-            name="ck_template_versions_not_all_empty",
+            "content <> ''",
+            name="ck_template_versions_content_not_empty",
+        ),
+        CheckConstraint(
+            "extended_content IS NULL OR extended_content <> ''",
+            name="ck_template_versions_extended_not_empty",
         ),
     )
 
@@ -1133,7 +1136,7 @@ class TemplateVersionBrick(Base):
         primary_key=True,
     )
     code: Mapped[str] = mapped_column(
-        Text, nullable=False, default="", server_default="''"
+        Text, nullable=False, default="", server_default=text("''")
     )
 
     __table_args__ = (
@@ -1157,8 +1160,8 @@ class TemplateSnapshot(Base):
     """
     Самостоятельный неизменяемый снимок версии шаблона для будущего черновика.
 
-    Снимок не является указателем на текущую версию: он копирует все секции,
-    метаданные и привязки. `owner_user_id` — пользователь, имеющий доступ к
+    Снимок не является указателем на текущую версию: он копирует оба текста
+    (`content` и `extended_content`), метаданные и привязки. `owner_user_id` — пользователь, имеющий доступ к
     снимку; пока снимки не подключены к WIP-мастеру Stage 27, это единственное
     правило чтения. Связи со старой моделью `drafts` нет намеренно.
     """
@@ -1185,9 +1188,8 @@ class TemplateSnapshot(Base):
         ForeignKey("users.id", ondelete="SET NULL"),
         nullable=True,
     )
-    header: Mapped[str] = mapped_column(Text, nullable=False)
-    body: Mapped[str] = mapped_column(Text, nullable=False)
-    footer: Mapped[str] = mapped_column(Text, nullable=False)
+    content: Mapped[str] = mapped_column(Text, nullable=False)
+    extended_content: Mapped[str | None] = mapped_column(Text, nullable=True)
     builtin_version: Mapped[int | None] = mapped_column(Integer, nullable=True)
     idempotency_key: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(
@@ -1214,8 +1216,12 @@ class TemplateSnapshot(Base):
             name="ck_template_snapshots_builtin_version",
         ),
         CheckConstraint(
-            "header <> '' OR body <> '' OR footer <> ''",
-            name="ck_template_snapshots_not_all_empty",
+            "content <> ''",
+            name="ck_template_snapshots_content_not_empty",
+        ),
+        CheckConstraint(
+            "extended_content IS NULL OR extended_content <> ''",
+            name="ck_template_snapshots_extended_not_empty",
         ),
         CheckConstraint(
             "idempotency_key IS NULL OR length(trim(idempotency_key)) > 0",
@@ -1263,7 +1269,7 @@ class TemplateSnapshotBrick(Base):
         primary_key=True,
     )
     code: Mapped[str] = mapped_column(
-        Text, nullable=False, default="", server_default="''"
+        Text, nullable=False, default="", server_default=text("''")
     )
 
     __table_args__ = (
@@ -1526,8 +1532,9 @@ class AnnouncementExtra(Base):
 
     Вставка не меняет ни стандартный/личный шаблон, ни его версии/снимок:
     строка живёт в `announcement_extras` и учитывается только при построении
-    представления конкретного черновика. `position` — начало/конец выбранной
-    секции; `occurrence` оставлен для будущих повторяемых экземпляров.
+    представления конкретного черновика. Poster 2.3 H2: секции и позиции нет —
+    кирпичик добавляет строку в конец выбранного текста; `occurrence`
+    оставлен для будущих повторяемых экземпляров.
     """
 
     __tablename__ = "announcement_extras"
@@ -1543,10 +1550,6 @@ class AnnouncementExtra(Base):
         ForeignKey("bricks.id", ondelete="RESTRICT"),
         nullable=False,
     )
-    section: Mapped[str] = mapped_column(Text, nullable=False)
-    position: Mapped[str] = mapped_column(
-        Text, nullable=False, default="end", server_default=text("'end'")
-    )
     occurrence: Mapped[int] = mapped_column(
         Integer, nullable=False, default=1, server_default=text("1")
     )
@@ -1558,14 +1561,6 @@ class AnnouncementExtra(Base):
     )
 
     __table_args__ = (
-        CheckConstraint(
-            "section IN ('header', 'body', 'footer')",
-            name="ck_announcement_extras_section",
-        ),
-        CheckConstraint(
-            "position IN ('start', 'end')",
-            name="ck_announcement_extras_position",
-        ),
         CheckConstraint(
             "occurrence >= 1",
             name="ck_announcement_extras_occurrence",
@@ -1583,5 +1578,5 @@ class AnnouncementExtra(Base):
     def __repr__(self) -> str:
         return (
             f"<AnnouncementExtra(id={self.id}, draft_id={self.draft_id}, "
-            f"brick_id={self.brick_id}, section={self.section!r})>"
+            f"brick_id={self.brick_id})>"
         )

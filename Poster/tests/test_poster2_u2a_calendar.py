@@ -75,9 +75,7 @@ def _seed(h, *, day_rules: dict | None = None) -> int:
             session,
             actor_telegram_user_id=DEFAULT_USER_ID,
             name="С датой",
-            header="",
-            body="[title] — [day]",
-            footer="",
+            content="\n".join(p for p in ("", "[title] — [day]", "") if p),
         )
         session.commit()
         return template.template_id

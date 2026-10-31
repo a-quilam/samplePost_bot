@@ -48,9 +48,9 @@ try:
     from template_store import (
         create_personal_template,
         get_standard_template,
-        update_template_section,
+        update_template_content,
     )
-    from template_types import TEMPLATE_SECTION_BODY
+    from template_types import TEMPLATE_CONTENT
     from tests.integration_harness import (
         DEFAULT_USER_ID,
         HARNESS_IMPORT_ERROR,
@@ -156,7 +156,7 @@ def _seed_personal_template(
     *,
     name: str = "Личный шаблон",
     specs: list[TemplateSpec] | None = None,
-    body: str | None = None,
+    content: str | None = None,
     actor_tg: int = DEFAULT_USER_ID,
 ):
     specs = specs or [("main", "Основное поле", "short_text", {})]
@@ -173,15 +173,13 @@ def _seed_personal_template(
                 rules=rules,
             )
             bricks[code] = definition.id
-        if body is None:
-            body = " ".join(f"[{code}]" for code, _title, _type, _rules in specs)
+        if content is None:
+            content = " ".join(f"[{code}]" for code, _title, _type, _rules in specs)
         template = create_personal_template(
             session,
             actor_telegram_user_id=actor_tg,
             name=name,
-            header="",
-            body=body,
-            footer="",
+            content=content,
         )
         session.commit()
         return template.template_id, template.revision, bricks
@@ -406,12 +404,12 @@ class AnnouncementWizardTemplateTests(unittest.TestCase):
         owner_tid, owner_revision, owner_bricks = _seed_personal_template(
             h,
             name="Мой шаблон",
-            body="СТАРЫЙ ТЕКСТ [main]",
+            content="СТАРЫЙ ТЕКСТ [main]",
         )
         foreign_tid, _foreign_revision, _foreign_bricks = _seed_personal_template(
             h,
             name="Чужой шаблон",
-            body="ЧУЖОЙ [main]",
+            content="ЧУЖОЙ [main]",
             actor_tg=OTHER_TG,
         )
         main_brick_id = owner_bricks["main"]
@@ -440,12 +438,11 @@ class AnnouncementWizardTemplateTests(unittest.TestCase):
 
         # Текущая версия исходного шаблона меняется, снимок — нет.
         with h.session_factory() as session:
-            update_template_section(
+            update_template_content(
                 session,
                 actor_telegram_user_id=DEFAULT_USER_ID,
                 template_id=owner_tid,
                 expected_revision=owner_revision,
-                section=TEMPLATE_SECTION_BODY,
                 content="НОВЫЙ ТЕКСТ [main]",
             )
 
@@ -614,7 +611,7 @@ class AnnouncementWizardQuestionTests(unittest.TestCase):
 )
 class AnnouncementWizardExtrasTests(unittest.TestCase):
     @scenario_test
-    async def test_extra_pagination_sections_value_preview_edit_delete(self, h) -> None:
+    async def test_extra_pagination_value_preview_edit_delete(self, h) -> None:
         await h.text("/start")
         place_id, _alias_id = _seed_place(h)
         specs: list[TemplateSpec] = [("main", "Основное", "short_text", {})]
@@ -625,7 +622,7 @@ class AnnouncementWizardExtrasTests(unittest.TestCase):
             h,
             name="С дополнительными",
             specs=specs,
-            body="[main]",
+            content="[main]",
         )
         extra_id = bricks["extra0"]
 
@@ -658,10 +655,7 @@ class AnnouncementWizardExtrasTests(unittest.TestCase):
             await h.callback(next_page[0])
         self.assertTrue(found, f"Личный кирпичик не найден: {h.screen_buttons()}")
         await h.callback(_callback(h, "aw_exbrick", f":{extra_id}"))
-        self.assertIn("Выберите секцию", h.screen_text())
-        await h.callback(_callback(h, "aw_exsec", ":body"))
-        self.assertIn("Выберите положение", h.screen_text())
-        await h.callback(_callback(h, "aw_expos", ":start"))
+        # H2: секции и позиции больше нет — кирпичик сразу ждёт значение.
         self.assertIn("Значение пока не задано", h.screen_text())
         await h.text("Дополнительно")
         self.assertIn("Доп 0", h.screen_text())
@@ -677,7 +671,7 @@ class AnnouncementWizardExtrasTests(unittest.TestCase):
         snapshot = details.template_snapshot
         self.assertIsNotNone(snapshot)
         assert snapshot is not None
-        self.assertEqual(snapshot.sections[TEMPLATE_SECTION_BODY], "[main]")
+        self.assertEqual(snapshot.texts[TEMPLATE_CONTENT], "[main]")
         self.assertEqual(len(details.extras), 1)
         self.assertEqual(details.extras[0].brick_id, extra_id)
 
@@ -756,7 +750,7 @@ class AnnouncementWizardPersistenceTests(unittest.TestCase):
         template_id, _revision, _bricks = _seed_personal_template(
             h,
             name="Простой",
-            body="Постоянный текст [main]",
+            content="Постоянный текст [main]",
         )
 
         await _start_to_template(h, place_id)

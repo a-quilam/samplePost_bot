@@ -2,9 +2,11 @@
 """
 Telegram-интерфейс раздела «Мои шаблоны» (Stage 25).
 
-Пользователь создаёт личные шаблоны, открывает карточку, редактирует шапку,
-тело и подвал обычным сообщением, смотрит предпросмотр, доступные кирпичики
-и сбрасывает содержимое к встроенному стандарту. Стандартный шаблон места
+Пользователь создаёт личные шаблоны, открывает карточку, редактирует единый
+текст (и, если он есть, расширенный текст) обычным сообщением, смотрит
+предпросмотр, доступные кирпичики и сбрасывает содержимое к встроенному
+стандарту. Poster 2.3 H2: прежние «шапка/тело/подвал» больше не существуют;
+полная переделка экранов — часть 2, здесь поток работает минимально. Стандартный шаблон места
 открывается из административного кабинета и доступен только действующему
 администратору места или суперадминистратору.
 
@@ -83,18 +85,17 @@ from template_store import (
     list_personal_templates,
     reset_personal_template,
     reset_standard_template,
-    update_template_section,
+    update_template_content,
 )
 from template_types import (
+    TEMPLATE_CONTENT,
+    TEMPLATE_EXTENDED_CONTENT,
     TEMPLATE_KIND_PERSONAL,
     TEMPLATE_KIND_STANDARD,
-    TEMPLATE_SECTION_BODY,
-    TEMPLATE_SECTION_FOOTER,
-    TEMPLATE_SECTION_HEADER,
-    TEMPLATE_SECTIONS,
+    TEMPLATE_TEXTS,
     TemplateValidationError,
+    validate_template_content,
     validate_template_name,
-    validate_template_sections,
 )
 from user_store import get_or_create_user
 from utils.tg_html import escape_html
@@ -171,32 +172,17 @@ _CREATE_PHASES = frozenset(
 
 PHASES = frozenset({PHASE_HUB, PHASE_PICK}) | _TEMPLATE_PHASES | _CREATE_PHASES
 
-_TEXT_INPUT_ERROR = "Текст не принят. Исправьте его и отправьте новой полной секцией."
+_TEXT_INPUT_ERROR = "Текст не принят. Исправьте его и отправьте полным текстом."
 
 STALE_TEXT = tr("errors.stale.templates")
 DENIED_TEXT = "Шаблон недоступен."
 
-SECTION_TITLES = {
-    TEMPLATE_SECTION_HEADER: "шапка",
-    TEMPLATE_SECTION_BODY: "тело",
-    TEMPLATE_SECTION_FOOTER: "подвал",
+TEXT_GENITIVE = {
+    TEMPLATE_CONTENT: "текста",
+    TEMPLATE_EXTENDED_CONTENT: "расширенного текста",
 }
-SECTION_GENITIVE = {
-    TEMPLATE_SECTION_HEADER: "шапки",
-    TEMPLATE_SECTION_BODY: "тела",
-    TEMPLATE_SECTION_FOOTER: "подвала",
-}
-SECTION_SHORT = {
-    "h": TEMPLATE_SECTION_HEADER,
-    "b": TEMPLATE_SECTION_BODY,
-    "f": TEMPLATE_SECTION_FOOTER,
-}
-SECTION_SHORT_BY_NAME = {value: key for key, value in SECTION_SHORT.items()}
-SECTION_KEYS = {
-    TEMPLATE_SECTION_HEADER: "header",
-    TEMPLATE_SECTION_BODY: "body",
-    TEMPLATE_SECTION_FOOTER: "footer",
-}
+# Отличает «второй текст не трогаем» от `None` = «расширения нет».
+_UNSET_TEXT = object()
 SCOPE_TITLES = {
     BRICK_SCOPE_SYSTEM: "системный",
     BRICK_SCOPE_PLACE: "место",
@@ -284,17 +270,9 @@ def _place_name(session: Session, place_id: int | None) -> str | None:
     return details.canonical_name if details is not None else None
 
 
-def _localize_sections(text: str) -> str:
-    """Переводит английские имена секций из ошибок Stage 24 в русские."""
-    result = str(text)
-    for section, title in SECTION_TITLES.items():
-        result = result.replace(f"(секция {section})", f"(секция «{title}»)")
-        result = result.replace(f"секция {section}", f"секция «{title}»")
-    return result
-
-
 def _compile_error_text(exc: BaseException) -> str:
-    return _localize_sections(str(exc))
+    """Текст ошибки Stage 24 без переименований: секций в шаблоне больше нет."""
+    return str(exc)
 
 
 def _chosen_map(state: dict) -> dict[str, int] | None:
@@ -381,9 +359,11 @@ def _valid_state(state: object) -> TypeGuard[dict[str, Any]]:
             return True
         if state.get("mode") not in {"standard", "empty"}:
             return False
-        for key in ("create_header", "create_body", "create_footer"):
-            if not isinstance(state.get(key, ""), str):
-                return False
+        if not isinstance(state.get("create_content", ""), str):
+            return False
+        extended = state.get("create_extended")
+        if extended is not None and not isinstance(extended, str):
+            return False
         error = state.get("error_message")
         return error is None or isinstance(error, str)
 
@@ -405,7 +385,7 @@ def _valid_state(state: object) -> TypeGuard[dict[str, Any]]:
         PHASE_RESOLVE_AMBIGUITY,
         PHASE_HELP,
     }:
-        if state.get("section") not in TEMPLATE_SECTIONS:
+        if state.get("text_name") not in TEMPLATE_TEXTS:
             return False
         if not isinstance(state.get("draft_text"), str):
             return False
@@ -626,32 +606,27 @@ def _card_content(
     ]
     if template.kind == TEMPLATE_KIND_STANDARD and place_name:
         lines.append(f"Место: {_h(place_name)}")
-    lines.extend(
-        [
-            "",
-            f"📌 Шапка:\n{_display(version.header, 700)}",
-            "",
-            f"📝 Тело:\n{_display(version.body, 900)}",
-            "",
-            f"📌 Подвал:\n{_display(version.footer, 700)}",
-        ]
-    )
+    lines.extend(["", f"📝 Текст:\n{_display(version.content, 900)}"])
+    if version.extended_content is not None:
+        lines.extend(
+            ["", f"📝 Расширенный текст:\n{_display(version.extended_content, 900)}"]
+        )
+    edit_row = [
+        InlineKeyboardButton(
+            "✏️ Текст",
+            callback_data=f"tp_edit:{template.template_id}",
+        )
+    ]
+    if version.extended_content is not None:
+        edit_row.append(
+            InlineKeyboardButton(
+                "✏️ Расширенный",
+                callback_data=f"tp_edit_ext:{template.template_id}",
+            )
+        )
     keyboard = InlineKeyboardMarkup(
         [
-            [
-                InlineKeyboardButton(
-                    "✏️ Шапка",
-                    callback_data=f"tp_edit_h:{template.template_id}",
-                ),
-                InlineKeyboardButton(
-                    "✏️ Тело",
-                    callback_data=f"tp_edit_b:{template.template_id}",
-                ),
-                InlineKeyboardButton(
-                    "✏️ Подвал",
-                    callback_data=f"tp_edit_f:{template.template_id}",
-                ),
-            ],
+            edit_row,
             [
                 InlineKeyboardButton(
                     "👁 Предпросмотр",
@@ -702,14 +677,14 @@ def _preview_content(
         [
             f"Версия: {template.revision}",
             "",
-            f"📌 Шапка:\n{_display(version.header)}",
-            "",
-            f"📝 Тело:\n{_display(version.body)}",
-            "",
-            f"📌 Подвал:\n{_display(version.footer)}",
-            "",
+            f"📝 Текст:\n{_display(version.content)}",
         ]
     )
+    if version.extended_content is not None:
+        lines.extend(
+            ["", f"📝 Расширенный текст:\n{_display(version.extended_content)}"]
+        )
+    lines.append("")
     if version.bindings:
         lines.append("🔗 Привязки кирпичиков:")
         for binding in version.bindings:
@@ -891,17 +866,17 @@ def _delete_personal_template(
     return "deleted"
 
 
-def _section_edit_content(
+def _text_edit_content(
     state: dict,
 ) -> tuple[str, InlineKeyboardMarkup]:
-    section = state["section"]
-    title = SECTION_GENITIVE[section]
+    text_name = state["text_name"]
+    title = TEXT_GENITIVE[text_name]
     draft = state.get("draft_text", "")
     text = (
         f"✏️ Редактирование {title}\n\n"
-        f"Текст секции (черновик):\n{_display(draft)}"
+        f"Текст (черновик):\n{_display(draft)}"
         "\n\n"
-        "Отправьте новым сообщением ПОЛНЫЙ текст секции. Переводы строк, "
+        "Отправьте новым сообщением ПОЛНЫЙ текст. Переводы строк, "
         "пробелы и Unicode сохраняются как есть.\n\n"
         "Кирпичики записываются в квадратных скобках: [код]. Список доступных "
         "кодов — по кнопке ниже. Служебные скобки [[ и ]] выводятся как текст.\n"
@@ -921,12 +896,10 @@ def _section_edit_content(
             [
                 InlineKeyboardButton(
                     "❓ Подсказка по оформлению",
-                    callback_data=(
-                        f"tp_help:{SECTION_SHORT_BY_NAME[section]}:{template_id}"
-                    ),
+                    callback_data=f"tp_help:{template_id}",
                 )
             ],
-            [InlineKeyboardButton("🧹 Очистить секцию", callback_data="tp_clear")],
+            [InlineKeyboardButton("🧹 Очистить", callback_data="tp_clear")],
             [
                 InlineKeyboardButton(
                     "◀️ К шаблону (отменить правку)",
@@ -1068,16 +1041,16 @@ def _chosen_rows(state: dict) -> list[str]:
 def _confirm_content(
     state: dict,
 ) -> tuple[str, InlineKeyboardMarkup]:
-    section = state["section"]
-    title = SECTION_GENITIVE[section]
+    text_name = state["text_name"]
+    title = TEXT_GENITIVE[text_name]
     draft = state.get("draft_text", "")
     lines = [
         f"✅ Предпросмотр и подтверждение сохранения ({title})",
         "",
         _display(draft),
         "",
-        "Остальные секции не меняются. Новая версия создастся только после "
-        "нажатия «Сохранить».",
+        "Второй текст шаблона не меняется. Новая версия создастся только "
+        "после нажатия «Сохранить».",
     ]
     chosen = _chosen_rows(state)
     if chosen:
@@ -1126,18 +1099,7 @@ def _ambiguties(state: dict) -> list[dict[str, Any]]:
             clean_candidates.append(candidate)
         if not clean_candidates:
             continue
-        sections = [
-            section
-            for section in group.get("sections", [])
-            if section in TEMPLATE_SECTIONS
-        ]
-        result.append(
-            {
-                "code": code,
-                "sections": sections,
-                "candidates": clean_candidates,
-            }
-        )
+        result.append({"code": code, "candidates": clean_candidates})
     return result
 
 
@@ -1155,15 +1117,7 @@ def _ambiguity_content(
     rows: list[list[InlineKeyboardButton]] = []
     for group_index, group in enumerate(groups):
         code = str(group["code"])
-        sections = ", ".join(
-            SECTION_TITLES.get(section, section) for section in group["sections"]
-        )
-        lines.extend(
-            [
-                "",
-                f"Код [{_h(code)}]" + (f" (секции: {sections})" if sections else ""),
-            ]
-        )
+        lines.extend(["", f"Код [{_h(code)}]"])
         for candidate_index, candidate in enumerate(group["candidates"]):
             scope = SCOPE_TITLES.get(
                 str(candidate.get("scope")), str(candidate.get("scope"))
@@ -1332,9 +1286,8 @@ def _create_confirm_content(
 ) -> tuple[str, InlineKeyboardMarkup]:
     name = str(state.get("name") or "")
     mode = str(state.get("mode") or "")
-    header = str(state.get("create_header") or "")
-    body = str(state.get("create_body") or "")
-    footer = str(state.get("create_footer") or "")
+    content = str(state.get("create_content") or "")
+    extended = state.get("create_extended")
     mode_title = (
         "на основе стандартного"
         if mode == "standard"
@@ -1346,17 +1299,15 @@ def _create_confirm_content(
         f"Название: «{_h(name)}»",
         f"Основа: {mode_title}",
         "",
-        f"📌 Шапка:\n{_display(header)}",
-        "",
-        f"📝 Тело:\n{_display(body)}",
-        "",
-        f"📌 Подвал:\n{_display(footer)}",
+        f"📝 Текст:\n{_display(content)}",
     ]
+    if isinstance(extended, str):
+        lines.extend(["", f"📝 Расширенный текст:\n{_display(extended)}"])
     if mode == "empty":
         lines.extend(
             [
                 "",
-                "Совсем пустой шаблон база не принимает, поэтому в теле "
+                "Совсем пустой шаблон база не принимает, поэтому в тексте "
                 "остаётся минимальный кирпичик [название]. Его можно заменить "
                 "или дополнить после создания.",
             ]
@@ -1541,7 +1492,7 @@ async def _render_phase(
                             "Шаблон изменился в другом окне. Текст сохранён; "
                             "при сохранении потребуется обновить версию."
                         )
-                    text, keyboard = _section_edit_content(state)
+                    text, keyboard = _text_edit_content(state)
                 elif phase == PHASE_CONFIRM_SAVE:
                     if check_revision and template.revision != state.get("revision"):
                         state["phase"] = PHASE_SECTION_ERROR
@@ -1629,7 +1580,6 @@ def _pending_ambiguities(bindings: TemplateBindings) -> list[dict[str, Any]]:
         if group is None:
             group = {
                 "code": ambiguous.code,
-                "sections": [],
                 "candidates": [
                     {
                         "brick_id": candidate.brick_id,
@@ -1642,8 +1592,6 @@ def _pending_ambiguities(bindings: TemplateBindings) -> list[dict[str, Any]]:
             }
             by_code[ambiguous.code] = group
             groups.append(group)
-        if ambiguous.section not in group["sections"]:
-            group["sections"].append(ambiguous.section)
     return groups
 
 
@@ -1705,30 +1653,25 @@ async def _validate_and_show(
             )
         else:
             current = template.current_version
-            sections = {
-                TEMPLATE_SECTION_HEADER: current.header,
-                TEMPLATE_SECTION_BODY: current.body,
-                TEMPLATE_SECTION_FOOTER: current.footer,
+            texts = {
+                TEMPLATE_CONTENT: current.content,
+                TEMPLATE_EXTENDED_CONTENT: current.extended_content,
             }
-            sections[state["section"]] = state.get("draft_text", "")
+            texts[state["text_name"]] = state.get("draft_text", "")
             try:
-                checked_header, checked_body, checked_footer = (
-                    validate_template_sections(
-                        sections[TEMPLATE_SECTION_HEADER],
-                        sections[TEMPLATE_SECTION_BODY],
-                        sections[TEMPLATE_SECTION_FOOTER],
-                    )
+                checked_content, checked_extended = validate_template_content(
+                    texts[TEMPLATE_CONTENT],
+                    texts[TEMPLATE_EXTENDED_CONTENT],
                 )
             except TemplateValidationError as exc:
                 _set_section_error(state, "validation", str(exc))
             else:
+                compile_texts = {TEMPLATE_CONTENT: checked_content}
+                if checked_extended is not None:
+                    compile_texts[TEMPLATE_EXTENDED_CONTENT] = checked_extended
                 compiled = resolve_template_bindings(
                     session,
-                    {
-                        TEMPLATE_SECTION_HEADER: checked_header,
-                        TEMPLATE_SECTION_BODY: checked_body,
-                        TEMPLATE_SECTION_FOOTER: checked_footer,
-                    },
+                    compile_texts,
                     actor_telegram_user_id=telegram_user_id,
                     place_id=template.place_id,
                     chosen_brick_ids=_chosen_map(state),
@@ -1938,22 +1881,27 @@ async def handle_open(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     await _show(update, context, new_state, text, keyboard)
 
 
-async def handle_edit_section(
-    update: Update, context: ContextTypes.DEFAULT_TYPE
-) -> None:
+async def handle_edit_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """
+    Открывает редактор текста шаблона.
+
+    Poster 2.3 H2: `tp_edit:<id>` правит канонический `content`,
+    `tp_edit_ext:<id>` — `extended_content`. Разделения на секции нет.
+    """
     query = ctx.query(update)
     state = load_template_session(ctx.user(update).id)
     if not _valid_state(state) or state.get("phase") != PHASE_CARD:
         await query.answer(STALE_TEXT, show_alert=True)
         return
     data = query.data or ""
-    # tp_edit_h:<id> | tp_edit_b:<id> | tp_edit_f:<id>
+    # tp_edit:<id> | tp_edit_ext:<id>
+    prefix, _, raw_id = data.partition(":")
+    text_name = (
+        TEMPLATE_EXTENDED_CONTENT if prefix == "tp_edit_ext" else TEMPLATE_CONTENT
+    )
     try:
-        prefix, raw_id = data.split(":", 1)
-        short = prefix.rsplit("_", 1)[-1]
-        section = SECTION_SHORT[short]
         template_id = int(raw_id)
-    except (KeyError, TypeError, ValueError):
+    except (TypeError, ValueError):
         await query.answer(STALE_TEXT, show_alert=True)
         return
     if template_id != state.get("template_id"):
@@ -1971,6 +1919,11 @@ async def handle_edit_section(
             return
         await query.answer()
         current = template.current_version
+        if text_name == TEMPLATE_EXTENDED_CONTENT and (
+            current.extended_content is None
+        ):
+            await query.answer("У шаблона нет расширенного текста.", show_alert=True)
+            return
         state.update(
             {
                 "phase": PHASE_SECTION_EDIT,
@@ -1978,15 +1931,15 @@ async def handle_edit_section(
                 "revision": template.revision,
                 "origin": _template_origin(template),
                 "place_id": template.place_id,
-                "section": section,
-                "draft_text": getattr(current, section),
+                "text_name": text_name,
+                "draft_text": getattr(current, text_name) or "",
                 "chosen_brick_ids": {},
             }
         )
         state.pop("error_kind", None)
         state.pop("error_message", None)
         state.pop("pending_ambiguities", None)
-        text, keyboard = _section_edit_content(state)
+        text, keyboard = _text_edit_content(state)
     finally:
         session.close()
     await _show(update, context, state, text, keyboard)
@@ -2408,15 +2361,11 @@ async def handle_help(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     if not _valid_state(state) or state.get("phase") != PHASE_SECTION_EDIT:
         await query.answer(STALE_TEXT, show_alert=True)
         return
-    data = query.data or ""
-    try:
-        _prefix, short, raw_id = data.split(":", 2)
-        section = SECTION_SHORT[short]
-        template_id = int(raw_id)
-    except (KeyError, TypeError, ValueError):
+    template_id = _callback_id(query.data or "", "tp_help:")
+    if template_id is None:
         await query.answer(STALE_TEXT, show_alert=True)
         return
-    if template_id != state.get("template_id") or section != state.get("section"):
+    if template_id != state.get("template_id"):
         await query.answer(STALE_TEXT, show_alert=True)
         return
     await query.answer()
@@ -2483,7 +2432,7 @@ async def handle_clear(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         update,
         context,
         state,
-        notice=("Секция очищена. Проверьте результат и подтвердите сохранение."),
+        notice="Текст очищен. Проверьте результат и подтвердите сохранение.",
     )
 
 
@@ -2505,7 +2454,7 @@ async def handle_retry(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     state.pop("error_kind", None)
     state.pop("error_message", None)
     state.pop("pending_ambiguities", None)
-    text, keyboard = _section_edit_content(state)
+    text, keyboard = _text_edit_content(state)
     await _show(update, context, state, text, keyboard)
 
 
@@ -2617,7 +2566,7 @@ async def handle_save(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     if not _valid_state(state) or state.get("phase") != PHASE_CONFIRM_SAVE:
         await query.answer(STALE_TEXT, show_alert=True)
         return
-    if state.get("section") not in TEMPLATE_SECTIONS or not isinstance(
+    if state.get("text_name") not in TEMPLATE_TEXTS or not isinstance(
         state.get("draft_text"), str
     ):
         await query.answer(STALE_TEXT, show_alert=True)
@@ -2625,7 +2574,7 @@ async def handle_save(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     await query.answer()
     telegram_user_id = ctx.user(update).id
     template_id = int(state["template_id"])
-    section = state["section"]
+    text_name = state["text_name"]
     draft_text = state["draft_text"]
     # Защита от двойного нажатия: повторный callback увидит другую фазу.
     state["phase"] = PHASE_SAVING
@@ -2638,27 +2587,49 @@ async def handle_save(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     notice: str | None = None
     alert: str | None = None
     try:
-        result = update_template_section(
+        # Меняется только выбранный текст; второй остаётся прежним.
+        template = _load_editable(session, telegram_user_id, template_id)
+        current = template.current_version if template is not None else None
+        if current is None:
+            # Права могли отозвать или шаблон удалить между проверкой и
+            # сохранением. Не подменяем это «временной ошибкой»: сервис сам
+            # вернёт `forbidden`/`not_found`, а черновик останется в сессии.
+            content = draft_text
+            extended_content = _UNSET_TEXT
+        else:
+            content = draft_text if text_name == TEMPLATE_CONTENT else current.content
+            extended_content = (
+                draft_text
+                if text_name == TEMPLATE_EXTENDED_CONTENT
+                else current.extended_content
+            )
+        update_kwargs: dict[str, Any] = {}
+        if extended_content is not _UNSET_TEXT:
+            update_kwargs["extended_content"] = extended_content
+        result = update_template_content(
             session,
             actor_telegram_user_id=telegram_user_id,
             template_id=template_id,
             expected_revision=int(state["revision"]),
-            section=section,
-            content=draft_text,
+            content=content,
             chosen_brick_ids=_chosen_map(state),
+            **update_kwargs,
         )
         if result.ok and result.template is not None:
-            current = result.template
+            # `result.template` — шаблон (`TemplateDetails`), а `current` —
+            # его версия (`TemplateVersionDetails`). Карточку строим по
+            # шаблону: ей нужны place_id и номер текущей ревизии.
+            saved = result.template
             new_state = _card_state(
-                current,
-                origin=_template_origin(current),
+                saved,
+                origin=_template_origin(saved),
                 page=_page_value(state.get("page")),
             )
             text, keyboard = _card_content(
-                current, place_name=_place_name(session, current.place_id)
+                saved, place_name=_place_name(session, saved.place_id)
             )
             notice = (
-                f"Сохранено в версии {current.revision}."
+                f"Сохранено в версии {saved.revision}."
                 if result.status == "updated"
                 else "Содержимое не изменилось; новая версия не создана."
             )
@@ -2689,9 +2660,7 @@ async def handle_save(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         elif result.status == "invalid":
             state["phase"] = PHASE_SECTION_ERROR
             state["error_kind"] = "invalid"
-            state["error_message"] = _localize_sections(
-                result.message or "Текст не прошёл проверку."
-            )
+            state["error_message"] = result.message or "Текст не прошёл проверку."
             state.pop("pending_ambiguities", None)
             new_state = state
             text, keyboard = _section_error_content(state)
@@ -2802,7 +2771,7 @@ async def handle_create_back(
         return
     await query.answer()
     state["phase"] = PHASE_CREATE_CHOICE
-    for key in ("create_header", "create_body", "create_footer", "mode"):
+    for key in ("create_content", "create_extended", "mode"):
         state.pop(key, None)
     state.pop("error_message", None)
     text, keyboard = _create_choice_content(str(state.get("name")))
@@ -2823,18 +2792,18 @@ async def _create_from(
     await query.answer()
     if mode == "standard":
         builtin = get_builtin_template()
-        header, body, footer = builtin.header, builtin.body, builtin.footer
+        content = builtin.content
+        extended = builtin.extended_content
     else:
-        # Backend запрещает шаблон, где все три секции пусты. Минимальная
-        # безопасная заготовка сохраняет пользователю «пустой» старт.
-        header, body, footer = "", "[название]", ""
+        # Backend запрещает пустой текст. Минимальная безопасная заготовка
+        # сохраняет пользователю «пустой» старт.
+        content, extended = "[название]", None
     state.update(
         {
             "phase": PHASE_CREATE_CONFIRM,
             "mode": mode,
-            "create_header": header,
-            "create_body": body,
-            "create_footer": footer,
+            "create_content": content,
+            "create_extended": extended,
         }
     )
     state.pop("error_message", None)
@@ -2878,9 +2847,8 @@ async def handle_create_save(
             session,
             actor_telegram_user_id=telegram_user_id,
             name=state.get("name"),
-            header=state.get("create_header", ""),
-            body=state.get("create_body", ""),
-            footer=state.get("create_footer", ""),
+            content=state.get("create_content", ""),
+            extended_content=state.get("create_extended"),
             chosen_brick_ids=_chosen_map(state),
         )
         new_state = _card_state(
@@ -2971,9 +2939,8 @@ async def _process_new_name(
     state["phase"] = PHASE_CREATE_CHOICE
     state["failed_inputs"] = []
     for key in (
-        "create_header",
-        "create_body",
-        "create_footer",
+        "create_content",
+        "create_extended",
         "mode",
         "error_message",
     ):
@@ -3151,7 +3118,7 @@ def templates_handlers() -> list[BaseHandler]:
         CallbackQueryHandler(handle_page, pattern=r"^tp_page:\d+$"),
         CallbackQueryHandler(handle_hub, pattern=r"^tp_hub$"),
         CallbackQueryHandler(handle_open, pattern=r"^tp_open:\d+$"),
-        CallbackQueryHandler(handle_edit_section, pattern=r"^tp_edit_[hbf]:\d+$"),
+        CallbackQueryHandler(handle_edit_text, pattern=r"^tp_edit(_ext)?:\d+$"),
         CallbackQueryHandler(handle_preview, pattern=r"^tp_preview:\d+$"),
         CallbackQueryHandler(handle_reset, pattern=r"^tp_reset:\d+$"),
         CallbackQueryHandler(handle_reset_yes, pattern=r"^tp_reset_yes:\d+$"),
@@ -3167,7 +3134,7 @@ def templates_handlers() -> list[BaseHandler]:
         # Кирпичики, справка и общий возврат.
         CallbackQueryHandler(handle_bricks, pattern=r"^tp_bricks:\d+$"),
         CallbackQueryHandler(handle_bricks_page, pattern=r"^tp_bpage:\d+$"),
-        CallbackQueryHandler(handle_help, pattern=r"^tp_help:[hbf]:\d+$"),
+        CallbackQueryHandler(handle_help, pattern=r"^tp_help:\d+$"),
         CallbackQueryHandler(handle_back, pattern=r"^tp_back$"),
         # Редактирование и сохранение.
         CallbackQueryHandler(handle_clear, pattern=r"^tp_clear$"),

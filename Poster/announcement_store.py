@@ -32,9 +32,6 @@ from sqlalchemy.exc import IntegrityError, OperationalError
 from sqlalchemy.orm import Session
 
 from announcement_wizard import (
-    EXTRA_POSITION_END,
-    EXTRA_POSITIONS,
-    SECTION_ORDER,
     AnnouncementActorError,
     AnnouncementBrickError,
     AnnouncementConflictError,
@@ -53,8 +50,7 @@ from announcement_wizard import (
     evaluate_announcement_readiness,
     place_context_values,
     snapshot_brick_ids_by_code,
-    snapshot_section,
-    snapshot_tokens_by_section,
+    snapshot_tokens_by_text,
     visible_announcement_text,
     visible_brick_issue,
 )
@@ -83,7 +79,7 @@ from template_compiler import (
     render_announcement,
     render_template,
 )
-from template_parser import BrickNode
+from template_parser import BrickNode, TextNode
 from template_store import (
     TemplateError,
     TemplateNotFoundError,
@@ -95,11 +91,10 @@ from template_store import (
     validate_template_compatibility,
 )
 from template_types import (
+    TEMPLATE_CONTENT,
+    TEMPLATE_EXTENDED_CONTENT,
     TEMPLATE_KIND_PERSONAL,
     TEMPLATE_KIND_STANDARD,
-    TEMPLATE_SECTION_BODY,
-    TEMPLATE_SECTION_FOOTER,
-    TEMPLATE_SECTION_HEADER,
 )
 from utils.tg_html import escape_html, sanitize_html
 
@@ -153,8 +148,6 @@ class AnnouncementExtraDetails:
     code: str
     title: str
     value_type: str
-    section: str
-    position: str
     occurrence: int
     created_at: datetime
     updated_at: datetime
@@ -322,13 +315,17 @@ class AnnouncementRenderPayload:
     Безопасные данные для компилятора Stage 24.
 
     Токены уже связаны с brick_id из снимка, дополнительные кирпичики
-    вставлены только в представление этого анонса, а определения загружены
-    по постоянным ID. Никакого повторного разрешения `[код]` нет.
+    добавлены строками в конец текста только этого анонса, а определения
+    загружены по постоянным ID. Никакого повторного разрешения `[код]` нет.
     """
 
-    tokens_by_section: Mapping[str, tuple[Any, ...]]
+    tokens_by_text: Mapping[str, tuple[Any, ...]]
     values_by_id: Mapping[int, object]
     definitions_by_id: Mapping[int, BrickDefinition]
+    # Выбран ли расширенный текст: он рендерится, когда в анонсе есть
+    # дополнительные кирпичики. Флаг живёт рядом с токенами, чтобы живой
+    # блок и итоговая отправка выбирали текст одинаково.
+    use_extended: bool = False
 
 
 FIELD_STATUS_VALID = "valid"
@@ -345,7 +342,6 @@ class AnnouncementFieldState:
     code: str
     title: str
     value_type: str
-    section: str
     status: str
     raw_value: object | None = None
     rules: Mapping[str, object] = field(default_factory=dict)
@@ -602,10 +598,13 @@ def _snapshot_view(details: TemplateSnapshotDetails) -> AnnouncementTemplateSnap
         source_template_version=details.source_template_version,
         source_kind=details.source_kind,
         source_place_id=details.source_place_id,
-        sections={
-            TEMPLATE_SECTION_HEADER: details.header,
-            TEMPLATE_SECTION_BODY: details.body,
-            TEMPLATE_SECTION_FOOTER: details.footer,
+        texts={
+            TEMPLATE_CONTENT: details.content,
+            **(
+                {TEMPLATE_EXTENDED_CONTENT: details.extended_content}
+                if details.extended_content is not None
+                else {}
+            ),
         },
         bindings=tuple(
             SnapshotBinding(brick_id=binding.brick_id, code=binding.code)
@@ -680,10 +679,9 @@ def _decode_value(row: AnnouncementValue) -> AnnouncementValueDetails:
     )
 
 
-def _extra_order(row: AnnouncementExtra) -> tuple[int, int, int]:
-    section_index = SECTION_ORDER.index(row.section)
-    position_index = 0 if row.position == "start" else 1
-    return (section_index, position_index, row.id)
+def _extra_order(row: AnnouncementExtra) -> tuple[int, int]:
+    """Порядок дополнительных кирпичиков: порядок добавления в анонс."""
+    return (row.id, row.occurrence)
 
 
 def _extra_details(
@@ -711,8 +709,6 @@ def _extra_details(
                 code=brick.code,
                 title=brick.title,
                 value_type=brick.value_type,
-                section=row.section,
-                position=row.position,
                 occurrence=row.occurrence,
                 created_at=row.created_at,
                 updated_at=row.updated_at,
@@ -1554,24 +1550,12 @@ def clear_announcement_value(
 # --- Дополнительные кирпичики ----------------------------------------------
 
 
-def _validate_section_position(section: object, position: object) -> tuple[str, str]:
-    if section not in SECTION_ORDER:
-        raise AnnouncementError(
-            "Секция дополнительного кирпичика: header, body или footer."
-        )
-    if position not in EXTRA_POSITIONS:
-        raise AnnouncementError("Позиция дополнительного кирпичика: start или end.")
-    return str(section), str(position)
-
-
 def add_announcement_extra(
     session: Session,
     *,
     actor_telegram_user_id: int | None,
     draft_id: int,
     brick_id: int,
-    section: object,
-    position: object = EXTRA_POSITION_END,
     value: object = _UNSET,
     expected_revision: int | None = None,
     today: date | None = None,
@@ -1582,12 +1566,15 @@ def add_announcement_extra(
     Исходный шаблон/снимок не меняются. Кирпичик должен быть доступен
     пользователю в выбранном месте, отсутствовать в снимке и ещё не быть
     добавленным. Значение можно передать сразу — одной транзакцией.
+
+    Poster 2.3 H2: секции и позиции больше нет. Кирпичик добавляет строку в
+    конец текста анонса, а сам анонс рендерится по `extended_content`, если
+    он есть у шаблона.
     """
     actor = _require_actor(session, actor_telegram_user_id)
     if not _valid_positive_id(brick_id):
         raise AnnouncementBrickError("Некорректный идентификатор кирпичика.")
     assert isinstance(brick_id, int)
-    checked_section, checked_position = _validate_section_position(section, position)
     row = _load_owned_draft(session, actor, draft_id)
     _ensure_content_editable(row)
     revision = _expected_revision(row, expected_revision)
@@ -1629,8 +1616,6 @@ def add_announcement_extra(
             AnnouncementExtra(
                 draft_id=row.id,
                 brick_id=brick_id,
-                section=checked_section,
-                position=checked_position,
                 occurrence=1,
                 created_at=now,
                 updated_at=now,
@@ -1651,50 +1636,6 @@ def add_announcement_extra(
         raise AnnouncementConflictError(
             "Не удалось добавить кирпичик из-за одновременной записи."
         ) from exc
-    except Exception:
-        session.rollback()
-        raise
-    return _details_by_id(session, actor, row.id)
-
-
-def move_announcement_extra(
-    session: Session,
-    *,
-    actor_telegram_user_id: int | None,
-    draft_id: int,
-    extra_id: int,
-    section: object | None = None,
-    position: object | None = None,
-    expected_revision: int | None = None,
-) -> AnnouncementDraftDetails:
-    """Меняет секцию/позицию дополнительного кирпичика этого анонса."""
-    actor = _require_actor(session, actor_telegram_user_id)
-    if not _valid_positive_id(extra_id):
-        raise AnnouncementNotFoundError("Дополнительный кирпичик не найден.")
-    assert isinstance(extra_id, int)
-    row = _load_owned_draft(session, actor, draft_id)
-    _ensure_content_editable(row)
-    revision = _expected_revision(row, expected_revision)
-    extra = session.scalar(
-        select(AnnouncementExtra).where(
-            AnnouncementExtra.id == extra_id,
-            AnnouncementExtra.draft_id == row.id,
-        )
-    )
-    if extra is None:
-        raise AnnouncementNotFoundError("Дополнительный кирпичик не найден.")
-    checked_section = extra.section if section is None else section
-    checked_position = extra.position if position is None else position
-    checked_section, checked_position = _validate_section_position(
-        checked_section, checked_position
-    )
-    now = utcnow()
-    try:
-        _cas_update_draft(session, draft_id=row.id, revision=revision)
-        extra.section = checked_section
-        extra.position = checked_position
-        extra.updated_at = now
-        _commit(session)
     except Exception:
         session.rollback()
         raise
@@ -2473,10 +2414,13 @@ def build_announcement_render_payload(
     draft_id: int,
 ) -> AnnouncementRenderPayload:
     """
-    Формирует связанные секции и значения для `template_compiler.render_template`.
+    Формирует связанные тексты и значения для `template_compiler.render_template`.
 
-    Дополнительные кирпичики вставляются в представление только этого анонса:
-    начало/конец выбранной секции. Исходный снимок шаблона не переписывается.
+    Дополнительные кирпичики добавляются строками в конец текста только этого
+    анонса. Исходный снимок шаблона не переписывается. Если шаблон имеет
+    `extended_content`, рендерятся дополнительные строки вместе с расширенным
+    текстом; иначе расширение достраивается из канонического: он же служит
+    основой, а дополнительные кирпичики дописываются в конец.
     """
     actor = _require_actor(session, actor_telegram_user_id)
     row = _load_owned_draft(session, actor, draft_id)
@@ -2484,7 +2428,7 @@ def build_announcement_render_payload(
     if snapshot is None:
         raise AnnouncementStageError("Сначала выберите шаблон анонса.")
     details = _draft_details(session, actor, row)
-    tokens_by_section = snapshot_tokens_by_section(snapshot)
+    tokens_by_text = snapshot_tokens_by_text(snapshot)
 
     all_brick_ids = set(snapshot.brick_ids)
     all_brick_ids.update(extra.brick_id for extra in details.extras)
@@ -2498,20 +2442,29 @@ def build_announcement_render_payload(
         for brick_id in all_brick_ids
     }
 
-    starts: dict[str, list[BrickNode]] = {section: [] for section in SECTION_ORDER}
-    ends: dict[str, list[BrickNode]] = {section: [] for section in SECTION_ORDER}
+    extra_nodes: list[BrickNode] = []
     for extra in details.extras:
         definition = definitions[extra.brick_id]
-        node = BrickNode(code=definition.code, brick_id=definition.id)
-        target = starts if extra.position == "start" else ends
-        target[extra.section].append(node)
+        extra_nodes.append(BrickNode(code=definition.code, brick_id=definition.id))
 
-    sections: dict[str, tuple[Any, ...]] = {}
-    for section in SECTION_ORDER:
-        base = list(tokens_by_section.get(section, []))
-        combined = starts[section] + base + ends[section]
-        if combined:
-            sections[section] = tuple(combined)
+    texts: dict[str, tuple[Any, ...]] = {}
+    for text_name, tokens in tokens_by_text.items():
+        texts[text_name] = tuple(tokens)
+    if extra_nodes:
+        # Дополнительные кирпичики — отдельные строки в конце выбранного
+        # текста. Ключ `extended_content` появляется тогда и только тогда,
+        # когда дополнительные кирпичики есть: рендер выбирает его по факту
+        # наличия, а не по позиции в исходном шаблоне.
+        base = list(tokens_by_text.get(TEMPLATE_EXTENDED_CONTENT, ()))
+        if not base:
+            base = list(tokens_by_text.get(TEMPLATE_CONTENT, ()))
+        if base:
+            base.append(TextNode("\n"))
+        for index, node in enumerate(extra_nodes):
+            if index:
+                base.append(TextNode("\n"))
+            base.append(node)
+        texts[TEMPLATE_EXTENDED_CONTENT] = tuple(base)
 
     values_by_id: dict[int, object] = {}
     for value in details.values:
@@ -2531,9 +2484,10 @@ def build_announcement_render_payload(
     ).items():
         values_by_id.setdefault(brick_id, raw)
     return AnnouncementRenderPayload(
-        tokens_by_section=sections,
+        tokens_by_text=texts,
         values_by_id=values_by_id,
         definitions_by_id=definitions,
+        use_extended=bool(extra_nodes),
     )
 
 
@@ -2545,7 +2499,7 @@ def build_announcement_fields(
     today: date | None = None,
 ) -> tuple[AnnouncementFieldState, ...]:
     """
-    Возвращает все кирпичики снимка в порядке шапка → тело → подвал.
+    Возвращает все кирпичики снимка в порядке первого появления в текстах.
 
     Недостающие поля берутся из того же `build_questions`, что и мастер,
     поэтому второй алгоритм определения вопросов в Telegram-слое не нужен.
@@ -2613,11 +2567,6 @@ def build_announcement_fields(
                 code=definition.code,
                 title=question.title if question is not None else definition.title,
                 value_type=definition.value_type,
-                section=(
-                    question.section
-                    if question is not None
-                    else snapshot_section(snapshot, definition.code)
-                ),
                 status=status,
                 raw_value=raw,
                 rules=dict(
@@ -2662,16 +2611,19 @@ def build_announcement_preview(
     # `html` — то, что реально уйдёт в Telegram (пустой анонс → `.`,
     # §5.6). Готовность считается по тексту БЕЗ заглушки: иначе пустой
     # анонс выглядел бы непустым для шутки в служебном экране.
+    use_extended = payload.use_extended
     raw_html = render_template(
-        payload.tokens_by_section,
+        payload.tokens_by_text,
         payload.values_by_id,
         payload.definitions_by_id,
+        use_extended=use_extended,
     )
     html = render_announcement(
-        payload.tokens_by_section,
+        payload.tokens_by_text,
         payload.values_by_id,
         payload.definitions_by_id,
         has_photos=bool(details.photos),
+        use_extended=use_extended,
     )
     snapshot_brick_count = (
         len(details.template_snapshot.brick_ids)

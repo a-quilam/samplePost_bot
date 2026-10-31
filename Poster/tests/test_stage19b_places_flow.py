@@ -868,9 +868,7 @@ class PlacesIsolationTests(unittest.TestCase):
                 session,
                 actor_telegram_user_id=DEFAULT_USER_ID,
                 name="Для мест",
-                header="",
-                body="[ttl]",
-                footer="",
+                content="\n".join(p for p in ("", "[ttl]", "") if p),
             )
             session.commit()
             template_id = template.template_id

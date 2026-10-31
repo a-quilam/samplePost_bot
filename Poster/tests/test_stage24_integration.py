@@ -24,7 +24,7 @@ from template_store import (
     get_template_version,
     render_template_snapshot,
     render_template_version,
-    update_template_body,
+    update_template_content,
 )
 from tests.stage23_helpers import (
     OTHER_TG,
@@ -52,9 +52,15 @@ class Stage24IntegrationTests(TemplateDatabaseTestCase):
             self.session,
             actor_telegram_user_id=OWNER_TG,
             name="Интеграционный",
-            header="📢 [название]",
-            body="🗓 [дата]\n📍 [место]([ссылка_места])\n[описание]",
-            footer="Контакт: [контакт]",
+            content="\n".join(
+                p
+                for p in (
+                    "📢 [название]",
+                    "🗓 [дата]\n📍 [место]([ссылка_места])\n[описание]",
+                    "Контакт: [контакт]",
+                )
+                if p
+            ),
         )
         self.assertEqual(created.kind, "personal")
 
@@ -92,8 +98,8 @@ class Stage24IntegrationTests(TemplateDatabaseTestCase):
         )
         self.assertEqual(v1_snapshot.source_template_version, 1)
 
-        # 6. Изменение одной секции — создаётся новая версия 2.
-        updated = update_template_body(
+        # 6. Изменение текста — создаётся новая версия 2.
+        updated = update_template_content(
             self.session,
             actor_telegram_user_id=OWNER_TG,
             template_id=created.template_id,
@@ -107,11 +113,11 @@ class Stage24IntegrationTests(TemplateDatabaseTestCase):
         # 7. Историческая версия сохранена.
         v1 = get_template_version(self.session, OWNER_TG, created.template_id, 1)
         assert v1 is not None
-        self.assertIn("[описание]", v1.body)
-        self.assertNotIn("[время_начала]", v1.body)
+        self.assertIn("[описание]", v1.content)
+        self.assertNotIn("[время_начала]", v1.content)
         v2 = get_template_version(self.session, OWNER_TG, created.template_id, 2)
         assert v2 is not None
-        self.assertIn("[время_начала]", v2.body)
+        self.assertIn("[время_начала]", v2.content)
 
         # 8. Загрузка snapshot (версии 1) из новой сессии SQLite.
         self.session.expire_all()
@@ -149,9 +155,9 @@ class Stage24IntegrationTests(TemplateDatabaseTestCase):
             self.session,
             actor_telegram_user_id=OWNER_TG,
             name="Стабильный",
-            header="Шапка",
-            footer="Подвал",
-            body="Название: [название]",
+            content="\n".join(
+                p for p in ("Шапка", "Название: [название]", "Подвал") if p
+            ),
         )
         # Проверка: привязка [название] → brick_id 1 сохранена.
         self.assertEqual(created.current_version.brick_ids, (1,))
@@ -188,9 +194,9 @@ class Stage24IntegrationTests(TemplateDatabaseTestCase):
             self.session,
             actor_telegram_user_id=OWNER_TG,
             name="Переименование",
-            header="Шапка",
-            body="Цена: [старый_код]",
-            footer="Подвал",
+            content="\n".join(
+                p for p in ("Шапка", "Цена: [старый_код]", "Подвал") if p
+            ),
         )
         self.assertEqual(created.current_version.brick_ids, (brick_id,))
 
@@ -224,9 +230,7 @@ class Stage24IntegrationTests(TemplateDatabaseTestCase):
             self.session,
             actor_telegram_user_id=OWNER_TG,
             name="Стабильность",
-            header="Шапка",
-            body="Цена: [общий]",
-            footer="Подвал",
+            content="\n".join(p for p in ("Шапка", "Цена: [общий]", "Подвал") if p),
         )
         self.assertEqual(created.current_version.brick_ids, (brick_a,))
 
@@ -260,9 +264,9 @@ class Stage24IntegrationTests(TemplateDatabaseTestCase):
                 self.session,
                 actor_telegram_user_id=OWNER_TG,
                 name="Плохой",
-                body="Текст [несуществующий]",
-                header="Шапка",
-                footer="Подвал",
+                content="\n".join(
+                    p for p in ("Шапка", "Текст [несуществующий]", "Подвал") if p
+                ),
             )
 
     def test_ambiguous_brick_requires_explicit_choice(self) -> None:
@@ -288,7 +292,7 @@ class Stage24IntegrationTests(TemplateDatabaseTestCase):
             value_type="short_text",
         )
         # Без явного выбора — отказ.
-        result = update_template_body(
+        result = update_template_content(
             self.session,
             actor_telegram_user_id=OWNER_TG,
             template_id=standard.template_id,
@@ -302,7 +306,7 @@ class Stage24IntegrationTests(TemplateDatabaseTestCase):
             text("SELECT id FROM bricks WHERE code = 'тестовый' " "AND scope = 'place'")
         ).scalar_one()
         assert place_brick_id is not None
-        result2 = update_template_body(
+        result2 = update_template_content(
             self.session,
             actor_telegram_user_id=OWNER_TG,
             template_id=standard.template_id,
@@ -318,9 +322,9 @@ class Stage24IntegrationTests(TemplateDatabaseTestCase):
             self.session,
             actor_telegram_user_id=OWNER_TG,
             name="Ссылка",
-            body="Подробнее([ссылка_места])",
-            header="Шапка",
-            footer="Подвал",
+            content="\n".join(
+                p for p in ("Шапка", "Подробнее([ссылка_места])", "Подвал") if p
+            ),
         )
         with self.assertRaises(TemplateCompileError):
             render_template_version(
@@ -368,17 +372,21 @@ class Stage24IntegrationTests(TemplateDatabaseTestCase):
             self.session,
             actor_telegram_user_id=OWNER_TG,
             name="Все типы",
-            header="Шапка",
-            footer="Подвал",
-            body=(
-                "Название: [название]\n"
-                "Дата: [дата]\n"
-                "Время: [время_начала]\n"
-                "Ссылка: [ссылка_места]\n"
-                "Описание: [описание]\n"
-                "Контакт: [контакт]\n"
-                "Кол-во: [количество]\n"
-                "Формат: [формат]"
+            content="\n".join(
+                p
+                for p in (
+                    "Шапка",
+                    "Название: [название]\n"
+                    "Дата: [дата]\n"
+                    "Время: [время_начала]\n"
+                    "Ссылка: [ссылка_места]\n"
+                    "Описание: [описание]\n"
+                    "Контакт: [контакт]\n"
+                    "Кол-во: [количество]\n"
+                    "Формат: [формат]",
+                    "Подвал",
+                )
+                if p
             ),
         )
         html = render_template_version(
@@ -413,16 +421,16 @@ class Stage24IntegrationTests(TemplateDatabaseTestCase):
             self.session,
             actor_telegram_user_id=OWNER_TG,
             name="История",
-            body="Версия 1 [название]",
-            header="Шапка",
-            footer="Подвал",
+            content="\n".join(
+                p for p in ("Шапка", "Версия 1 [название]", "Подвал") if p
+            ),
         )
         snapshot = create_template_snapshot(
             self.session,
             actor_telegram_user_id=OWNER_TG,
             template_id=created.template_id,
         )
-        update_template_body(
+        update_template_content(
             self.session,
             actor_telegram_user_id=OWNER_TG,
             template_id=created.template_id,
@@ -453,9 +461,9 @@ class Stage24IntegrationTests(TemplateDatabaseTestCase):
             self.session,
             actor_telegram_user_id=OWNER_TG,
             name="Приватный",
-            body="Секрет: [название]",
-            header="Шапка",
-            footer="Подвал",
+            content="\n".join(
+                p for p in ("Шапка", "Секрет: [название]", "Подвал") if p
+            ),
         )
         snapshot = create_template_snapshot(
             self.session,

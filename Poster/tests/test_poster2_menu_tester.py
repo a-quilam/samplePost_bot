@@ -101,9 +101,7 @@ def _seed_personal(h, *, name="Личный шаблон", actor_tg=DEFAULT_USER
             session,
             actor_telegram_user_id=actor_tg,
             name=name,
-            header="",
-            body="[название]",
-            footer="",
+            content="\n".join(p for p in ("", "[название]", "") if p),
         )
         session.commit()
         return template.template_id
@@ -530,9 +528,7 @@ class PersonalPlaceholderTests(unittest.TestCase):
                 session,
                 actor_telegram_user_id=DEFAULT_USER_ID,
                 name="Без места",
-                header="",
-                body="Постоянный текст [title]",
-                footer="",
+                content="\n".join(p for p in ("", "Постоянный текст [title]", "") if p),
             )
             session.commit()
             template_id = template.template_id
@@ -586,9 +582,7 @@ class PersonalNoPlaceAllScreensTests(unittest.TestCase):
                 session,
                 actor_telegram_user_id=DEFAULT_USER_ID,
                 name="Без места",
-                header="",
-                body="Постоянный текст [title]",
-                footer="",
+                content="\n".join(p for p in ("", "Постоянный текст [title]", "") if p),
             )
             session.commit()
             return template.template_id

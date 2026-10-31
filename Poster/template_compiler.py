@@ -1,6 +1,6 @@
 # template_compiler.py
 """
-Stage 24: компилятор шаблонов анонсов.
+Компилятор шаблонов анонсов (Stage 24 → Poster 2.3 H2).
 
 Разделяет две операции:
 
@@ -10,7 +10,7 @@ Stage 24: компилятор шаблонов анонсов.
     При ошибке частично корректная версия не сохраняется.
 
 2.  **Выполнение** (`render_template`): собирает итоговый текст анонса из
-    связанной версии или snapshot'а и значений кирпичиков. Обозначения не
+    связанного текста шаблона и значений кирпичиков. Обозначения не
     разрешаются заново: используются сохранённые brick_id.
 
 3.  **Единый рендер анонса** (`render_announcement`): тот же результат плюс
@@ -18,10 +18,11 @@ Stage 24: компилятор шаблонов анонсов.
     живого верхнего блока (S3), и для итоговой отправки (S4): один сборщик,
     одно поведение.
 
-Статический текст шаблона выводится буквально: никакой постобработки,
-«чистки сирот» и удаления литералов (`//` остаётся `//`, даже если обе
-подстановки пусты). Техническая `.` — это решение уровня сообщения, а не
-значения кирпичика, поэтому она добавляется здесь, а не в `values_by_id`.
+Poster 2.3 H2: шаблон — единый текст `content` и необязательный
+`extended_content`. Строка шаблона, в которой есть токены кирпичиков, но
+все они отрендерились пустыми, скрывается целиком: исчезает и висячий
+литерал (`//`, `—`), и пустая разметка (`<b></b>`). Строки без токенов
+выводятся буквально, включая литеральные разделители.
 
 Границы этапа:
 
@@ -52,19 +53,13 @@ from template_parser import (
     TextNode,
     parse_template,
 )
-from template_types import (
-    TEMPLATE_SECTION_BODY,
-    TEMPLATE_SECTION_FOOTER,
-    TEMPLATE_SECTION_HEADER,
-)
+from template_types import TEMPLATE_CONTENT, TEMPLATE_EXTENDED_CONTENT
 from utils.tg_html import SafeHtml, strip_link_tags, utf16_len
 from utils.validators import normalize_url
 
-_SECTION_ORDER = (
-    TEMPLATE_SECTION_HEADER,
-    TEMPLATE_SECTION_BODY,
-    TEMPLATE_SECTION_FOOTER,
-)
+# Порядок обработки текстов шаблона предсказуем: сначала канонический, затем
+# расширенный. Ключи — те же, что в моделях и снимках.
+_TEXT_ORDER = (TEMPLATE_CONTENT, TEMPLATE_EXTENDED_CONTENT)
 
 
 class TemplateCompileError(ValueError):
@@ -94,20 +89,18 @@ class BindingCandidate:
 @dataclass(frozen=True)
 class AmbiguousCode:
     """
-    Секция + код, по которым найдено несколько доступных кирпичиков.
+    Код, по которому найдено несколько доступных кирпичиков.
 
-    Редактор Stage 25 обязан показать список кандидатов и сохранить выбранный
+    Редактор обязан показать список кандидатов и сохранить выбранный
     `brick_id` в привязках версии.
     """
 
-    section: str
     code: str
     candidates: tuple[BindingCandidate, ...] = ()
 
     def __repr__(self) -> str:  # pragma: no cover
         return (
-            f"AmbiguousCode(section={self.section!r}, code={self.code!r}, "
-            f"candidates={len(self.candidates)})"
+            f"AmbiguousCode(code={self.code!r}, " f"candidates={len(self.candidates)})"
         )
 
 
@@ -119,7 +112,9 @@ class TemplateBindings:
     ambiguous_codes: list[AmbiguousCode] = field(default_factory=list)
     unknown_codes: list[str] = field(default_factory=list)
     parse_errors: list[TemplateParseError] = field(default_factory=list)
-    tokens_by_section: dict[str, list[Any]] = field(default_factory=dict)
+    tokens_by_text: dict[str, list[Any]] = field(default_factory=dict)
+    # Текст шаблона, в котором встретился токен: нужен диагностике.
+    token_origins: dict[str, str] = field(default_factory=dict)
 
     @property
     def ok(self) -> bool:
@@ -140,9 +135,8 @@ def _binding_candidate(definition: BrickDefinition) -> BindingCandidate:
     )
 
 
-def _resolve_codes_in_section(
+def _resolve_codes_in_text(
     session: Session,
-    section: str,
     tokens: Sequence[Any],
     *,
     actor_telegram_user_id: int | None,
@@ -193,7 +187,6 @@ def _resolve_codes_in_section(
                         return
                 ambiguous.append(
                     AmbiguousCode(
-                        section=section,
                         code=code,
                         candidates=tuple(
                             _binding_candidate(row) for row in candidates.candidates
@@ -224,18 +217,19 @@ def _resolve_codes_in_section(
 
 def resolve_template_bindings(
     session: Session,
-    sections: Mapping[str, str],
+    texts: Mapping[str, str],
     *,
     actor_telegram_user_id: int | None,
     place_id: int | None,
     chosen_brick_ids: Mapping[str, int] | None = None,
 ) -> TemplateBindings:
     """
-    Разбирает три секции и возвращает привязки для сохранения версии.
+    Разбирает тексты шаблона и возвращает привязки для сохранения версии.
 
-    Секции обрабатываются в порядке header → body → footer, чтобы порядок
-    ошибок был предсказуемым. Список `unknown_codes` содержит неизвестные
-    коды, для которых не найдено ни одного доступного кирпичика.
+    Ключи `texts` — `content` и (необязательный) `extended_content`.
+    Тексты обрабатываются в стабильном порядке, чтобы порядок ошибок был
+    предсказуемым. Список `unknown_codes` содержит неизвестные коды, для
+    которых не найдено ни одного доступного кирпичика.
 
     `chosen_brick_ids` — явный выбор пользователя для неоднозначных кодов:
     отображение «код → brick_id». Выбор применяется только если выбранный
@@ -243,22 +237,21 @@ def resolve_template_bindings(
     однозначных кодов выбор вызывающего кода игнорируется.
     """
     bindings = TemplateBindings()
-    for section in _SECTION_ORDER:
-        raw = sections.get(section)
+    for text_name in _TEXT_ORDER:
+        raw = texts.get(text_name)
         if raw is None:
             continue
         try:
-            bindings.tokens_by_section[section] = parse_template(raw, section=section)
+            bindings.tokens_by_text[text_name] = parse_template(raw)
         except TemplateParseError as exc:
             bindings.parse_errors.append(exc)
             continue
     if bindings.parse_errors:
         return bindings
 
-    for section, tokens in bindings.tokens_by_section.items():
-        resolved, ambiguous, unknown = _resolve_codes_in_section(
+    for text_name, tokens in bindings.tokens_by_text.items():
+        resolved, ambiguous, unknown = _resolve_codes_in_text(
             session,
-            section,
             tokens,
             actor_telegram_user_id=actor_telegram_user_id,
             place_id=place_id,
@@ -266,8 +259,15 @@ def resolve_template_bindings(
         )
         for code, brick_id in resolved.items():
             bindings.resolved_brick_ids.setdefault(code, brick_id)
-        bindings.ambiguous_codes.extend(ambiguous)
-        bindings.unknown_codes.extend(unknown)
+        for ambiguous_code in ambiguous:
+            if any(
+                item.code == ambiguous_code.code for item in bindings.ambiguous_codes
+            ):
+                continue
+            bindings.ambiguous_codes.append(ambiguous_code)
+        for code in unknown:
+            if code not in bindings.unknown_codes:
+                bindings.unknown_codes.append(code)
     return bindings
 
 
@@ -328,13 +328,28 @@ def _escape_html(text: str, *, quote: bool = False) -> str:
     )
 
 
-def _section_html(
-    tokens: Sequence[Any],
+@dataclass
+class _Rendered:
+    """
+    Результат узла: HTML, наличие токена кирпичика и его пустота.
+
+    `has_brick` — в узле есть хотя бы один токен кирпичика.
+    `bricks_empty` — все токены кирпичиков узла отрендерились пустыми.
+    """
+
+    html: str = ""
+    has_brick: bool = False
+    bricks_empty: bool = True
+    has_newline: bool = False
+
+
+def _render_node(
+    node: Any,
     values_by_id: Mapping[int, Any],
     definitions_by_id: Mapping[int, BrickDefinition],
-) -> str:
+) -> _Rendered:
     """
-    Визуализирует дерево одной секции, подставляя значения кирпичиков.
+    Визуализирует один узел, подставляя значения кирпичиков.
 
     Значения валидируются по типу кирпичика (`validate_brick_value`):
     дата/время/число/выбор/текст/ссылка — все семь типов. URL дополнительно
@@ -343,93 +358,137 @@ def _section_html(
     поле); некорректное значение — диагностируемая ошибка, а не вывод
     `None`/`[]` в готовом анонсе.
     """
-    parts: list[str] = []
-
-    def _visit(node: Any) -> str | None:
-        if isinstance(node, TextNode):
-            return _escape_html(node.text)
-        if isinstance(node, BrickNode):
-            if node.brick_id is None:
-                raise TemplateCompileError(
-                    "Токен кирпичика без привязки brick_id: "
-                    "версия шаблона повреждена."
-                )
-            definition = definitions_by_id.get(node.brick_id)
-            if definition is None:
-                raise TemplateCompileError(
-                    f"Определение кирпичика #{node.brick_id} не найдено: "
-                    "нельзя подменить тип значения на short_text."
-                )
-            if node.brick_id not in values_by_id:
-                return None  # Необязательное значение пропускается.
-            value = values_by_id[node.brick_id]
-            if value is None or (isinstance(value, str) and not value.strip()):
-                return None
-            if isinstance(value, SafeHtml):
-                # U1b: значение уже прошло allow-list (разметка сохранена,
-                # текст экранирован) — повторно не экранируем.
-                return str(value)
-            return _escape_html(_brick_text(value, definition))
-        if isinstance(node, LinkNode):
-            label = _visit_token_list(node.label)
-            if not label:
-                return None
-            if isinstance(node.url, BrickNode):
-                if node.url.brick_id is None:
-                    raise TemplateCompileError(
-                        "URL ссылки без привязки brick_id: "
-                        "версия шаблона повреждена."
-                    )
-                url_definition = definitions_by_id.get(node.url.brick_id)
-                if url_definition is None:
-                    raise TemplateCompileError(
-                        f"Определение кирпичика #{node.url.brick_id} не найдено."
-                    )
-                if node.url.brick_id not in values_by_id:
-                    # URL-кирпичик отсутствует: пустых/битых ссылок не
-                    # выводим, но подпись остаётся обычным текстом —
-                    # ровно это обещает контракт стандартного шаблона.
-                    return label
-                url_value = values_by_id[node.url.brick_id]
-                if not url_value or (
-                    isinstance(url_value, str) and not url_value.strip()
-                ):
-                    return label
-                url = _safe_url(url_value, code=url_definition.code)
-            else:
-                url = _normalize_render_url(node.url)
-            if not url:
-                return label
-            # U1b-fix: значение с URL-entity уже содержит <a>; в подписи
-            # ссылки оставляем внешнюю обёртку — вложенные ссылки Telegram
-            # отклоняет. Текст подписи и прочая разметка сохраняются.
-            return (
-                f'<a href="{_escape_html(url, quote=True)}">'
-                f"{strip_link_tags(label)}</a>"
+    if isinstance(node, TextNode):
+        return _Rendered(
+            html=_escape_html(node.text),
+            has_newline="\n" in node.text,
+        )
+    if isinstance(node, BrickNode):
+        if node.brick_id is None:
+            raise TemplateCompileError(
+                "Токен кирпичика без привязки brick_id: версия шаблона повреждена."
             )
-        if isinstance(node, FormatNode):
-            inner = _visit_token_list(node.children)
-            tag = _FORMAT_TAGS.get(node.marker)
-            if tag:
-                return f"<{tag}>{inner}</{tag}>"
-            return inner
-        if isinstance(node, str):
-            return _escape_html(node)
-        return None
+        definition = definitions_by_id.get(node.brick_id)
+        if definition is None:
+            raise TemplateCompileError(
+                f"Определение кирпичика #{node.brick_id} не найдено: "
+                "нельзя подменить тип значения на short_text."
+            )
+        if node.brick_id not in values_by_id:
+            return _Rendered(has_brick=True, bricks_empty=True)
+        value = values_by_id[node.brick_id]
+        if value is None or (isinstance(value, str) and not value.strip()):
+            return _Rendered(has_brick=True, bricks_empty=True)
+        if isinstance(value, SafeHtml):
+            # U1b: значение уже прошло allow-list (разметка сохранена,
+            # текст экранирован) — повторно не экранируем.
+            text = str(value)
+        else:
+            text = _escape_html(_brick_text(value, definition))
+        return _Rendered(
+            html=text,
+            has_brick=True,
+            bricks_empty=not visible_announcement_text(text),
+        )
+    if isinstance(node, LinkNode):
+        label = _render_children(node.label, values_by_id, definitions_by_id)
+        has_brick = label.has_brick
+        bricks_empty = label.bricks_empty if label.has_brick else True
+        if not label.html:
+            return _Rendered(
+                has_brick=has_brick,
+                bricks_empty=True,
+                has_newline=False,
+            )
+        if isinstance(node.url, BrickNode):
+            if node.url.brick_id is None:
+                raise TemplateCompileError(
+                    "URL ссылки без привязки brick_id: версия шаблона повреждена."
+                )
+            url_definition = definitions_by_id.get(node.url.brick_id)
+            if url_definition is None:
+                raise TemplateCompileError(
+                    f"Определение кирпичика #{node.url.brick_id} не найдено."
+                )
+            has_brick = True
+            if node.url.brick_id not in values_by_id:
+                # URL-кирпичик отсутствует: пустых/битых ссылок не
+                # выводим, но подпись остаётся обычным текстом —
+                # ровно это обещает контракт стандартного шаблона.
+                return _Rendered(
+                    html=label.html,
+                    has_brick=True,
+                    bricks_empty=label.bricks_empty,
+                    has_newline=label.has_newline,
+                )
+            url_value = values_by_id[node.url.brick_id]
+            if not url_value or (isinstance(url_value, str) and not url_value.strip()):
+                return _Rendered(
+                    html=label.html,
+                    has_brick=True,
+                    bricks_empty=label.bricks_empty,
+                    has_newline=label.has_newline,
+                )
+            url = _safe_url(url_value, code=url_definition.code)
+        else:
+            url = _normalize_render_url(node.url)
+        if not url:
+            return _Rendered(
+                html=label.html,
+                has_brick=has_brick,
+                bricks_empty=bricks_empty,
+                has_newline=label.has_newline,
+            )
+        # U1b-fix: значение с URL-entity уже содержит <a>; в подписи
+        # ссылки оставляем внешнюю обёртку — вложенные ссылки Telegram
+        # отклоняет. Текст подписи и прочая разметка сохраняются.
+        return _Rendered(
+            html=(
+                f'<a href="{_escape_html(url, quote=True)}">'
+                f"{strip_link_tags(label.html)}</a>"
+            ),
+            has_brick=has_brick,
+            bricks_empty=label.bricks_empty,
+            has_newline=label.has_newline,
+        )
+    if isinstance(node, FormatNode):
+        inner = _render_children(node.children, values_by_id, definitions_by_id)
+        tag = _FORMAT_TAGS.get(node.marker)
+        html = f"<{tag}>{inner.html}</{tag}>" if tag else inner.html
+        return _Rendered(
+            html=html,
+            has_brick=inner.has_brick,
+            bricks_empty=inner.bricks_empty,
+            has_newline=inner.has_newline,
+        )
+    if isinstance(node, str):
+        return _Rendered(html=_escape_html(node), has_newline="\n" in node)
+    return _Rendered()
 
-    def _visit_token_list(children: Iterable[Any]) -> str:
-        inner: list[str] = []
-        for child in children:
-            rendered = _visit(child)
-            if rendered is not None:
-                inner.append(rendered)
-        return "".join(inner)
 
-    for token in tokens:
-        rendered = _visit(token)
-        if rendered is not None:
-            parts.append(rendered)
-    return "".join(parts)
+def _render_children(
+    children: Iterable[Any],
+    values_by_id: Mapping[int, Any],
+    definitions_by_id: Mapping[int, BrickDefinition],
+) -> _Rendered:
+    """Объединяет результаты дочерних узлов."""
+    html: list[str] = []
+    has_brick = False
+    bricks_empty = True
+    has_newline = False
+    for child in children:
+        rendered = _render_node(child, values_by_id, definitions_by_id)
+        html.append(rendered.html)
+        has_brick = has_brick or rendered.has_brick
+        if rendered.has_brick:
+            bricks_empty = bricks_empty and rendered.bricks_empty
+        has_newline = has_newline or rendered.has_newline
+    return _Rendered(
+        html="".join(html),
+        has_brick=has_brick,
+        bricks_empty=bricks_empty,
+        has_newline=has_newline,
+    )
 
 
 def _normalize_render_url(raw: str) -> str:
@@ -451,31 +510,114 @@ def _normalize_render_url(raw: str) -> str:
     return normalized
 
 
-def render_template(
-    tokens_by_section: Mapping[str, Sequence[Any]],
+@dataclass
+class _Line:
+    """Одна строка текста шаблона до решения о скрытии."""
+
+    html: str = ""
+    has_brick: bool = False
+    bricks_empty: bool = True
+    drops: bool = False
+
+
+def _render_text_lines(
+    tokens: Sequence[Any],
     values_by_id: Mapping[int, Any],
     definitions_by_id: Mapping[int, BrickDefinition],
+) -> list[_Line]:
+    """
+    Рендерит текст построчно, сохраняя границы строк исходного шаблона.
+
+    Строка, в которой есть токены кирпичиков, но все они пусты, помечается
+    к скрытию: висячий литерал (`//`, `—`) и пустая разметка исчезают
+    вместе с ней. Строки без токенов остаются буквальными.
+
+    Форматирование, которое само содержит перевод строки, считается
+    атомарным: такая строка не скрывается, чтобы не разорвать HTML-теги.
+    """
+    lines: list[_Line] = []
+    current = _Line()
+
+    def _flush() -> None:
+        nonlocal current
+        current.drops = current.has_brick and current.bricks_empty
+        lines.append(current)
+        current = _Line()
+
+    for token in tokens:
+        rendered = _render_node(token, values_by_id, definitions_by_id)
+        if isinstance(token, TextNode):
+            # Литеральный текст — единственный узел, который безопасно
+            # делить на строки: вне разметки нет открытых тегов.
+            chunks = rendered.html.split("\n")
+            for index, chunk in enumerate(chunks):
+                if index > 0:
+                    _flush()
+                current.html += chunk
+        else:
+            current.html += rendered.html
+            if rendered.has_newline:
+                # Перевод строки внутри форматирования/значения: скрывать
+                # такую строку нельзя — это разорвало бы HTML-теги.
+                current.bricks_empty = False
+        if rendered.has_brick:
+            current.has_brick = True
+            current.bricks_empty = current.bricks_empty and rendered.bricks_empty
+    _flush()
+    return lines
+
+
+def _assemble_text(lines: Sequence[_Line]) -> str:
+    """
+    Склеивает оставшиеся строки и убирает пустые края.
+
+    Скрытая строка не оставляет «дыру»: вместе с ней поглощается одна
+    соседняя пустая строка (предпочтительно следующая), чтобы блок не
+    разъезжался на лишний интервал. Пустые строки внутри текста без
+    скрытых соседей сохраняются буквально.
+    """
+    kept: list[str] = []
+    index = 0
+    total = len(lines)
+    while index < total:
+        line = lines[index]
+        if line.drops:
+            index += 1
+            if index < total and not lines[index].drops and lines[index].html == "":
+                index += 1
+            elif kept and kept[-1] == "":
+                kept.pop()
+            continue
+        kept.append(line.html)
+        index += 1
+    while kept and not kept[0]:
+        kept.pop(0)
+    while kept and not kept[-1]:
+        kept.pop()
+    return "\n".join(kept)
+
+
+def render_template(
+    tokens_by_text: Mapping[str, Sequence[Any]],
+    values_by_id: Mapping[int, Any],
+    definitions_by_id: Mapping[int, BrickDefinition],
+    *,
+    use_extended: bool = False,
 ) -> str:
     """
-    Собирает итоговый HTML-анонс из уже связанных секций.
+    Собирает итоговый HTML-анонс из уже связанных текстов шаблона.
 
     Не выполняет повторного разбора: привязки и структура уже сохранены.
-    Статический текст секций выводится буквально — сиротские литералы
-    (`//`, разделители) не удаляются и не «чистятся».
+    Если выбран расширенный текст (`use_extended=True`) и он есть в
+    шаблоне, рендерится он; иначе — канонический `content`. Строки с
+    токенами, отрендерившимися пустыми, скрываются целиком.
     """
-    sections: list[str] = []
-    for section in _SECTION_ORDER:
-        tokens = tokens_by_section.get(section)
-        if not tokens:
-            continue
-        html = _section_html(
-            tokens,
-            values_by_id,
-            definitions_by_id,
-        )
-        if html:
-            sections.append(html)
-    return "\n".join(sections)
+    tokens = tokens_by_text.get(TEMPLATE_CONTENT)
+    if use_extended:
+        tokens = tokens_by_text.get(TEMPLATE_EXTENDED_CONTENT, tokens)
+    if not tokens:
+        return ""
+    return _assemble_text(_render_text_lines(tokens, values_by_id, definitions_by_id))
 
 
 # Техническая заглушка Telegram: пустое сообщение отправить нельзя.
@@ -538,27 +680,34 @@ def check_announcement_length(
 
 
 def render_announcement(
-    tokens_by_section: Mapping[str, Sequence[Any]],
+    tokens_by_text: Mapping[str, Sequence[Any]],
     values_by_id: Mapping[int, Any],
     definitions_by_id: Mapping[int, BrickDefinition],
     *,
     has_photos: bool = False,
+    use_extended: bool = False,
 ) -> str:
     """
     Единый рендер анонса для живого блока и итоговой отправки.
 
     Отличие от `render_template` — только техническая заглушка:
 
-    - видимый текст непустой → рендер как есть (статика буквальна);
+    - видимый текст непустой → рендер как есть (статика строк буквальна);
     - видимый текст пуст и фото нет → ровно ``.``;
     - видимый текст пуст, но есть фото → пустая строка: фото уходит без
       подписи, точка не нужна.
 
     Заглушка не является значением кирпичика: `values_by_id` не меняется,
     поэтому `.` не попадает в `announcement_values` и исчезает при правке.
-    Анонс из одного литерального `//` непустой и заглушку не получает.
+    Анонс из одного литерального `//` в строке без токенов непустой и
+    заглушку не получает.
     """
-    html = render_template(tokens_by_section, values_by_id, definitions_by_id)
+    html = render_template(
+        tokens_by_text,
+        values_by_id,
+        definitions_by_id,
+        use_extended=use_extended,
+    )
     if visible_announcement_text(html):
         return html
     if has_photos:

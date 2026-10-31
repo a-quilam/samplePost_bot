@@ -15,7 +15,7 @@ from brick_store import archive_personal_brick
 from template_compiler import TemplateCompileError
 from template_store import (
     list_template_brick_ids,
-    update_template_body,
+    update_template_content,
     validate_template_compatibility,
 )
 from tests.stage23_helpers import (
@@ -68,7 +68,7 @@ class TemplateCompatibilityTests(TemplateDatabaseTestCase):
         created = self.make_personal_template(
             self.owner,
             "Личный перенос",
-            body="Тело [личный] [название]",
+            content="\n".join(p for p in ("", "Тело [личный] [название]", "") if p),
         )
         compatibility = validate_template_compatibility(
             self.session,
@@ -84,7 +84,7 @@ class TemplateCompatibilityTests(TemplateDatabaseTestCase):
             self.make_personal_template(
                 self.owner,
                 "Привязка к чужому",
-                body="Тело чужого [чужой]",
+                content="\n".join(p for p in ("", "Тело чужого [чужой]", "") if p),
             )
 
     def test_archived_brick_is_flagged_but_stays_bound(self) -> None:
@@ -92,7 +92,7 @@ class TemplateCompatibilityTests(TemplateDatabaseTestCase):
         created = self.make_personal_template(
             self.owner,
             "Архивный шаблон",
-            body="Тело [архивный]",
+            content="\n".join(p for p in ("", "Тело [архивный]", "") if p),
         )
         self.assertTrue(
             validate_template_compatibility(
@@ -124,9 +124,11 @@ class TemplateCompatibilityTests(TemplateDatabaseTestCase):
     def test_update_template_body_binds_new_ids_by_brick_id(self) -> None:
         brick_id = self.make_personal_brick(self.owner, "новый")
         created = self.make_personal_template(
-            self.owner, "Обновляемый", body="Старый текст"
+            self.owner,
+            "Обновляемый",
+            content="\n".join(p for p in ("", "Старый текст", "") if p),
         )
-        update_template_body(
+        update_template_content(
             self.session,
             actor_telegram_user_id=OWNER_TG,
             template_id=created.template_id,
@@ -151,22 +153,24 @@ class TemplateCompatibilityTests(TemplateDatabaseTestCase):
     def test_unknown_brick_code_in_text_is_rejected(self) -> None:
         with self.assertRaises(TemplateCompileError):
             self.make_personal_template(
-                self.owner, "Некорректные привязки", body="Текст [несуществующий]"
+                self.owner,
+                "Некорректные привязки",
+                content="\n".join(p for p in ("", "Текст [несуществующий]", "") if p),
             )
 
     def test_foreign_brick_cannot_be_bound_on_create(self) -> None:
         self.make_personal_brick(self.other, "чужой_код")
         with self.assertRaises(TemplateCompileError):
             self.make_personal_template(
-                self.owner, "Чужие привязки", body="Тело [чужой_код]"
+                self.owner,
+                "Чужие привязки",
+                content="\n".join(p for p in ("", "Тело [чужой_код]", "") if p),
             )
 
     def test_cannot_update_template_with_foreign_brick(self) -> None:
         created = self.make_personal_template(self.owner, "Собственный")
         self.make_personal_brick(self.other, "чужой_код")
-        from template_store import update_template_header
-
-        result = update_template_header(
+        result = update_template_content(
             self.session,
             actor_telegram_user_id=OWNER_TG,
             template_id=created.template_id,
@@ -184,7 +188,7 @@ class TemplateCompatibilityTests(TemplateDatabaseTestCase):
             self.make_personal_template(
                 self.owner,
                 "Личный шаблон",
-                body="Тело [чужой_код]",
+                content="\n".join(p for p in ("", "Тело [чужой_код]", "") if p),
             )
         del place, other_place
 

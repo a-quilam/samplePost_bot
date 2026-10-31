@@ -116,6 +116,22 @@ V2_BODY = (
 )
 V2_FOOTER = "[контакт]"
 
+
+def _join(header: str, body: str, footer: str) -> str:
+    """Склейка секций в единый `content` — формула backfill миграции 24."""
+    if not (header.strip() or body.strip() or footer.strip()):
+        return header + body + footer
+    text = header.strip()
+    if text and (body.strip() or footer.strip()):
+        text += "\n"
+    text += body
+    if body.strip() and footer.strip():
+        text += "\n"
+    return text + footer
+
+
+V4_CONTENT = _join(V4_HEADER, V4_BODY, V4_FOOTER)
+
 OLD_INITIAL_NAME = "Мой шаблон"
 NEW_INITIAL_NAME = "Дефолтный шаблон"
 
@@ -185,9 +201,7 @@ def _personal_template_id(h, name: str = "Личный") -> int:
             session,
             actor_telegram_user_id=DEFAULT_USER_ID,
             name=name,
-            header="",
-            body="[описание]",
-            footer="",
+            content="\n".join(p for p in ("", "[описание]", "") if p),
         )
         session.commit()
         return int(template.template_id)
@@ -310,9 +324,7 @@ class DeliveredReferenceTests(unittest.TestCase):
                 session,
                 actor_telegram_user_id=DEFAULT_USER_ID,
                 name="Только текст",
-                header="",
-                body="[контакт]",
-                footer="",
+                content="\n".join(p for p in ("", "[контакт]", "") if p),
             )
             session.commit()
             draft = start_announcement_wizard(
@@ -358,7 +370,7 @@ class MigrationEighteenOwnerTests(unittest.TestCase):
     """Требование 2: обновляются только доказуемо нетронутые копии v2."""
 
     def setUp(self) -> None:
-        self.assertEqual(LATEST_VERSION, 23)
+        self.assertEqual(LATEST_VERSION, 24)
         self.path = temp_db_path("poster-r2-owner-m18-")
         self.addCleanup(shutil.rmtree, os.path.dirname(self.path), True)
         self.engine = make_engine(self.path)
@@ -438,13 +450,13 @@ class MigrationEighteenOwnerTests(unittest.TestCase):
         # Нетронутая личная копия: новая версия ровно с текстом v3, старая цела.
         rows = _sql(
             self.path,
-            "SELECT version, header, body, footer, builtin_version "
+            "SELECT version, content, builtin_version "
             "FROM template_versions WHERE template_id = 1 ORDER BY version",
         )
         self.assertEqual(len(rows), 3, "история: v2, v3 и новая v4")
-        self.assertEqual(rows[0], (1, V2_HEADER, V2_BODY, V2_FOOTER, 2))
-        self.assertEqual(rows[1], (2, V3_HEADER, V3_BODY, V3_FOOTER, 3))
-        self.assertEqual(rows[2], (3, V4_HEADER, V4_BODY, V4_FOOTER, 4))
+        self.assertEqual(rows[0], (1, _join(V2_HEADER, V2_BODY, V2_FOOTER), 2))
+        self.assertEqual(rows[1], (2, _join(V3_HEADER, V3_BODY, V3_FOOTER), 3))
+        self.assertEqual(rows[2], (3, V4_CONTENT, 4))
         self.assertEqual(
             _sql(self.path, "SELECT name, revision FROM templates WHERE id = 1"),
             [(NEW_INITIAL_NAME, 3)],
@@ -454,12 +466,12 @@ class MigrationEighteenOwnerTests(unittest.TestCase):
         # Нетронутый стандарт: v3, name остаётся NULL, ревизия 2.
         standard = _sql(
             self.path,
-            "SELECT version, header, body, footer FROM template_versions "
+            "SELECT version, content FROM template_versions "
             "WHERE template_id = 2 ORDER BY version",
         )
         self.assertEqual(len(standard), 3)
-        self.assertEqual(standard[1], (2, V3_HEADER, V3_BODY, V3_FOOTER))
-        self.assertEqual(standard[2], (3, V4_HEADER, V4_BODY, V4_FOOTER))
+        self.assertEqual(standard[1], (2, _join(V3_HEADER, V3_BODY, V3_FOOTER)))
+        self.assertEqual(standard[2], (3, V4_CONTENT))
         self.assertEqual(
             _sql(self.path, "SELECT name, revision FROM templates WHERE id = 2"),
             [(None, 3)],
@@ -505,7 +517,7 @@ class MigrationEighteenOwnerTests(unittest.TestCase):
         )
         versions = _sql(
             self.path,
-            "SELECT id, template_id, version, body, builtin_version "
+            "SELECT id, template_id, version, content, builtin_version "
             "FROM template_versions ORDER BY id",
         )
         self.assertEqual(run_migrations(self.engine), LATEST_VERSION)
@@ -516,7 +528,7 @@ class MigrationEighteenOwnerTests(unittest.TestCase):
         self.assertEqual(
             _sql(
                 self.path,
-                "SELECT id, template_id, version, body, builtin_version "
+                "SELECT id, template_id, version, content, builtin_version "
                 "FROM template_versions ORDER BY id",
             ),
             versions,
@@ -588,9 +600,8 @@ class NewUserDefaultsTests(unittest.TestCase):
             template = rows[0]
             self.assertEqual(template.name, NEW_INITIAL_NAME)
             version = template.current_version
-            self.assertEqual(version.header, V4_HEADER)
-            self.assertEqual(version.body, V4_BODY)
-            self.assertEqual(version.footer, V4_FOOTER)
+            self.assertEqual(version.content, V4_CONTENT)
+            self.assertIsNone(version.extended_content)
             rendered = render_template_version(
                 session,
                 actor_telegram_user_id=DEFAULT_USER_ID,
@@ -936,10 +947,8 @@ class PlaceHandbookOwnerTests(unittest.TestCase):
             self.assertIsNotNone(standard)
             assert standard is not None
             version = standard.current_version
-            self.assertEqual(
-                (version.header, version.body, version.footer),
-                (V4_HEADER, V4_BODY, V4_FOOTER),
-            )
+            self.assertEqual(version.content, V4_CONTENT)
+            self.assertIsNone(version.extended_content)
             rendered = render_template_version(
                 session,
                 actor_telegram_user_id=DEFAULT_USER_ID,

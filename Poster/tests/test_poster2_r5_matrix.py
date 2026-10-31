@@ -72,7 +72,7 @@ try:
     from template_store import (
         create_template_snapshot,
         get_standard_template,
-        update_template_section,
+        update_template_content,
     )
     from tests.integration_harness import (
         HARNESS_IMPORT_ERROR,
@@ -370,12 +370,11 @@ class ConflictDifferentValueTypeTests(BrickDatabaseTestCase):
         template = get_standard_template(
             self.session, author.telegram_user_id, place.id
         )
-        prepared = update_template_section(
+        prepared = update_template_content(
             self.session,
             actor_telegram_user_id=author.telegram_user_id,
             template_id=template.template_id,
             expected_revision=template.revision,
-            section="body",
             content=f"[{code}]",
         )
         self.assertEqual(prepared.status, "updated", prepared.message)
@@ -679,12 +678,11 @@ class ConflictLocalHolderArchiveTests(unittest.TestCase):
                 rules={},
             )
             template = get_standard_template(session, AUTHOR_TG, place.id)
-            prepared = update_template_section(
+            prepared = update_template_content(
                 session,
                 actor_telegram_user_id=AUTHOR_TG,
                 template_id=template.template_id,
                 expected_revision=template.revision,
-                section="body",
                 content=f"[{code}]",
             )
             self.assertEqual(prepared.status, "updated", prepared.message)

@@ -98,6 +98,32 @@ group→private — осознанное решение, доставка и т�
 Файлы: announcement_wizard.py, main_menu.py, tg_html.py,
 test_poster2_h1_stability_formatting.py (новый, 36), test_stage21_transfer_flow.py.
 
+**H2 принят (2026-10-31).** Единый шаблон: template_versions/template_snapshots
+переведены на content + extended_content (CHECK непустоты), миграция 24
+(rebuild 5 таблиц по паттерну миграции 16, backfill content =
+trim-join непустых секций, extended NULL, extras без section/position,
+LATEST_VERSION=24, откат = restore бэкапа run_migrations); extras:
+«выбор кирпичика → значение», move_announcement_extra удалён, значения
+в announcement_values целы; рендер: extended при выбранных extras,
+иначе content; строки с рендерящимися пустыми brick-токенами скрываются
+(литеральные строки не трогаются, **-разметка через границы строк
+сохраняется); редактор шаблонов — один текст (tp_edit/tp_edit_ext),
+forbidden при отозванных правах. Golden-тест байт-в-байт (v4 join =
+BUILTIN_TEMPLATE_CONTENT, матрица 4 набора значений), миграционный тест
+(pre-24 → 24, fresh-create_all ≡ post-migration schema по PRAGMA 5
+таблиц), скрытие пустых строк, extras↔extended. Тестов: 1923 OK,
+ruff/black/mypy чисто, CI success. Независимая приёмка: 6 сценариев
+FakeBot OK (дефектов нет). Ревизор: approved (критических нет;
+замечание про устаревшие tp_edit_b/tp_help:b в u3b_back закрыто — тест
+проверяет реальные экраны). Замечание ревизора по handle_save
+(current is None) проверено — порядок forbidden/owner-проверок
+корректен. Файлы: migrations.py, models.py, template_types.py,
+template_compiler.py, template_store.py, brick_store.py,
+announcement_wizard.py, announcement_store.py,
+handlers/announcement_wizard.py, handlers/templates.py,
+handlers/wizard_live.py, tests (45 файлов, новый
+test_poster2_h2_template_content.py — 15).
+
 Единый документ состояния, который ведёт `poster-manager` после каждого
 завершённого этапа. Владелец читает его, чтобы понять, где остановилась
 команда. Новый большой этап начинается только по отдельному сообщению

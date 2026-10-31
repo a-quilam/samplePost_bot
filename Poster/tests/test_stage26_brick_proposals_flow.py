@@ -245,9 +245,9 @@ class BrickProposalFlowTests(unittest.TestCase):
                 session,
                 actor_telegram_user_id=owner_tg,
                 name="Шаблон Stage 26",
-                header="Заголовок",
-                body=f"Поле [{code}]",
-                footer="Подвал",
+                content="\n".join(
+                    p for p in ("Заголовок", f"Поле [{code}]", "Подвал") if p
+                ),
                 chosen_brick_ids={code: source_id},
             )
             return template.current_version.version_id

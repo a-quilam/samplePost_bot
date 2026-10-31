@@ -125,7 +125,7 @@ def _seed_personal_template(
     *,
     name: str = "Личный шаблон",
     actor_tg: int = DEFAULT_USER_ID,
-    body: str = "[название]",
+    content: str = "[название]",
 ) -> int:
     """Личный шаблон без снимков и анонсов — его можно удалить."""
     with h.session_factory() as session:
@@ -134,9 +134,7 @@ def _seed_personal_template(
             session,
             actor_telegram_user_id=actor_tg,
             name=name,
-            header="",
-            body=body,
-            footer="",
+            content=content,
         )
         session.commit()
         return int(template.template_id)
@@ -285,7 +283,7 @@ class TemplateManagementTests(unittest.TestCase):
     @scenario_test
     async def test_restore_standard_from_manage_card(self, h):
         template_id = _seed_personal_template(
-            h, name="Свой шаблон", body="Своё тело без кирпичиков"
+            h, name="Свой шаблон", content="Своё тело без кирпичиков"
         )
         await h.text("/start")
         await h.callback("manage_templates")
@@ -299,9 +297,9 @@ class TemplateManagementTests(unittest.TestCase):
         self.assertEqual(len(rows), 1)
         self.assertGreaterEqual(rows[0].revision, 2)
         current = rows[0].current_version
-        self.assertEqual(current.header, BUILTIN_TEMPLATE.header)
-        self.assertEqual(current.body, BUILTIN_TEMPLATE.body)
-        self.assertEqual(current.footer, BUILTIN_TEMPLATE.footer)
+        # H2: у версии один канонический текст, без секций.
+        self.assertEqual(current.content, BUILTIN_TEMPLATE.content)
+        self.assertIsNone(current.extended_content)
         # Пользователь остался в карточке того же шаблона.
         self.assertIn("Свой шаблон", h.screen_text())
 

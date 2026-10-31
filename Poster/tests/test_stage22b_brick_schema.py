@@ -33,9 +33,12 @@ class BrickManagementSchemaTests(BrickDatabaseTestCase):
         # Миграции 7 — эпоха управления кирпичиками; 15/16 добавлены этапом
         # Poster 2.0 S1, 17 — S5, поэтому «последняя» проверяется по
         # LATEST_VERSION.
-        self.assertEqual(LATEST_VERSION, 23)
+        self.assertEqual(LATEST_VERSION, 24)
         self.assertIn((17, "archive_legacy_drafts"), self.journal())
-        self.assertEqual(self.journal()[-1], (LATEST_VERSION, "place_invite_links"))
+        self.assertEqual(
+            self.journal()[-1],
+            (LATEST_VERSION, "template_content_and_extras_without_sections"),
+        )
         connection = connect(self.path)
         try:
             brick_columns = {
@@ -124,7 +127,10 @@ class BrickManagementSchemaTests(BrickDatabaseTestCase):
         self.assertEqual(run_migrations(self.engine), LATEST_VERSION)
         self.assertEqual(len(self.journal()), LATEST_VERSION)
         self.assertIn((17, "archive_legacy_drafts"), self.journal())
-        self.assertEqual(self.journal()[-1], (LATEST_VERSION, "place_invite_links"))
+        self.assertEqual(
+            self.journal()[-1],
+            (LATEST_VERSION, "template_content_and_extras_without_sections"),
+        )
 
 
 if __name__ == "__main__":

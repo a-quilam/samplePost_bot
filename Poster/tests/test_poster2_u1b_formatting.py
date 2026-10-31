@@ -246,7 +246,7 @@ class FormattingScreenTests(unittest.TestCase):
             h,
             name="Доп. поле",
             specs=[("main", "Основное", "short_text", {})],
-            body="[main]",
+            content="[main]",
         )
         await _start_to_template(h, place_id)
         await _choose_personal(h, template_id)
@@ -257,8 +257,7 @@ class FormattingScreenTests(unittest.TestCase):
         await h.callback(_callback(h, "aw_extras"))
         await h.callback(_callback(h, "aw_exadd"))
         await h.callback(_callback(h, "aw_exbrick"))
-        await h.callback(_callback(h, "aw_exsec", ":body"))
-        await h.callback(_callback(h, "aw_expos", ":start"))
+        # H2: секций и позиций больше нет.
         await h.text("Доп", entities=[ent(MessageEntity.SPOILER, 0, 3)])
         self.assertEqual(
             _stored_payload(h, _latest_draft(h).id, bricks["main"])["text"], "Главное"
@@ -307,7 +306,7 @@ class FormattingPersistenceTests(unittest.TestCase):
             h,
             name="Финал",
             specs=[("main", "Основное", "short_text", {})],
-            body="Анонс: [main]",
+            content="Анонс: [main]",
         )
         await _start_to_template(h, place_id)
         await _choose_personal(h, template_id)
@@ -333,7 +332,7 @@ class FormattingPersistenceTests(unittest.TestCase):
             h,
             name="Фото",
             specs=[("main", "Основное", "short_text", {})],
-            body="Анонс: [main]",
+            content="Анонс: [main]",
         )
         await _start_to_template(h, place_id)
         await _choose_personal(h, template_id)
@@ -352,7 +351,7 @@ class FormattingPersistenceTests(unittest.TestCase):
             h,
             name="Альбом",
             specs=[("main", "Основное", "short_text", {})],
-            body="Анонс: [main]",
+            content="Анонс: [main]",
         )
         await _start_to_template(h, place_id)
         await _choose_personal(h, template_id)
@@ -382,7 +381,7 @@ class FormattingSafetyTests(unittest.TestCase):
             h,
             name="Символы",
             specs=[("main", "Основное", "short_text", {})],
-            body="a < b & c: [main]",
+            content="a < b & c: [main]",
         )
         await _start_to_template(h, place_id)
         await _choose_personal(h, template_id)
@@ -433,7 +432,7 @@ class FormattingSafetyTests(unittest.TestCase):
             h,
             name="Ссылки",
             specs=[("main", "Основное", "short_text", {})],
-            body="Сайт: [main]",
+            content="Сайт: [main]",
         )
         await _start_to_template(h, place_id)
         await _choose_personal(h, template_id)

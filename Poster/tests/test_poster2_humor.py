@@ -95,9 +95,9 @@ def _seed_template(h, *, bricks: int = 2) -> int:
             session,
             actor_telegram_user_id=DEFAULT_USER_ID,
             name="Юмор",
-            header="",
-            body="\n".join(f"[{code}]" for code in codes),
-            footer="",
+            content="\n".join(
+                p for p in ("", "\n".join(f"[{code}]" for code in codes), "") if p
+            ),
         )
         session.commit()
         return template.template_id
@@ -386,9 +386,7 @@ class HumorQuestionScreenTests(unittest.TestCase):
                 session,
                 actor_telegram_user_id=DEFAULT_USER_ID,
                 name="Ошибка",
-                header="",
-                body="[ttl]\n[dt]",
-                footer="",
+                content="\n".join(p for p in ("", "[ttl]\n[dt]", "") if p),
             )
             session.commit()
             template_id = template.template_id
@@ -463,9 +461,7 @@ class HumorQuestionScreenTests(unittest.TestCase):
                 session,
                 actor_telegram_user_id=DEFAULT_USER_ID,
                 name="Экранирование",
-                header="",
-                body="[ttl]",
-                footer="",
+                content="\n".join(p for p in ("", "[ttl]", "") if p),
             )
             session.commit()
             template_id = template.template_id

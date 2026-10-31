@@ -5,18 +5,18 @@ U1a — встроенный шаблон v4: точный текст, стру�
 Эталон v4 записан здесь ЛИТЕРАЛЬНО (не импортом из продукта), а продукт
 сверяется с ним побайтово. Проверяется:
 
-- константы `BUILTIN_TEMPLATE_*`: версия 4 и ровно ожидаемый текст секций;
+- константы `BUILTIN_TEMPLATE_*`: версия 4 и ровно ожидаемый единый текст;
 - рендер заполненного анонса побайтово: заголовок, сразу под ним
   «дата // время» (между ними НЕТ пустой строки), одна пустая строка перед
   площадкой, адрес отдельной нежирной строкой, одна пустая строка перед
   описанием и одна перед контактом;
-- рендер пустого анонса побайтово (литеральная статика компилятора), а
-  единый рендер анонса для отправки даёт техническую «.»;
+- рендер пустого анонса: строки с пустыми кирпичиками скрываются целиком,
+  поэтому шаблон пуст, а единый рендер для отправки даёт техническую «.»;
 - шапка содержит ровно пять кодов-подписей (название, дата, время_начала,
   место, адрес), `ссылка_места` — только цель ссылки `[место](...)`;
   тело — только `[описание]`, подвал — только `[контакт]`;
-- `[город]` не входит ни в одну секцию и не появляется в тексте, даже если
-  значение города передано в рендер;
+- `[город]` не входит в шаблон и не появляется в тексте, даже если значение
+  города передано в рендер;
 - `LinkNode` без URL выводит подпись без `<a>` (жирность сохраняется), с
   URL — жирную кликабельную ссылку;
 - стандартный шаблон, созданный для места, действительно v4.
@@ -41,13 +41,10 @@ from template_compiler import render_announcement, render_template
 from template_parser import BrickNode, FormatNode, LinkNode, parse_template
 from template_store import get_standard_template, render_template_version
 from template_types import (
-    BUILTIN_TEMPLATE_BODY,
-    BUILTIN_TEMPLATE_FOOTER,
-    BUILTIN_TEMPLATE_HEADER,
+    BUILTIN_TEMPLATE_CONTENT,
+    BUILTIN_TEMPLATE_EXTENDED_CONTENT,
     BUILTIN_TEMPLATE_VERSION,
-    TEMPLATE_SECTION_BODY,
-    TEMPLATE_SECTION_FOOTER,
-    TEMPLATE_SECTION_HEADER,
+    TEMPLATE_CONTENT,
 )
 from tests.stage19a_helpers import make_engine, temp_db_path
 from user_store import get_or_create_user
@@ -66,6 +63,10 @@ REFERENCE_HEADER = (
 REFERENCE_BODY = "\n[описание]"
 REFERENCE_FOOTER = "\n[контакт]"
 
+# Poster 2.3 H2: шаблон хранит один канонический текст. Эталон v4 побайтово
+# совпадает с прежней склейкой трёх блоков через "\n".
+REFERENCE_CONTENT = REFERENCE_HEADER + "\n" + REFERENCE_BODY + "\n" + REFERENCE_FOOTER
+
 # Побайтовый ожидаемый HTML: ровно 9 строк, как их увидит Telegram.
 FILLED_REFERENCE = (
     "<b>Летний концерт</b>\n"
@@ -79,10 +80,11 @@ FILLED_REFERENCE = (
     "@contact"
 )
 
-# Пустой рендер: компилятор выводит литеральную статику шаблона, а
-# отсутствующие значения пропускает. Заглушка «.» — решение уровня
-# сообщения (`render_announcement`), а не шаблона.
-EMPTY_REFERENCE = "<b></b>\n\n<b> // </b>\n<b></b>\n\n\n\n\n"
+# H2: каждая строка эталона содержит кирпичик, поэтому при пустых значениях
+# все строки скрываются целиком (вместе с литералами `//` и разметкой) и
+# шаблон рендерится в пустую строку. Заглушка «.» — решение уровня сообщения
+# (`render_announcement`), а не шаблона.
+EMPTY_REFERENCE = ""
 
 FILLED_VALUES = {
     "название": "Летний концерт",
@@ -174,16 +176,18 @@ class _TemplateCase(unittest.TestCase):
             values_by_id=values,
         )
 
-    def tokens(self, section: str) -> list[Any]:
+    def tokens(self, part: str) -> list[Any]:
+        """Токены эталонного блока (литерал теста, не константа продукта)."""
         text = {
-            TEMPLATE_SECTION_HEADER: BUILTIN_TEMPLATE_HEADER,
-            TEMPLATE_SECTION_BODY: BUILTIN_TEMPLATE_BODY,
-            TEMPLATE_SECTION_FOOTER: BUILTIN_TEMPLATE_FOOTER,
-        }[section]
-        return parse_template(text, section=section)
+            "content": REFERENCE_CONTENT,
+            "header": REFERENCE_HEADER,
+            "body": REFERENCE_BODY,
+            "footer": REFERENCE_FOOTER,
+        }[part]
+        return parse_template(text, section=TEMPLATE_CONTENT)
 
-    def bound_tokens(self, section: str) -> list[Any]:
-        """Токены секции с brick_id из сохранённых привязок стандарта."""
+    def bound_tokens(self, part: str) -> list[Any]:
+        """Токены блока с brick_id из сохранённых привязок стандарта."""
         bindings = {
             binding.code: binding.brick_id
             for binding in self.standard.current_version.bindings
@@ -214,7 +218,7 @@ class _TemplateCase(unittest.TestCase):
                     result.append(token)
             return result
 
-        return _bind(self.tokens(section))
+        return _bind(self.tokens(part))
 
     def definitions(self) -> dict[int, Any]:
         definitions: dict[int, Any] = {}
@@ -232,17 +236,12 @@ class BuiltinTemplateV4ConstantsTests(unittest.TestCase):
     def test_version_is_four(self) -> None:
         self.assertEqual(BUILTIN_TEMPLATE_VERSION, REFERENCE_VERSION)
 
-    def test_sections_match_reference_byte_for_byte(self) -> None:
-        self.assertEqual(BUILTIN_TEMPLATE_HEADER, REFERENCE_HEADER)
-        self.assertEqual(BUILTIN_TEMPLATE_BODY, REFERENCE_BODY)
-        self.assertEqual(BUILTIN_TEMPLATE_FOOTER, REFERENCE_FOOTER)
+    def test_content_matches_reference_byte_for_byte(self) -> None:
+        self.assertEqual(BUILTIN_TEMPLATE_CONTENT, REFERENCE_CONTENT)
 
-    def test_body_and_footer_start_with_exactly_one_newline(self) -> None:
-        # Пустая строка между блоками живёт в начале следующей секции:
-        # `render_template` склеивает секции ровно одним "\n".
-        for section in (BUILTIN_TEMPLATE_BODY, BUILTIN_TEMPLATE_FOOTER):
-            self.assertTrue(section.startswith("\n"), repr(section))
-            self.assertFalse(section.startswith("\n\n"), repr(section))
+    def test_extended_content_is_absent_by_default(self) -> None:
+        # Расширенный текст необязателен: у встроенного эталона его нет.
+        self.assertIsNone(BUILTIN_TEMPLATE_EXTENDED_CONTENT)
 
 
 class TemplateV4RenderTests(_TemplateCase):
@@ -255,17 +254,12 @@ class TemplateV4RenderTests(_TemplateCase):
         rendered = self.render({})
         self.assertEqual(rendered, EMPTY_REFERENCE)
         # Единый рендер для отправки подставляет техническую «.».
-        payload = {
-            "header": self.bound_tokens(TEMPLATE_SECTION_HEADER),
-            "body": self.bound_tokens(TEMPLATE_SECTION_BODY),
-            "footer": self.bound_tokens(TEMPLATE_SECTION_FOOTER),
-        }
+        payload = {TEMPLATE_CONTENT: self.bound_tokens("content")}
         definitions = self.definitions()
         self.assertEqual(render_template(payload, {}, definitions), EMPTY_REFERENCE)
-        # Литеральный `//` делает видимый текст непустым: заглушка «.» не
-        # подставляется (контракт `render_announcement`), и это то же самое
-        # тело, что вернул шаблон.
-        self.assertEqual(render_announcement(payload, {}, definitions), EMPTY_REFERENCE)
+        # Пустой видимый текст и нет фото: `render_announcement` отдаёт
+        # техническую «.».
+        self.assertEqual(render_announcement(payload, {}, definitions), ".")
 
     def test_blank_lines_only_between_blocks(self) -> None:
         lines = self.render(self.values()).split("\n")
@@ -364,12 +358,12 @@ class TemplateV4BrickSetTests(_TemplateCase):
     """Набор кодов по секциям: ровно эталон v4, без города."""
 
     def test_header_has_exactly_five_label_codes(self) -> None:
-        labels = _label_codes(self.tokens(TEMPLATE_SECTION_HEADER))
+        labels = _label_codes(self.tokens("header"))
         self.assertEqual(labels, ["название", "дата", "время_начала", "место", "адрес"])
         self.assertEqual(len(labels), 5)
 
     def test_link_target_is_only_refmesta(self) -> None:
-        tokens = self.tokens(TEMPLATE_SECTION_HEADER)
+        tokens = self.tokens("header")
         links = [token for token in tokens if isinstance(token, LinkNode)] + [
             child
             for token in tokens
@@ -386,23 +380,17 @@ class TemplateV4BrickSetTests(_TemplateCase):
         self.assertEqual(_label_codes(link.label), ["место"])
 
     def test_body_has_only_description_and_footer_only_contact(self) -> None:
-        self.assertEqual(_walk_codes(self.tokens(TEMPLATE_SECTION_BODY)), ["описание"])
-        self.assertEqual(_walk_codes(self.tokens(TEMPLATE_SECTION_FOOTER)), ["контакт"])
+        self.assertEqual(_walk_codes(self.tokens("body")), ["описание"])
+        self.assertEqual(_walk_codes(self.tokens("footer")), ["контакт"])
 
     def test_all_header_codes_are_the_reference_set(self) -> None:
         self.assertEqual(
-            set(_walk_codes(self.tokens(TEMPLATE_SECTION_HEADER))),
+            set(_walk_codes(self.tokens("header"))),
             {"название", "дата", "время_начала", "место", "ссылка_места", "адрес"},
         )
 
-    def test_city_is_not_in_any_section(self) -> None:
-        codes = set()
-        for section in (
-            TEMPLATE_SECTION_HEADER,
-            TEMPLATE_SECTION_BODY,
-            TEMPLATE_SECTION_FOOTER,
-        ):
-            codes.update(_walk_codes(self.tokens(section)))
+    def test_city_is_not_in_the_template(self) -> None:
+        codes = set(_walk_codes(self.tokens("content")))
         self.assertNotIn("город", codes)
 
     def test_city_value_does_not_change_the_render(self) -> None:
@@ -415,10 +403,8 @@ class TemplateV4BrickSetTests(_TemplateCase):
         version = self.standard.current_version
         self.assertEqual(version.version, 1)
         self.assertEqual(version.builtin_version, REFERENCE_VERSION)
-        self.assertEqual(
-            (version.header, version.body, version.footer),
-            (REFERENCE_HEADER, REFERENCE_BODY, REFERENCE_FOOTER),
-        )
+        self.assertEqual(version.content, REFERENCE_CONTENT)
+        self.assertIsNone(version.extended_content)
         self.assertEqual(len(version.bindings), 8)
         self.assertNotIn("город", {binding.code for binding in version.bindings})
 

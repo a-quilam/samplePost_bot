@@ -448,9 +448,7 @@ class DescriptionFormattingTests(R4HarnessCase):
                 session,
                 actor_telegram_user_id=OWNER_TG,
                 name="Описание",
-                header="",
-                body="[ttl]",
-                footer="",
+                content="\n".join(p for p in ("", "[ttl]", "") if p),
             )
             template_id = template.template_id
         await h.text("/start", user_id=OWNER_TG)
@@ -833,9 +831,7 @@ class ChatAsApplicationTests(R4HarnessCase):
                 session,
                 actor_telegram_user_id=OWNER_TG,
                 name="Порядок",
-                header="",
-                body="[ttl]",
-                footer="",
+                content="\n".join(p for p in ("", "[ttl]", "") if p),
             )
             template_id = template.template_id
         await h.text("/start", user_id=OWNER_TG)
@@ -881,9 +877,7 @@ class ChatAsApplicationTests(R4HarnessCase):
                 session,
                 actor_telegram_user_id=OWNER_TG,
                 name="Порядок 2",
-                header="",
-                body="[aa]\n[bb]",
-                footer="",
+                content="\n".join(p for p in ("", "[aa]\n[bb]", "") if p),
             )
             template_id = template.template_id
         await h.text("/start", user_id=OWNER_TG)
@@ -917,9 +911,7 @@ class HumorRegressionTests(R4HarnessCase):
                 session,
                 actor_telegram_user_id=OWNER_TG,
                 name="Юмор",
-                header="",
-                body="[ttl]",
-                footer="",
+                content="\n".join(p for p in ("", "[ttl]", "") if p),
             )
             template_id = template.template_id
 

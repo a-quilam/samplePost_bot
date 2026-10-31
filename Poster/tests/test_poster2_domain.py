@@ -58,7 +58,7 @@ from models import Brick, Place
 from template_store import (
     ensure_initial_personal_template,
     list_personal_templates,
-    update_template_header,
+    update_template_content,
 )
 from template_types import (
     BUILTIN_TEMPLATE,
@@ -174,7 +174,7 @@ class MigrationFifteenAndSixteenTests(_MigrationTestCase):
     """Миграции 15–17 на заполненной временной БД версии 13."""
 
     def test_migration_keeps_rows_links_checks_and_passes_integrity(self) -> None:
-        self.assertEqual(LATEST_VERSION, 23)
+        self.assertEqual(LATEST_VERSION, 24)
         self.assertEqual(run_migrations(self.engine), LATEST_VERSION)
 
         connection = sqlite3.connect(self.path)
@@ -226,13 +226,20 @@ class MigrationFifteenAndSixteenTests(_MigrationTestCase):
                 ).fetchall(),
                 [(1, 1, "valid")],
             )
+            # Миграция 24 убрала секции и позиции: строка доп. кирпичика
+            # сохранилась, а порядок определяется id и occurrence.
             self.assertEqual(
                 connection.execute(
-                    "SELECT draft_id, brick_id, section, position "
-                    "FROM announcement_extras"
+                    "SELECT draft_id, brick_id, occurrence FROM announcement_extras"
                 ).fetchall(),
-                [(1, 9, "footer", "end")],
+                [(1, 9, 1)],
             )
+            columns = {
+                row[1]
+                for row in connection.execute("PRAGMA table_info(announcement_extras)")
+            }
+            self.assertNotIn("section", columns)
+            self.assertNotIn("position", columns)
             # Индексы и триггеры пересозданы вместе с таблицей.
             names = {
                 row[0]
@@ -453,9 +460,11 @@ class PersonalWithoutPlaceTests(TemplateDatabaseTestCase):
         self.template = self.make_personal_template(
             self.owner,
             "Личный без места",
-            header="**[название]**",
-            body="[дата] // [время_начала]",
-            footer="[контакт]",
+            content="\n".join(
+                p
+                for p in ("**[название]**", "[дата] // [время_начала]", "[контакт]")
+                if p
+            ),
         )
 
     def test_personal_draft_has_no_place_and_needs_no_place_row(self) -> None:
@@ -522,9 +531,9 @@ class PersonalOneOffPlaceTests(AnnouncementDatabaseTestCase):
         self.template = self.make_personal_template(
             self.owner,
             "Личный с местом",
-            header="**[название]**",
-            body="[место]\n[адрес]",
-            footer="",
+            content="\n".join(
+                p for p in ("**[название]**", "[место]\n[адрес]", "") if p
+            ),
         )
         self.draft = start_announcement_wizard(
             self.session,
@@ -594,10 +603,9 @@ class PersonalOneOffPlaceTests(AnnouncementDatabaseTestCase):
             known_payload.values_by_id[known_ids["адрес"]], "ул. Тестовая, 1"
         )
 
-        # Стандарт без `[адрес]`: в v4 адрес живёт в ШАПКЕ, поэтому меняем
-        # именно шапку — тогда кирпичика нет в снимке, и адрес карточки не
-        # появляется в значениях рендера.
-        update_template_header(
+        # Стандарт без `[адрес]`: H2 меняет весь текст, поэтому кирпичика
+        # нет в снимке, и адрес карточки не появляется в значениях рендера.
+        update_template_content(
             self.session,
             actor_telegram_user_id=OWNER_TG,
             template_id=self.standard.template_id,
@@ -635,9 +643,8 @@ class InitialPersonalTemplateTests(AnnouncementDatabaseTestCase):
         self.assertEqual(templates[0].name, INITIAL_PERSONAL_TEMPLATE_NAME)
         # Копия — точный эталон §6.1.1 и отдельная от BUILTIN версия.
         version = templates[0].current_version
-        self.assertEqual(version.header, BUILTIN_TEMPLATE.header)
-        self.assertEqual(version.body, BUILTIN_TEMPLATE.body)
-        self.assertEqual(version.footer, BUILTIN_TEMPLATE.footer)
+        self.assertEqual(version.content, BUILTIN_TEMPLATE.content)
+        self.assertEqual(version.extended_content, BUILTIN_TEMPLATE.extended_content)
         self.assertEqual(BUILTIN_TEMPLATE_VERSION, 4)
         # Чужой пользователь получает свою копию, а не шаблон владельца.
         other = ensure_initial_personal_template(
@@ -666,7 +673,9 @@ class InitialPersonalTemplateTests(AnnouncementDatabaseTestCase):
         # Собственный шаблон пользователя остаётся единственным: повторный
         # вызов сервиса не добавляет второй «Мой шаблон».
         own = self.make_personal_template(
-            self.owner, "Мой рабочий", body="Текст [название]"
+            self.owner,
+            "Мой рабочий",
+            content="\n".join(p for p in ("", "Текст [название]", "") if p),
         )
         again = ensure_initial_personal_template(
             session, actor_telegram_user_id=OWNER_TG
@@ -970,7 +979,9 @@ class AccessAndConflictTests(AnnouncementDatabaseTestCase):
 
     def test_other_user_personal_template_is_not_found(self) -> None:
         template = self.make_personal_template(
-            self.owner, "Личный владельца", body="Текст [название]"
+            self.owner,
+            "Личный владельца",
+            content="\n".join(p for p in ("", "Текст [название]", "") if p),
         )
         with self.assertRaises(AnnouncementNotFoundError):
             start_announcement_wizard(
@@ -990,7 +1001,9 @@ class AccessAndConflictTests(AnnouncementDatabaseTestCase):
 
     def test_stale_revision_cannot_overwrite_personal_draft(self) -> None:
         template = self.make_personal_template(
-            self.owner, "Личный CAS", body="[название]"
+            self.owner,
+            "Личный CAS",
+            content="\n".join(p for p in ("", "[название]", "") if p),
         )
         draft = start_announcement_wizard(
             self.session,

@@ -297,9 +297,7 @@ class UserTextNotLoggedTests(unittest.TestCase):
                 session,
                 actor_telegram_user_id=h.user_id,
                 name="Шаблон логирования",
-                header="",
-                body="[ttl]\n[dt]",
-                footer="",
+                content="\n".join(p for p in ("", "[ttl]\n[dt]", "") if p),
             )
             session.commit()
             return template.template_id

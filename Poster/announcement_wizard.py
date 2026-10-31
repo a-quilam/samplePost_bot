@@ -4,8 +4,8 @@
 
 Модуль не зависит от Telegram и не пишет в БД. Он отвечает только за:
 
-- представление независимого снимка шаблона (три секции + сохранённые
-  привязки `код → brick_id`);
+- представление независимого снимка шаблона (`content` и, если есть,
+  `extended_content` + сохранённые привязки `код → brick_id`);
 - восстановление `brick_id` из снимка без повторного разрешения `[код]`;
 - вычисление детерминированной последовательности недостающих вопросов;
 - проверку значений через валидаторы Stage 22A и правила даты/времени
@@ -45,16 +45,12 @@ from template_parser import (
     parse_template,
 )
 from template_types import (
-    TEMPLATE_SECTION_BODY,
-    TEMPLATE_SECTION_FOOTER,
-    TEMPLATE_SECTION_HEADER,
+    TEMPLATE_TEXTS,
 )
 
-SECTION_ORDER = (
-    TEMPLATE_SECTION_HEADER,
-    TEMPLATE_SECTION_BODY,
-    TEMPLATE_SECTION_FOOTER,
-)
+# Порядок текстов шаблона: вопросы строятся в порядке первого появления
+# кирпичика, сначала в каноническом тексте, затем в расширенном.
+TEXT_ORDER = TEMPLATE_TEXTS
 
 # Постоянные ID системных кирпичиков каталога (миграции 6 и 15). Контекст
 # места строится по ID, а не по повторному разрешению текстовых кодов. ID
@@ -66,10 +62,6 @@ PLACE_BRICK_ID_URL = SYSTEM_BRICKS_BY_CODE["ссылка_места"].id
 # `адрес_места` остаётся для уже сохранённых снимков; автоподстановка
 # выполняется в оба кирпичика.
 ADDRESS_BRICK_ID = SYSTEM_BRICKS_BY_CODE["адрес"].id
-
-EXTRA_POSITION_START = "start"
-EXTRA_POSITION_END = "end"
-EXTRA_POSITIONS = (EXTRA_POSITION_START, EXTRA_POSITION_END)
 
 
 class WizardStage(StrEnum):
@@ -139,13 +131,13 @@ class AnnouncementTemplateSnapshot:
     source_template_version: int
     source_kind: str
     source_place_id: int | None
-    sections: Mapping[str, str]
+    texts: Mapping[str, str]
     bindings: tuple[SnapshotBinding, ...] = field(default_factory=tuple)
     source_name: str | None = None
 
     @property
     def brick_ids(self) -> tuple[int, ...]:
-        """Уникальные brick_id в порядке первого появления в секциях."""
+        """Уникальные brick_id в порядке первого появления в текстах."""
         ids: list[int] = []
         for node in iter_snapshot_bricks(self):
             if node.brick_id not in ids:
@@ -170,7 +162,6 @@ class Question:
     value_type: str
     rules: Mapping[str, object]
     source: str
-    section: str
     required: bool = False
     allow_empty: bool = True
     context_error: str | None = None
@@ -343,36 +334,52 @@ def _iter_nodes(nodes: Iterable[Any]) -> Iterable[Any]:
             yield from _iter_nodes(getattr(node, "children"))
 
 
+def _parse_snapshot_text(
+    snapshot: AnnouncementTemplateSnapshot,
+    text_name: str,
+    bindings: Mapping[str, int],
+) -> list[Any] | None:
+    """
+    Разбирает один текст снимка и проставляет brick_id во всех токенах.
+
+    Привязки берутся только из снимка: код не разрешается заново.
+    """
+    raw = snapshot.texts.get(text_name)
+    if raw is None:
+        return None
+    try:
+        tokens = parse_template(raw)
+    except TemplateParseError as exc:
+        raise AnnouncementSnapshotError(
+            f"Текст «{text_name}» снимка не разбирается: {exc}"
+        ) from exc
+    for node in _iter_nodes(tokens):
+        if node.code not in bindings:
+            raise AnnouncementSnapshotError(
+                f"У токена [{node.code}] нет сохранённой привязки в снимке."
+            )
+        node.brick_id = bindings[node.code]
+    return tokens
+
+
 def iter_snapshot_bricks(
     snapshot: AnnouncementTemplateSnapshot,
 ) -> Iterable[BrickNode]:
     """
-    Обходит секции в порядке шапка → тело → подвал.
+    Обходит тексты снимка в порядке `content` → `extended_content`.
 
     `brick_id` восстанавливается только из сохранённых привязок снимка.
     Текстовый код не разрешается заново и не может подменить определение.
     """
     bindings = _bindings_by_code(snapshot)
-    for section in SECTION_ORDER:
-        raw = snapshot.sections.get(section)
-        if raw is None:
+    for text_name in TEXT_ORDER:
+        tokens = _parse_snapshot_text(snapshot, text_name, bindings)
+        if tokens is None:
             continue
-        try:
-            tokens = parse_template(raw, section=section)
-        except TemplateParseError as exc:
-            raise AnnouncementSnapshotError(
-                f"Секция {section} снимка не разбирается: {exc}"
-            ) from exc
-        for node in _iter_nodes(tokens):
-            if node.code not in bindings:
-                raise AnnouncementSnapshotError(
-                    f"У токена [{node.code}] нет сохранённой привязки в снимке."
-                )
-            node.brick_id = bindings[node.code]
-            yield node
+        yield from _iter_nodes(tokens)
 
 
-def snapshot_tokens_by_section(
+def snapshot_tokens_by_text(
     snapshot: AnnouncementTemplateSnapshot,
 ) -> dict[str, list[Any]]:
     """
@@ -383,23 +390,10 @@ def snapshot_tokens_by_section(
     """
     bindings = _bindings_by_code(snapshot)
     result: dict[str, list[Any]] = {}
-    for section in SECTION_ORDER:
-        raw = snapshot.sections.get(section)
-        if raw is None:
-            continue
-        try:
-            tokens = parse_template(raw, section=section)
-        except TemplateParseError as exc:
-            raise AnnouncementSnapshotError(
-                f"Секция {section} снимка не разбирается: {exc}"
-            ) from exc
-        for node in _iter_nodes(tokens):
-            if node.code not in bindings:
-                raise AnnouncementSnapshotError(
-                    f"У токена [{node.code}] нет сохранённой привязки в снимке."
-                )
-            node.brick_id = bindings[node.code]
-        result[section] = tokens
+    for text_name in TEXT_ORDER:
+        tokens = _parse_snapshot_text(snapshot, text_name, bindings)
+        if tokens is not None:
+            result[text_name] = tokens
     return result
 
 
@@ -430,7 +424,8 @@ def build_questions(
     """
     Строит детерминированный список недостающих вопросов.
 
-    - порядок — первое появление кирпичика в шапке → теле → подвале;
+    - порядок — первое появление кирпичика: сначала `content`, затем
+      `extended_content`;
     - повторяющийся `brick_id` встречается в списке один раз;
     - кирпичики вне снимка игнорируются, даже если переданы в context/answers;
     - известное и корректное значение места/контекста не спрашивается;
@@ -498,32 +493,12 @@ def build_questions(
                 value_type=definition.value_type,
                 rules=dict(definition.rules),
                 source=definition.source,
-                section=snapshot_section(snapshot, node.code),
                 required=False,
                 allow_empty=True,
                 context_error=context_error,
             )
         )
     return questions
-
-
-def snapshot_section(
-    snapshot: AnnouncementTemplateSnapshot,
-    code: str,
-) -> str:
-    """Секция первого появления сохранённого кода в снимке."""
-    for section in SECTION_ORDER:
-        raw = snapshot.sections.get(section)
-        if raw is None:
-            continue
-        try:
-            tokens = parse_template(raw, section=section)
-        except TemplateParseError:
-            continue
-        for node in _iter_nodes(tokens):
-            if isinstance(node, BrickNode) and node.code == code:
-                return section
-    return TEMPLATE_SECTION_BODY
 
 
 def answer_payload_to_raw(answer: BrickValueResult) -> object | None:

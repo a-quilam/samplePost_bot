@@ -717,10 +717,10 @@ class TemplatesBricksBackMatrixTests(BackChecks):
             await h.text("/templates")
             for data in (
                 f"tp_open:{template_id}",
-                f"tp_edit_b:{template_id}",
+                f"tp_edit:{template_id}",
                 f"tp_bricks:{template_id}",
                 "tp_back",
-                f"tp_help:b:{template_id}",
+                f"tp_help:{template_id}",
                 "tp_back",
                 f"tp_open:{template_id}",
                 "tp_hub",

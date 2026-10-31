@@ -102,6 +102,7 @@ class BrickSchemaTests(BrickDatabaseTestCase):
                 (21, "place_city"),
                 (22, "builtin_templates_v4"),
                 (23, "place_invite_links"),
+                (24, "template_content_and_extras_without_sections"),
             ],
         )
         # 9 кирпичиков миграции 6 + системный `[адрес]` миграции 15

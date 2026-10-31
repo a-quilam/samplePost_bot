@@ -55,7 +55,7 @@ class TemplateSchemaTests(TemplateDatabaseTestCase):
 
     def test_template_migrations_apply_and_are_idempotent(self) -> None:
         self.assertEqual(self.migrations_applied, LATEST_VERSION)
-        self.assertEqual(LATEST_VERSION, 23)
+        self.assertEqual(LATEST_VERSION, 24)
         self.assertIn((12, "announcement_wizard"), self.journal())
         self.assertIn((13, "announcement_photos_publication"), self.journal())
         self.assertIn((8, "templates_versions_snapshots"), self.journal())
@@ -117,19 +117,18 @@ class TemplateSchemaTests(TemplateDatabaseTestCase):
 
         row = self.session.execute(
             text(
-                "SELECT header, body, footer, builtin_version "
+                "SELECT content, extended_content, builtin_version "
                 "FROM template_versions WHERE template_id = :tid"
             ),
             {"tid": template_id},
         ).one()
-        # Poster 2.0 U1a: точный эталон v4 — в шапке жирный заголовок, сразу
-        # под ним жирная строка даты/времени, `//`, жирная гиперссылка и
-        # отдельный `[адрес]`; тело содержит только описание.
-        self.assertEqual(row[0], BUILTIN_TEMPLATE.header)
+        # Poster 2.3 H2: один канонический текст вместо секций. Эталон v4
+        # побайтово совпадает с прежней склейкой шапки/тела/подвала.
+        self.assertEqual(row[0], BUILTIN_TEMPLATE.content)
         self.assertIn("[дата]", str(row[0]))
-        self.assertIn("[описание]", str(row[1]))
-        self.assertEqual(str(row[1]).strip(), "[описание]")
-        self.assertEqual(row[3], BUILTIN_TEMPLATE_VERSION)
+        self.assertIn("[описание]", str(row[0]))
+        self.assertIsNone(row[1])
+        self.assertEqual(row[2], BUILTIN_TEMPLATE_VERSION)
 
         bricks = self.session.execute(
             text(
@@ -260,17 +259,18 @@ class TemplateSchemaTests(TemplateDatabaseTestCase):
         template_id = self._template_id_for_place(place.id)
         version_row = self.session.execute(
             text(
-                "SELECT id, header FROM template_versions "
+                "SELECT id, content FROM template_versions "
                 "WHERE template_id = :tid ORDER BY version"
             ),
             {"tid": template_id},
         ).one()
-        version_id, original_header = int(version_row[0]), str(version_row[1])
+        version_id, original_content = int(version_row[0]), str(version_row[1])
 
         with self.assertRaises((IntegrityError, OperationalError)):
             self.session.execute(
                 text(
-                    "UPDATE template_versions SET header = 'подмена' " "WHERE id = :vid"
+                    "UPDATE template_versions SET content = 'подмена' "
+                    "WHERE id = :vid"
                 ),
                 {"vid": version_id},
             )
@@ -304,7 +304,7 @@ class TemplateSchemaTests(TemplateDatabaseTestCase):
 
         refreshed = self.session.get(TemplateVersion, version_id)
         assert refreshed is not None
-        self.assertEqual(refreshed.header, original_header)
+        self.assertEqual(refreshed.content, original_content)
 
     def test_standard_template_cannot_be_deleted_directly(self) -> None:
         place = self.make_place("Удаление стандарта")
@@ -346,7 +346,7 @@ class TemplateSchemaTests(TemplateDatabaseTestCase):
         with self.assertRaises((IntegrityError, OperationalError)):
             self.session.execute(
                 text(
-                    "UPDATE template_snapshots SET header = 'подмена' "
+                    "UPDATE template_snapshots SET content = 'подмена' "
                     "WHERE id = :sid"
                 ),
                 {"sid": snapshot.snapshot_id},
@@ -365,8 +365,8 @@ class TemplateSchemaTests(TemplateDatabaseTestCase):
                 text(
                     "INSERT INTO template_snapshots (owner_user_id, "
                     "source_template_id, source_template_version, source_kind, "
-                    "header, body, footer, idempotency_key, created_at) "
-                    "VALUES (:owner, :tid, 1, 'standard', 'x', 'y', 'z', "
+                    "content, extended_content, idempotency_key, created_at) "
+                    "VALUES (:owner, :tid, 1, 'standard', 'x', NULL, "
                     "'   ', CURRENT_TIMESTAMP)"
                 ),
                 {"owner": user.id, "tid": snapshot.source_template_id},

@@ -45,14 +45,7 @@ try:
     from place_edit_store import set_place_city
     from place_store import create_place, get_place_details, list_places, search_places
     from template_parser import BrickNode, FormatNode, LinkNode, parse_template
-    from template_types import (
-        BUILTIN_TEMPLATE_BODY,
-        BUILTIN_TEMPLATE_FOOTER,
-        BUILTIN_TEMPLATE_HEADER,
-        TEMPLATE_SECTION_BODY,
-        TEMPLATE_SECTION_FOOTER,
-        TEMPLATE_SECTION_HEADER,
-    )
+    from template_types import BUILTIN_TEMPLATE_CONTENT, TEMPLATE_CONTENT
     from tests.integration_harness import (
         DEFAULT_USER_ID,
         HARNESS_IMPORT_ERROR,
@@ -203,26 +196,37 @@ class TemplateV4RequirementTests(TemplateDatabaseTestCase):
         self.assertTrue(lines[3].startswith("<b>"), lines[3])
         self.assertEqual(lines[4], "ул. Ленина, 1")
 
-    def test_editor_sections_composition(self) -> None:
-        """Шапка: название/дата/время/место/адрес; тело: описание; подвал: контакт."""
-        header = _walk_codes(
-            parse_template(BUILTIN_TEMPLATE_HEADER, section=TEMPLATE_SECTION_HEADER)
+    def test_editor_text_composition(self) -> None:
+        """H2: единый текст; порядок кодов прежний — шапка, описание, контакт."""
+        tokens = parse_template(BUILTIN_TEMPLATE_CONTENT, section=TEMPLATE_CONTENT)
+        self.assertEqual(
+            _walk_codes(tokens),
+            [
+                "название",
+                "дата",
+                "время_начала",
+                "место",
+                "адрес",
+                "описание",
+                "контакт",
+            ],
         )
-        body = _walk_all_codes(
-            parse_template(BUILTIN_TEMPLATE_BODY, section=TEMPLATE_SECTION_BODY)
+        self.assertEqual(
+            _walk_all_codes(tokens),
+            [
+                "название",
+                "дата",
+                "время_начала",
+                "место",
+                "ссылка_места",
+                "адрес",
+                "описание",
+                "контакт",
+            ],
         )
-        footer = _walk_all_codes(
-            parse_template(BUILTIN_TEMPLATE_FOOTER, section=TEMPLATE_SECTION_FOOTER)
-        )
-        self.assertEqual(header, ["название", "дата", "время_начала", "место", "адрес"])
-        self.assertEqual(body, ["описание"])
-        self.assertEqual(footer, ["контакт"])
-        # `[город]` не входит ни в одну секцию стандарта.
-        for section in (header, body, footer):
-            self.assertNotIn("город", section)
-        self.assertNotIn("город", BUILTIN_TEMPLATE_HEADER)
-        self.assertNotIn("город", BUILTIN_TEMPLATE_BODY)
-        self.assertNotIn("город", BUILTIN_TEMPLATE_FOOTER)
+        # `[город]` не входит в стандартный шаблон.
+        self.assertNotIn("город", _walk_all_codes(tokens))
+        self.assertNotIn("город", BUILTIN_TEMPLATE_CONTENT)
 
 
 # --- Требование 1/3: город в домене и автозаполнение ------------------------
@@ -340,9 +344,7 @@ class CityDomainTests(TemplateDatabaseTestCase):
             self.session,
             actor_telegram_user_id=OWNER_TG,
             name="С городом",
-            header="**[название]**",
-            body="Город: [город]",
-            footer="",
+            content="\n".join(p for p in ("**[название]**", "Город: [город]", "") if p),
         )
         from brick_store import get_system_brick
 
@@ -405,9 +407,17 @@ class AutofillTests(TemplateDatabaseTestCase):
             '<b><a href="https://example.com/place">Дом культуры</a></b>', html
         )
         self.assertIn("ул. Ленина, 1", html)
-        # Дата/время пусты: мастер не выдумывает значения.
+        # Дата/время пусты: мастер не выдумывает значения, а строка с одними
+        # пустыми кирпичиками скрывается целиком — висячего `//` нет.
         self.assertNotIn("2026", html)
-        self.assertIn("<b> // </b>", html)
+        self.assertNotIn(" // ", html)
+        self.assertEqual(
+            html.split("\n"),
+            [
+                '<b><a href="https://example.com/place">Дом культуры</a></b>',
+                "ул. Ленина, 1",
+            ],
+        )
         # Город в текст не попадает.
         self.assertNotIn("Москва", html)
         # Первый вопрос — первый неизвестный кирпичик, не площадка и не город.
@@ -533,6 +543,19 @@ class UserTemplateNotOverwrittenTests(unittest.TestCase):
     V3_BODY = "\n**[дата] // [время_начала]**\n\n**[место]([ссылка_места])**\n[адрес]\n\n[описание]"
     V3_FOOTER = "\n[контакт]"
 
+    @classmethod
+    def _joined(cls, header: str, body: str, footer: str) -> str:
+        """Формула backfill миграции 24: секции через "\n" только между непустыми."""
+        if not (header.strip() or body.strip() or footer.strip()):
+            return header + body + footer
+        text = header.strip()
+        if text and (body.strip() or footer.strip()):
+            text += "\n"
+        text += body
+        if body.strip() and footer.strip():
+            text += "\n"
+        return text + footer
+
     def setUp(self) -> None:
         self.path = temp_db_path("poster-u1a-verify-m22-")
         self.addCleanup(shutil.rmtree, os.path.dirname(self.path), True)
@@ -564,6 +587,7 @@ class UserTemplateNotOverwrittenTests(unittest.TestCase):
     def _seed_personal(
         self, template_id: int, *, name: str, header: str, body: str, footer: str
     ) -> None:
+        """Строка версии v3 до миграции 24 — секции, а не `content`."""
         self._write(
             "INSERT INTO templates (id, kind, owner_user_id, name, revision, "
             "created_by_user_id, created_at, updated_at) VALUES "
@@ -598,19 +622,20 @@ class UserTemplateNotOverwrittenTests(unittest.TestCase):
 
         self.assertEqual(
             self._sql(
-                "SELECT body, revision FROM template_versions AS v "
+                "SELECT content, builtin_version, revision FROM template_versions AS v "
                 "JOIN templates AS t ON t.id = v.template_id WHERE t.id = 1"
             ),
-            [(edited_body, 1)],
+            [(self._joined(self.V3_HEADER, edited_body, self.V3_FOOTER), 3, 1)],
             "правленый шаблон перезаписан миграцией",
         )
         # Контроль: нетронутая копия обновлена до v4 (миграция работает).
         rows = self._sql(
-            "SELECT version, builtin_version FROM template_versions "
+            "SELECT version, builtin_version, content FROM template_versions "
             "WHERE template_id = ? ORDER BY version",
             (untouched_id,),
         )
         self.assertEqual(rows[-1][1], 4)
+        self.assertEqual(rows[-1][2], BUILTIN_TEMPLATE_CONTENT)
 
     def test_snapshot_of_edited_copy_is_not_rewritten(self) -> None:
         self._seed_personal(
@@ -630,9 +655,10 @@ class UserTemplateNotOverwrittenTests(unittest.TestCase):
         self.assertEqual(run_migrations(self.engine), LATEST_VERSION)
         self.assertEqual(
             self._sql(
-                "SELECT header, body, footer FROM template_snapshots WHERE id = 50"
+                "SELECT content, extended_content FROM template_snapshots "
+                "WHERE id = 50"
             ),
-            [(self.V3_HEADER, self.V3_BODY, self.V3_FOOTER)],
+            [(self._joined(self.V3_HEADER, self.V3_BODY, self.V3_FOOTER), None)],
         )
         self.assertEqual(
             self._sql("SELECT revision FROM templates WHERE id = 3"),

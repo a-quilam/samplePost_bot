@@ -29,10 +29,7 @@ from template_store import (
     list_template_brick_ids,
     list_template_versions,
     reset_standard_template,
-    update_template_body,
-    update_template_footer,
-    update_template_header,
-    update_template_section,
+    update_template_content,
 )
 from template_types import (
     BUILTIN_TEMPLATE,
@@ -73,7 +70,7 @@ class StandardTemplateServiceTests(TemplateDatabaseTestCase):
         self.assertEqual(template.name, None)
 
     def test_creator_does_not_get_edit_rights(self) -> None:
-        result = update_template_header(
+        result = update_template_content(
             self.session,
             actor_telegram_user_id=OWNER_TG,
             template_id=self.template_id,
@@ -91,7 +88,7 @@ class StandardTemplateServiceTests(TemplateDatabaseTestCase):
 
     def test_active_place_admin_can_edit_sections(self) -> None:
         self.make_place_admin(self.place, self.admin)
-        result = update_template_header(
+        result = update_template_content(
             self.session,
             actor_telegram_user_id=OTHER_TG,
             template_id=self.template_id,
@@ -101,31 +98,22 @@ class StandardTemplateServiceTests(TemplateDatabaseTestCase):
         self.assertEqual(result.status, "updated")
         assert result.template is not None
         self.assertEqual(result.template.revision, 2)
-        self.assertEqual(result.template.current_version.header, "❗ [название]")
-        # Остальные секции сохранены.
-        self.assertEqual(
-            result.template.current_version.body, self.standard.current_version.body
-        )
-        self.assertEqual(
-            result.template.current_version.footer,
-            self.standard.current_version.footer,
-        )
-        # v4: шапка содержит название/дату/время/место/ссылку/адрес, поэтому
-        # после замены шапки на «❗ [название]» остаются только название,
-        # описание и контакт; дата, время, место, ссылка и адрес уходят.
+        # H2: текст шаблона один, поэтому правка заменяет его целиком.
+        self.assertEqual(result.template.current_version.content, "❗ [название]")
+        self.assertIsNone(result.template.current_version.extended_content)
+        # В новом тексте остался только `[название]`; дата, время, место,
+        # ссылка, адрес, описание и контакт ушли вместе с прежним текстом.
         by_code = {
             binding.code: binding.brick_id
             for binding in self.standard.current_version.bindings
         }
         self.assertEqual(
             result.template.current_version.brick_ids,
-            tuple(
-                sorted((by_code["название"], by_code["описание"], by_code["контакт"]))
-            ),
+            (by_code["название"],),
         )
 
     def test_superadmin_can_edit_standard(self) -> None:
-        result = update_template_header(
+        result = update_template_content(
             self.session,
             actor_telegram_user_id=SUPERADMIN_TG,
             template_id=self.template_id,
@@ -148,7 +136,7 @@ class StandardTemplateServiceTests(TemplateDatabaseTestCase):
             place_id=self.place.id,
             expected_admin_telegram_user_id=self.admin.telegram_user_id,
         )
-        result = update_template_header(
+        result = update_template_content(
             self.session,
             actor_telegram_user_id=OTHER_TG,
             template_id=self.template_id,
@@ -171,7 +159,7 @@ class StandardTemplateServiceTests(TemplateDatabaseTestCase):
         )
         self.assertEqual(result.status, "replaced")
 
-        update = update_template_header(
+        update = update_template_content(
             self.session,
             actor_telegram_user_id=OTHER_TG,
             template_id=self.template_id,
@@ -182,12 +170,12 @@ class StandardTemplateServiceTests(TemplateDatabaseTestCase):
 
     def test_identical_save_creates_no_new_version(self) -> None:
         self.make_place_admin(self.place, self.admin)
-        result = update_template_header(
+        result = update_template_content(
             self.session,
             actor_telegram_user_id=OTHER_TG,
             template_id=self.template_id,
             expected_revision=1,
-            content=self.standard.current_version.header,
+            content=self.standard.current_version.content,
         )
         self.assertEqual(result.status, "unchanged")
         row = self.session.get(Template, self.template_id)
@@ -199,7 +187,7 @@ class StandardTemplateServiceTests(TemplateDatabaseTestCase):
 
     def test_stale_revision_is_rejected(self) -> None:
         self.make_place_admin(self.place, self.admin)
-        first = update_template_header(
+        first = update_template_content(
             self.session,
             actor_telegram_user_id=OTHER_TG,
             template_id=self.template_id,
@@ -208,7 +196,7 @@ class StandardTemplateServiceTests(TemplateDatabaseTestCase):
         )
         self.assertEqual(first.status, "updated")
 
-        stale = update_template_header(
+        stale = update_template_content(
             self.session,
             actor_telegram_user_id=OTHER_TG,
             template_id=self.template_id,
@@ -218,28 +206,28 @@ class StandardTemplateServiceTests(TemplateDatabaseTestCase):
         self.assertEqual(stale.status, "stale")
         assert stale.template is not None
         self.assertEqual(stale.template.revision, 2)
-        self.assertEqual(stale.template.current_version.header, "Версия 2")
+        self.assertEqual(stale.template.current_version.content, "Версия 2")
         self.assertEqual(
             len(list_template_versions(self.session, OTHER_TG, self.template_id)), 2
         )
 
-    def test_section_edit_preserves_history_and_versions(self) -> None:
+    def test_content_edit_preserves_history_and_versions(self) -> None:
         self.make_place_admin(self.place, self.admin)
-        update_template_header(
+        update_template_content(
             self.session,
             actor_telegram_user_id=OTHER_TG,
             template_id=self.template_id,
             expected_revision=1,
             content="Заголовок 2",
         )
-        update_template_body(
+        update_template_content(
             self.session,
             actor_telegram_user_id=OTHER_TG,
             template_id=self.template_id,
             expected_revision=2,
             content="Текст 3 [описание]",
         )
-        update_template_footer(
+        update_template_content(
             self.session,
             actor_telegram_user_id=OTHER_TG,
             template_id=self.template_id,
@@ -248,32 +236,17 @@ class StandardTemplateServiceTests(TemplateDatabaseTestCase):
         )
         versions = list_template_versions(self.session, OTHER_TG, self.template_id)
         self.assertEqual([item.version for item in versions], [1, 2, 3, 4])
-        self.assertEqual(versions[0].header, self.standard.current_version.header)
-        self.assertEqual(versions[3].header, "Заголовок 2")
-        self.assertEqual(versions[3].body, "Текст 3 [описание]")
-        self.assertEqual(versions[3].footer, "Подвал 4")
+        self.assertEqual(versions[0].content, self.standard.current_version.content)
+        # H2: каждая правка заменяет весь текст, история хранит все три.
+        self.assertEqual(versions[3].content, "Подвал 4")
         # Историческая версия читается отдельно.
         first = get_template_version(self.session, OTHER_TG, self.template_id, 1)
         assert first is not None
-        self.assertEqual(first.header, BUILTIN_TEMPLATE.header)
+        self.assertEqual(first.content, BUILTIN_TEMPLATE.content)
 
     def test_not_found_and_invalid_input(self) -> None:
         self.make_place_admin(self.place, self.admin)
-        result = update_template_header(
-            self.session,
-            actor_telegram_user_id=OTHER_TG,
-            template_id=self.template_id,
-            expected_revision=1,
-            content="  \n\t  ",
-        )
-        self.assertEqual(result.status, "updated")
-        row = self.session.get(Template, self.template_id)
-        assert row is not None
-        self.assertEqual(row.revision, 2)
-        assert result.template is not None
-        self.assertEqual(result.template.current_version.header, "  \n\t  ")
-
-        unknown = update_template_header(
+        unknown = update_template_content(
             self.session,
             actor_telegram_user_id=OTHER_TG,
             template_id=self.template_id + 999,
@@ -282,22 +255,33 @@ class StandardTemplateServiceTests(TemplateDatabaseTestCase):
         )
         self.assertEqual(unknown.status, "not_found")
 
+        # H2: текст из одних пробелов/переводов строк недопустим.
         with self.assertRaises(TemplateValidationError):
-            update_template_section(
+            update_template_content(
                 self.session,
                 actor_telegram_user_id=OTHER_TG,
                 template_id=self.template_id,
                 expected_revision=1,
-                section="middle",
-                content="x",
+                content="  \n\t  ",
+            )
+        # Пустое расширение — это None, а не пустая строка.
+        with self.assertRaises(TemplateValidationError):
+            update_template_content(
+                self.session,
+                actor_telegram_user_id=OTHER_TG,
+                template_id=self.template_id,
+                expected_revision=1,
+                content="Текст",
+                extended_content="   ",
             )
 
-        # Шапка только что заменена пробелами, поэтому в текущей версии
-        # остались коды тела (`[описание]`) и подвала (`[контакт]`), а коды
-        # шапки — название, дата, время, место, ссылка и адрес — ушли.
+        # Отклонённые правки не меняют ни ревизию, ни привязки.
+        row = self.session.get(Template, self.template_id)
+        assert row is not None
+        self.assertEqual(row.revision, 1)
         self.assertEqual(
             list_template_brick_ids(self.session, OWNER_TG, self.template_id),
-            (8, 9),
+            (1, 2, 3, 5, 7, 8, 9, 10),
         )
 
     def test_read_access_for_any_registered_user(self) -> None:
@@ -325,7 +309,7 @@ class StandardTemplateServiceTests(TemplateDatabaseTestCase):
 
     def test_reset_standard_template_requires_confirmation_and_admin(self) -> None:
         self.make_place_admin(self.place, self.admin)
-        update_template_header(
+        update_template_content(
             self.session,
             actor_telegram_user_id=OTHER_TG,
             template_id=self.template_id,
@@ -378,9 +362,8 @@ class StandardTemplateServiceTests(TemplateDatabaseTestCase):
         assert done.template is not None
         self.assertEqual(done.template.revision, 3)
         latest = done.template.current_version
-        self.assertEqual(latest.header, BUILTIN_TEMPLATE.header)
-        self.assertEqual(latest.body, BUILTIN_TEMPLATE.body)
-        self.assertEqual(latest.footer, BUILTIN_TEMPLATE.footer)
+        self.assertEqual(latest.content, BUILTIN_TEMPLATE.content)
+        self.assertEqual(latest.extended_content, BUILTIN_TEMPLATE.extended_content)
         self.assertEqual(latest.builtin_version, BUILTIN_TEMPLATE_VERSION)
         versions = list_template_versions(self.session, OTHER_TG, self.template_id)
         self.assertEqual([item.version for item in versions], [1, 2, 3])
@@ -389,7 +372,7 @@ class StandardTemplateServiceTests(TemplateDatabaseTestCase):
 
     def test_version_history_is_readable_but_not_writable(self) -> None:
         self.make_place_admin(self.place, self.admin)
-        update_template_header(
+        update_template_content(
             self.session,
             actor_telegram_user_id=OTHER_TG,
             template_id=self.template_id,
@@ -400,7 +383,7 @@ class StandardTemplateServiceTests(TemplateDatabaseTestCase):
         self.assertEqual(len(versions), 2)
         first = get_template_version(self.session, OWNER_TG, self.template_id, 1)
         assert first is not None
-        self.assertEqual(first.header, BUILTIN_TEMPLATE.header)
+        self.assertEqual(first.content, BUILTIN_TEMPLATE.content)
         missing = get_template_version(self.session, OWNER_TG, self.template_id, 5)
         self.assertIsNone(missing)
         wrong_version = get_template_version(
@@ -423,9 +406,9 @@ class PersonalTemplateServiceTests(TemplateDatabaseTestCase):
         created = self.make_personal_template(
             self.owner,
             "Мой шаблон",
-            header="Header [название]",
-            body="Body [личное]",
-            footer="Footer",
+            content="\n".join(
+                p for p in ("Header [название]", "Body [личное]", "Footer") if p
+            ),
         )
         self.assertEqual(created.owner_user_id, self.owner.id)
         # [название] в шапке привязан к системному кирпичику #1,
@@ -463,7 +446,7 @@ class PersonalTemplateServiceTests(TemplateDatabaseTestCase):
             get_accessible_template(self.session, SUPERADMIN_TG, created.template_id)
         )
 
-        result = update_template_header(
+        result = update_template_content(
             self.session,
             actor_telegram_user_id=OTHER_TG,
             template_id=created.template_id,
@@ -475,9 +458,9 @@ class PersonalTemplateServiceTests(TemplateDatabaseTestCase):
         assert created_row is not None
         self.assertEqual(created_row.revision, 1)
 
-    def test_owner_can_edit_sections_and_stale_is_rejected(self) -> None:
+    def test_owner_can_edit_content_and_stale_is_rejected(self) -> None:
         created = self.make_personal_template(self.owner, "Редактируемый")
-        result = update_template_header(
+        result = update_template_content(
             self.session,
             actor_telegram_user_id=OWNER_TG,
             template_id=created.template_id,
@@ -486,10 +469,10 @@ class PersonalTemplateServiceTests(TemplateDatabaseTestCase):
         )
         self.assertEqual(result.status, "updated")
         assert result.template is not None
-        self.assertEqual(result.template.current_version.header, "Новый заголовок")
-        self.assertEqual(result.template.current_version.body, "Текст [название]")
+        self.assertEqual(result.template.current_version.content, "Новый заголовок")
+        self.assertIsNone(result.template.current_version.extended_content)
 
-        stale = update_template_header(
+        stale = update_template_content(
             self.session,
             actor_telegram_user_id=OWNER_TG,
             template_id=created.template_id,
@@ -502,16 +485,17 @@ class PersonalTemplateServiceTests(TemplateDatabaseTestCase):
         brick_a = self.make_personal_brick(self.owner, "первый")
         brick_b = self.make_personal_brick(self.owner, "второй")
         created = self.make_personal_template(
-            self.owner, "Привязки", body="Текст [первый]"
+            self.owner,
+            "Привязки",
+            content="\n".join(p for p in ("", "Текст [первый]", "") if p),
         )
         self.assertEqual(created.current_version.brick_ids, (brick_a,))
 
-        replace = update_template_section(
+        replace = update_template_content(
             self.session,
             actor_telegram_user_id=OWNER_TG,
             template_id=created.template_id,
             expected_revision=1,
-            section="body",
             content="Новый текст [второй]",
         )
         self.assertEqual(replace.status, "updated")
@@ -523,7 +507,7 @@ class PersonalTemplateServiceTests(TemplateDatabaseTestCase):
         assert old_version is not None
         self.assertEqual(old_version.brick_ids, (brick_a,))
 
-        unchanged = update_template_body(
+        unchanged = update_template_content(
             self.session,
             actor_telegram_user_id=OWNER_TG,
             template_id=created.template_id,
@@ -532,12 +516,11 @@ class PersonalTemplateServiceTests(TemplateDatabaseTestCase):
         )
         self.assertEqual(unchanged.status, "unchanged")
 
-        cleared = update_template_section(
+        cleared = update_template_content(
             self.session,
             actor_telegram_user_id=OWNER_TG,
             template_id=created.template_id,
             expected_revision=2,
-            section="body",
             content="Без привязок",
         )
         self.assertEqual(cleared.status, "updated")
@@ -551,9 +534,7 @@ class PersonalTemplateServiceTests(TemplateDatabaseTestCase):
             self.session,
             actor_telegram_user_id=OWNER_TG,
             name="Тест",
-            header="a",
-            body="b",
-            footer="c",
+            content="\n".join(p for p in ("a", "b", "c") if p),
         )
         self.assertEqual(unknown.template_id, unknown.template_id)
 

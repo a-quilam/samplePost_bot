@@ -193,9 +193,7 @@ def make_personal_template(h, telegram_user_id: int) -> int:
             session,
             actor_telegram_user_id=telegram_user_id,
             name="Шаблон передачи",
-            header="",
-            body="[ttl]\n[dsc]",
-            footer="",
+            content="\n".join(p for p in ("", "[ttl]\n[dsc]", "") if p),
         )
         session.commit()
         return template.template_id

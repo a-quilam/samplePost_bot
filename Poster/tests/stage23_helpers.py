@@ -118,18 +118,16 @@ class TemplateDatabaseTestCase(unittest.TestCase):
         owner: User,
         name: str,
         *,
-        header: str = "Заголовок",
-        body: str = "Текст [название]",
-        footer: str = "Подвал",
+        content: str = "Заголовок\nТекст [название]\nПодвал",
+        extended_content: str | None = None,
         chosen_brick_ids: dict[str, int] | None = None,
     ) -> TemplateDetails:
         return create_personal_template(
             self.session,
             actor_telegram_user_id=owner.telegram_user_id,
             name=name,
-            header=header,
-            body=body,
-            footer=footer,
+            content=content,
+            extended_content=extended_content,
             chosen_brick_ids=chosen_brick_ids,
         )
 

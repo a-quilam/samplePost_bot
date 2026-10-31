@@ -20,8 +20,7 @@ from template_store import (
     create_template_snapshot,
     get_template_snapshot,
     list_template_snapshots,
-    update_template_body,
-    update_template_header,
+    update_template_content,
 )
 from template_types import BUILTIN_TEMPLATE_VERSION
 from tests.stage23_helpers import (
@@ -41,14 +40,14 @@ class TemplateSnapshotTests(TemplateDatabaseTestCase):
         self.other = self.make_user(OTHER_TG, username="other")
         self.superadmin = self.make_user(SUPERADMIN_TG, username="super")
 
-    def test_personal_snapshot_copies_all_sections_and_bindings(self) -> None:
+    def test_personal_snapshot_copies_content_and_bindings(self) -> None:
         brick_id = self.make_personal_brick(self.owner, "снапкод")
         created = self.make_personal_template(
             self.owner,
             "Снапшотный",
-            header="Заголовок [название]",
-            body="Тело [снапкод]",
-            footer="Подвал",
+            content="\n".join(
+                p for p in ("Заголовок [название]", "Тело [снапкод]", "Подвал") if p
+            ),
         )
         snapshot = create_template_snapshot(
             self.session,
@@ -60,9 +59,11 @@ class TemplateSnapshotTests(TemplateDatabaseTestCase):
         self.assertEqual(snapshot.source_kind, "personal")
         self.assertEqual(snapshot.source_name, "Снапшотный")
         self.assertIsNone(snapshot.source_place_id)
-        self.assertEqual(snapshot.header, "Заголовок [название]")
-        self.assertEqual(snapshot.body, "Тело [снапкод]")
-        self.assertEqual(snapshot.footer, "Подвал")
+        # H2: снимок копирует единый текст и (отсутствующее) расширение.
+        self.assertEqual(
+            snapshot.content, "Заголовок [название]\nТело [снапкод]\nПодвал"
+        )
+        self.assertIsNone(snapshot.extended_content)
         self.assertEqual(snapshot.brick_ids, tuple(sorted((1, brick_id))))
 
     def test_standard_snapshot_copies_builtin_version(self) -> None:
@@ -84,8 +85,8 @@ class TemplateSnapshotTests(TemplateDatabaseTestCase):
 
     def test_snapshot_is_immutable_after_template_edits(self) -> None:
         created = self.make_personal_template(self.owner, "Мутируемый")
-        old_header = created.current_version.header
-        old_body = created.current_version.body
+        old_content = created.current_version.content
+        old_extended = created.current_version.extended_content
         snapshot = create_template_snapshot(
             self.session,
             actor_telegram_user_id=OWNER_TG,
@@ -94,14 +95,14 @@ class TemplateSnapshotTests(TemplateDatabaseTestCase):
         self.make_place_admin(self.make_place("Другое место"), self.other)
 
         # Меняем текущую версию шаблона после создания снимка.
-        update_template_header(
+        update_template_content(
             self.session,
             actor_telegram_user_id=OWNER_TG,
             template_id=created.template_id,
             expected_revision=1,
             content="Новый заголовок",
         )
-        update_template_body(
+        update_template_content(
             self.session,
             actor_telegram_user_id=OWNER_TG,
             template_id=created.template_id,
@@ -111,8 +112,8 @@ class TemplateSnapshotTests(TemplateDatabaseTestCase):
 
         refreshed = get_template_snapshot(self.session, OWNER_TG, snapshot.snapshot_id)
         assert refreshed is not None
-        self.assertEqual(refreshed.header, old_header)
-        self.assertEqual(refreshed.body, old_body)
+        self.assertEqual(refreshed.content, old_content)
+        self.assertEqual(refreshed.extended_content, old_extended)
         self.assertEqual(refreshed.source_template_version, 1)
 
     def test_idempotency_key_returns_existing_snapshot(self) -> None:
@@ -144,7 +145,7 @@ class TemplateSnapshotTests(TemplateDatabaseTestCase):
 
     def test_expected_revision_mismatch_is_conflict(self) -> None:
         created = self.make_personal_template(self.owner, "Конфликтный")
-        update_template_header(
+        update_template_content(
             self.session,
             actor_telegram_user_id=OWNER_TG,
             template_id=created.template_id,

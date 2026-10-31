@@ -395,7 +395,7 @@ class BrickProposalServiceTests(TemplateDatabaseTestCase):
         template = self.make_personal_template(
             owner,
             "Шаблон 26",
-            body="Поле [новый_26]",
+            content="\n".join(p for p in ("", "Поле [новый_26]", "") if p),
         )
         version_id = template.current_version.version_id
         snapshot = self.make_proposal(owner, source, place=place)

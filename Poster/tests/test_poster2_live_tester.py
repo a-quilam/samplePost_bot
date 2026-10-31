@@ -127,16 +127,14 @@ def _seed_bricks(h, specs):
         session.commit()
 
 
-def _seed_template(h, *, body: str, name: str = "Личный", specs=None):
+def _seed_template(h, *, content: str, name: str = "Личный", specs=None):
     _seed_bricks(h, specs or [("title", "Название", "short_text", {})])
     with h.session_factory() as session:
         template = create_personal_template(
             session,
             actor_telegram_user_id=DEFAULT_USER_ID,
             name=name,
-            header="",
-            body=body,
-            footer="",
+            content=content,
         )
         session.commit()
         return template.template_id
@@ -176,7 +174,7 @@ class RestartRecoveryTests(unittest.TestCase):
     async def test_restart_midway_restores_live_block_without_snapshot(self, h):
         template_id = _seed_template(
             h,
-            body="Анонс: [title]",
+            content="Анонс: [title]",
             specs=[("title", "Название", "short_text", {})],
         )
         await h.text("/start")
@@ -215,7 +213,7 @@ class RestartRecoveryTests(unittest.TestCase):
     async def test_restart_keeps_answers_to_every_brick(self, h):
         template_id = _seed_template(
             h,
-            body="[title] / [where]",
+            content="[title] / [where]",
             specs=[
                 ("title", "Название", "short_text", {}),
                 ("where", "Место", "short_text", {}),
@@ -250,7 +248,7 @@ class SkipAndLiveUpdateTests(unittest.TestCase):
     def _seed(h):
         return _seed_template(
             h,
-            body="[title] — [where]",
+            content="[title] — [where]",
             specs=[
                 ("title", "Название", "short_text", {}),
                 ("where", "Место", "short_text", {}),
@@ -272,7 +270,9 @@ class SkipAndLiveUpdateTests(unittest.TestCase):
 
         after_skip = _live_text(h)
         self.assertNotIn("Вечеринка", after_skip, "пропуск не убрал значение сверху")
-        self.assertEqual(after_skip.strip(), "—")
+        # H2: строка, где все кирпичики пусты, скрывается целиком — литерал
+        # «—» не остаётся висеть, остаётся техническая заглушка.
+        self.assertEqual(after_skip.strip(), ".")
         draft = _drafts(h)[0]
         stored = " ".join(v or "" for v in _values(h, draft.draft_id).values())
         self.assertNotIn("Вечеринка", stored)
@@ -309,7 +309,7 @@ class TimeEntryTests(unittest.TestCase):
     def _seed(h):
         return _seed_template(
             h,
-            body="[day] / [clock]",
+            content="[day] / [clock]",
             specs=[
                 ("day", "Дата", "date", {}),
                 ("clock", "Время", "time", {}),
@@ -371,7 +371,7 @@ class EmptyAnnouncementDeliveryTests(unittest.TestCase):
 
     @scenario_test
     async def test_photo_none_delivers_dot_and_records_it(self, h):
-        template_id = _seed_template(h, body="[title]")
+        template_id = _seed_template(h, content="[title]")
         await h.text("/start")
         await h.callback(f"tp_pick:{template_id}")
         self.assertEqual(_live_text(h).strip(), ".")
@@ -391,7 +391,7 @@ class EmptyAnnouncementDeliveryTests(unittest.TestCase):
 
     @scenario_test
     async def test_placeholder_absent_from_values_and_gone_after_edit(self, h):
-        template_id = _seed_template(h, body="[title]")
+        template_id = _seed_template(h, content="[title]")
         await h.text("/start")
         await h.callback(f"tp_pick:{template_id}")
         draft = _drafts(h)[0]
@@ -424,7 +424,7 @@ class SecondAnnouncementTests(unittest.TestCase):
 
     @scenario_test
     async def test_second_announcement_does_not_touch_first_live_block(self, h):
-        template_id = _seed_template(h, body="[title]")
+        template_id = _seed_template(h, content="[title]")
         await h.text("/start")
         await h.callback(f"tp_pick:{template_id}")
         await h.text("Первый")
@@ -514,7 +514,7 @@ class LiveAboveScreenOrderTests(unittest.TestCase):
 
     @scenario_test
     async def test_personal_entry_puts_live_above_screen(self, h):
-        template_id = _seed_template(h, body="Анонс: [title]")
+        template_id = _seed_template(h, content="Анонс: [title]")
         await h.text("/start")
         entry_screen = h.screen_message_id()
         await h.callback(f"tp_pick:{template_id}")
@@ -538,7 +538,7 @@ class LiveAboveScreenOrderTests(unittest.TestCase):
 
     @scenario_test
     async def test_screen_recreated_from_menu_stays_below_live(self, h):
-        template_id = _seed_template(h, body="Анонс: [title]")
+        template_id = _seed_template(h, content="Анонс: [title]")
         await h.text("/start")
         await h.callback(f"tp_pick:{template_id}")
         await h.text("До меню")
@@ -556,7 +556,7 @@ class LiveAboveScreenOrderTests(unittest.TestCase):
 
     @scenario_test
     async def test_restart_keeps_live_id_and_screen_below(self, h):
-        template_id = _seed_template(h, body="Анонс: [title]")
+        template_id = _seed_template(h, content="Анонс: [title]")
         await h.text("/start")
         await h.callback(f"tp_pick:{template_id}")
         await h.text("До рестарта")
@@ -580,7 +580,7 @@ class LiveAboveScreenOrderTests(unittest.TestCase):
     @scenario_test
     async def test_lost_live_message_is_recreated_above_screen(self, h):
         """Сообщение анонса удалено извне: создаётся новое, снова выше экрана."""
-        template_id = _seed_template(h, body="Анонс: [title]")
+        template_id = _seed_template(h, content="Анонс: [title]")
         await h.text("/start")
         await h.callback(f"tp_pick:{template_id}")
         old_live, _screen = self._assert_live_above_screen(h)

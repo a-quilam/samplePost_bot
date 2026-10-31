@@ -56,7 +56,7 @@ def _callback(h, prefix: str) -> str:
     return found[0]
 
 
-def _seed_template(h, *, body: str, header: str = "", footer: str = ""):
+def _seed_template(h, *, content: str):
     """Личный шаблон + один кирпичик; анонс стартует с входа S2."""
     with h.session_factory() as session:
         get_or_create_user(session, DEFAULT_USER_ID, username="live")
@@ -72,9 +72,7 @@ def _seed_template(h, *, body: str, header: str = "", footer: str = ""):
             session,
             actor_telegram_user_id=DEFAULT_USER_ID,
             name="Живой",
-            header=header,
-            body=body,
-            footer=footer,
+            content=content,
         )
         session.commit()
         return template.template_id
@@ -146,7 +144,7 @@ class LiveBlockOrderTests(unittest.TestCase):
 
     @scenario_test
     async def test_live_block_is_above_the_question_screen(self, h):
-        template_id = _seed_template(h, body="Постоянный текст [title]")
+        template_id = _seed_template(h, content="Постоянный текст [title]")
         await h.text("/start")
         entry_screen = h.screen_message_id()
         await h.callback(f"tp_pick:{template_id}")
@@ -164,7 +162,7 @@ class LiveBlockOrderTests(unittest.TestCase):
 
     @scenario_test
     async def test_new_wizard_recreated_screen_stays_below_live_block(self, h):
-        template_id = _seed_template(h, body="Текст [title]")
+        template_id = _seed_template(h, content="Текст [title]")
         await h.text("/start")
         await h.callback(f"tp_pick:{template_id}")
         await h.text("Значение")
@@ -183,7 +181,7 @@ class LiveBlockOrderTests(unittest.TestCase):
     @scenario_test
     async def test_recreated_live_block_stays_above_the_screen(self, h):
         """Живой блок пришлось отправить заново — экран уходит под него."""
-        template_id = _seed_template(h, body="Текст [title]")
+        template_id = _seed_template(h, content="Текст [title]")
         await h.text("/start")
         await h.callback(f"tp_pick:{template_id}")
         old_live = _live_ids(h)[0]
@@ -202,7 +200,7 @@ class LiveBlockOrderTests(unittest.TestCase):
 
     @scenario_test
     async def test_live_block_has_no_keyboard(self, h):
-        template_id = _seed_template(h, body="Текст [title]")
+        template_id = _seed_template(h, content="Текст [title]")
         await h.text("/start")
         await h.callback(f"tp_pick:{template_id}")
         for record in _live_records(h):
@@ -218,7 +216,7 @@ class LiveBlockUpdateTests(unittest.TestCase):
 
     @scenario_test
     async def test_answer_edits_live_block_and_keeps_one_message(self, h):
-        template_id = _seed_template(h, body="Анонс: [title]")
+        template_id = _seed_template(h, content="Анонс:\n[title]")
         await h.text("/start")
         await h.callback(f"tp_pick:{template_id}")
         before = _live_text(h)
@@ -236,7 +234,7 @@ class LiveBlockUpdateTests(unittest.TestCase):
 
     @scenario_test
     async def test_live_ids_are_stored_in_draft(self, h):
-        template_id = _seed_template(h, body="[title]")
+        template_id = _seed_template(h, content="[title]")
         await h.text("/start")
         await h.callback(f"tp_pick:{template_id}")
         draft = _latest_draft(h)
@@ -256,7 +254,7 @@ class PlaceholderTests(unittest.TestCase):
     async def test_empty_announcement_gets_placeholder_dot(self, h):
         # Шаблон состоит только из кирпичика, значение не задано: видимого
         # текста нет вовсе — live-блок обязан нести техническую `.`.
-        template_id = _seed_template(h, body="[title]")
+        template_id = _seed_template(h, content="[title]")
         await h.text("/start")
         await h.callback(f"tp_pick:{template_id}")
         self.assertEqual(_live_text(h).strip(), ".")
@@ -264,14 +262,20 @@ class PlaceholderTests(unittest.TestCase):
     @scenario_test
     async def test_literal_slashes_are_not_replaced_by_placeholder(self, h):
         # Литеральный `//` — непустой видимый текст: заглушки быть не должно.
-        template_id = _seed_template(h, body="//")
+        template_id = _seed_template(h, content="//")
         await h.text("/start")
         await h.callback(f"tp_pick:{template_id}")
         self.assertEqual(_live_text(h).strip(), "//")
 
     @scenario_test
-    async def test_static_slashes_survive_empty_date_and_time(self, h):
-        """Литерал `//` остаётся, даже когда `[дата]`/`[время]` пусты."""
+    async def test_line_with_only_empty_date_and_time_is_hidden(self, h):
+        """
+        H2: строка, в которой есть кирпичики и все они пусты, скрывается.
+
+        Литерал `//` живёт в той же строке, что `[день]`/`[время]`, поэтому
+        не остаётся висеть без значений; заглушка `.` показывает, что
+        видимого текста нет.
+        """
         with h.session_factory() as session:
             get_or_create_user(session, DEFAULT_USER_ID, username="literal")
             for code, title, kind in (
@@ -290,25 +294,23 @@ class PlaceholderTests(unittest.TestCase):
                 session,
                 actor_telegram_user_id=DEFAULT_USER_ID,
                 name="Слэши",
-                header="",
-                body="[day] // [clock]",
-                footer="",
+                content="\n".join(p for p in ("", "[day] // [clock]", "") if p),
             )
             session.commit()
             template_id = template.template_id
 
         await h.text("/start")
         await h.callback(f"tp_pick:{template_id}")
-        self.assertIn("//", _live_text(h))
+        self.assertEqual(_live_text(h).strip(), ".")
         await h.callback(_callback(h, "aw_qskip"))
         await h.callback(_callback(h, "aw_qskip"))
-        # Литералы шаблона не удаляются: заглушки `.` нет.
-        self.assertIn("//", _live_text(h))
-        self.assertNotEqual(_live_text(h).strip(), ".")
+        self.assertEqual(_live_text(h).strip(), ".")
 
     @scenario_test
     async def test_skipped_bricks_keep_static_text_without_placeholder(self, h):
-        template_id = _seed_template(h, body="Событие | [title]")
+        # Постоянный текст — отдельной строкой: строка с пустым кирпичиком
+        # скрывается целиком и не тянет за собой соседний литерал.
+        template_id = _seed_template(h, content="Событие |\n[title]")
         await h.text("/start")
         await h.callback(f"tp_pick:{template_id}")
         await h.callback(_callback(h, "aw_qskip"))
@@ -316,7 +318,7 @@ class PlaceholderTests(unittest.TestCase):
 
     @scenario_test
     async def test_placeholder_never_lands_in_announcement_values(self, h):
-        template_id = _seed_template(h, body="[title]")
+        template_id = _seed_template(h, content="[title]")
         await h.text("/start")
         await h.callback(f"tp_pick:{template_id}")
         draft = _latest_draft(h)
@@ -329,7 +331,7 @@ class PlaceholderTests(unittest.TestCase):
 
     @scenario_test
     async def test_placeholder_disappears_after_value(self, h):
-        template_id = _seed_template(h, body="[title]")
+        template_id = _seed_template(h, content="[title]")
         await h.text("/start")
         await h.callback(f"tp_pick:{template_id}")
         self.assertEqual(_live_text(h).strip(), ".")
@@ -347,7 +349,7 @@ class RestartTests(unittest.TestCase):
 
     @scenario_test
     async def test_restart_restores_live_block_without_new_snapshot(self, h):
-        template_id = _seed_template(h, body="Анонс [title]")
+        template_id = _seed_template(h, content="Анонс [title]")
         await h.text("/start")
         await h.callback(f"tp_pick:{template_id}")
         await h.text("До рестарта")
@@ -399,9 +401,7 @@ class CalendarAndTimeShortcutTests(unittest.TestCase):
                 session,
                 actor_telegram_user_id=DEFAULT_USER_ID,
                 name="Дата и время",
-                header="",
-                body="[title] [day] [clock]",
-                footer="",
+                content="\n".join(p for p in ("", "[title] [day] [clock]", "") if p),
             )
             session.commit()
             return template.template_id
@@ -451,7 +451,7 @@ class PhotoStepTests(unittest.TestCase):
 
     @scenario_test
     async def test_last_brick_opens_photo_step_without_finish_button(self, h):
-        template_id = _seed_template(h, body="Анонс [title]")
+        template_id = _seed_template(h, content="Анонс [title]")
         await h.text("/start")
         await h.callback(f"tp_pick:{template_id}")
         await h.text("Значение")
@@ -470,7 +470,7 @@ class PhotoStepTests(unittest.TestCase):
 
     @scenario_test
     async def test_no_photos_finishes_the_announcement(self, h):
-        template_id = _seed_template(h, body="Анонс [title]")
+        template_id = _seed_template(h, content="Анонс [title]")
         await h.text("/start")
         await h.callback(f"tp_pick:{template_id}")
         await h.text("Значение")
@@ -491,7 +491,7 @@ class NoFinalizeButtonTests(unittest.TestCase):
 
     @scenario_test
     async def test_no_finish_button_on_question_screens(self, h):
-        template_id = _seed_template(h, body="[title]")
+        template_id = _seed_template(h, content="[title]")
         await h.text("/start")
         await h.callback(f"tp_pick:{template_id}")
         forbidden = ("Готово, получить пост", "Сформировать", "Опубликовать")
@@ -512,7 +512,7 @@ class HumorTests(unittest.TestCase):
 
     @scenario_test
     async def test_joke_is_not_in_the_live_announcement(self, h):
-        template_id = _seed_template(h, body="[title]")
+        template_id = _seed_template(h, content="[title]")
         await h.text("/start")
         await h.callback(f"tp_pick:{template_id}")
         joke = ui_humor.empty_announcement_joke()
@@ -523,7 +523,7 @@ class HumorTests(unittest.TestCase):
     @scenario_test
     async def test_joke_appears_in_the_service_screen_of_empty_announce(self, h):
         # Шаблон из одного кирпичика: после пропуска видимого текста нет.
-        template_id = _seed_template(h, body="[title]")
+        template_id = _seed_template(h, content="[title]")
         await h.text("/start")
         await h.callback(f"tp_pick:{template_id}")
         await h.callback(_callback(h, "aw_qskip"))
@@ -538,7 +538,7 @@ class HumorTests(unittest.TestCase):
 
     @scenario_test
     async def test_joke_absent_when_announcement_has_text(self, h):
-        template_id = _seed_template(h, body="[title]")
+        template_id = _seed_template(h, content="[title]")
         joke = ui_humor.empty_announcement_joke()
         await h.text("/start")
         await h.callback(f"tp_pick:{template_id}")
@@ -548,7 +548,7 @@ class HumorTests(unittest.TestCase):
 
     @scenario_test
     async def test_joke_never_reaches_delivered_post(self, h):
-        template_id = _seed_template(h, body="[title]")
+        template_id = _seed_template(h, content="[title]")
         await h.text("/start")
         await h.callback(f"tp_pick:{template_id}")
         await h.callback(_callback(h, "aw_qskip"))
@@ -564,7 +564,7 @@ class HumorTests(unittest.TestCase):
     @scenario_test
     async def test_empty_announcement_publishes_placeholder_not_joke(self, h):
         """§5.6: `publication_text` — реально отправленное, т.е. `.`, без шутки."""
-        template_id = _seed_template(h, body="[title]")
+        template_id = _seed_template(h, content="[title]")
         await h.text("/start")
         await h.callback(f"tp_pick:{template_id}")
         await h.callback(_callback(h, "aw_qskip"))

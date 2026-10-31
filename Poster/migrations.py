@@ -3210,6 +3210,380 @@ MIGRATION_23_PLACE_INVITE_LINKS = Migration(
 )
 
 
+# --- Версия 24: единый текст шаблона (Poster 2.3 H2) -----------------------
+#
+# Решение владельца: вместо трёх секций `header`/`body`/`footer` шаблон
+# хранит один канонический текст `content` и необязательный расширенный
+# `extended_content`. Пустые строки между блоками теперь часть самого текста,
+# поэтому автор видит ровно те переносы, которые сохранил. Дополнительные
+# кирпичики анонса потеряли `section`/`position`: кирпичик просто добавляет
+# строку в конец выбранного текста, а расширенный вариант выбирается по факту
+# наличия дополнительных кирпичиков.
+#
+# SQLite не умеет ни снимать CHECK, ни удалять колонки при включённых
+# триггерах «неизменяемо», поэтому пять таблиц перестраиваются. Проверенная
+# схема шагов (та же, что в миграции 16, но с детьми, которые тоже меняются):
+#   1) `PRAGMA defer_foreign_keys=ON`: ссылки `announcement_drafts` на
+#      пересоздаваемые таблицы проверяются в конце транзакции, когда новые
+#      строки уже вставлены с прежними ID. `PRAGMA foreign_keys=OFF` внутри
+#      транзакции `run_migrations` — no-op, поэтому он не используется;
+#   2-6) копии всех пяти таблиц (`CREATE TABLE *_backup AS SELECT *`);
+#   7-11) DROP детей, затем родителей (свои триггеры уходят вместе с
+#      таблицей, поэтому `DROP TRIGGER` не нужен);
+#   12-16) новая схема: `content` + `extended_content`, extras без
+#      `section`/`position`;
+#   17-25) индексы и триггеры неизменяемости — до вставки, чтобы строки
+#      проверялись новыми ограничениями;
+#   26-30) перенос строк с backfill текста и `extended_content = NULL`;
+#   31-35) удаление копий.
+#
+# Backfill склеивает прежние секции ровно так, как их склеивал рендер:
+# `header + "\n" + body + "\n" + footer`, но разделитель ставится только если
+# обе соседние части непустые (`.strip()`). Поэтому эталон v4, у которого
+# header кончается на `[адрес]`, а body/footer начинаются с `"\n"`, остаётся
+# побайтово прежним, а пустые секции не оставляют висячих пустых строк.
+# Строка из одних пробельных секций сохраняется как есть (иначе новый
+# CHECK `content <> ''` сделал бы миграцию невыполнимой).
+#
+# Всё выполняется одной транзакцией `run_migrations`: сбой любого шага
+# оставляет базу нетронутой. Откат уже применённой миграции — только
+# восстановление WAL-aware копии, которую `run_migrations` создаёт перед
+# первым ожидающим DDL (см. `docs/migrations.md`); обратной миграции нет,
+# потому что старые колонки после переноса не восстанавливаются.
+
+_M24_CONTENT_BACKFILL = """
+            CASE
+                WHEN trim(header) = '' AND trim(body) = '' AND trim(footer) = ''
+                THEN header || body || footer
+                ELSE trim(header)
+                    || CASE
+                           WHEN trim(header) <> ''
+                                AND (trim(body) <> '' OR trim(footer) <> '')
+                           THEN char(10) ELSE '' END
+                    || body
+                    || CASE
+                           WHEN trim(body) <> '' AND trim(footer) <> ''
+                           THEN char(10) ELSE '' END
+                    || footer
+            END
+"""
+
+MIGRATION_24_TEMPLATE_CONTENT = Migration(
+    version=24,
+    name="template_content_and_extras_without_sections",
+    statements=(
+        # Ссылки drafts → пересоздаваемые таблицы проверяются в конце
+        # транзакции: ID сохраняются, поэтому проверка пройдёт.
+        "PRAGMA defer_foreign_keys=ON",
+        # Копии делаются первыми: DROP родителя каскадно чистит детей, но их
+        # строки уже сохранены.
+        "CREATE TABLE template_snapshot_bricks_backup AS SELECT * FROM template_snapshot_bricks",
+        "CREATE TABLE template_snapshots_backup AS SELECT * FROM template_snapshots",
+        "CREATE TABLE template_version_bricks_backup AS SELECT * FROM template_version_bricks",
+        "CREATE TABLE template_versions_backup AS SELECT * FROM template_versions",
+        "CREATE TABLE announcement_extras_backup AS SELECT * FROM announcement_extras",
+        # Дети раньше родителей: FK-действия не мешают, а имена триггеров
+        # освобождаются вместе с таблицами.
+        "DROP TABLE template_snapshot_bricks",
+        "DROP TABLE template_snapshots",
+        "DROP TABLE template_version_bricks",
+        "DROP TABLE template_versions",
+        "DROP TABLE announcement_extras",
+        # Текст версии — одна строка; расширение либо отсутствует, либо
+        # непустое. История по-прежнему неизменяема: правка добавляет версию.
+        """
+        CREATE TABLE template_versions (
+            id INTEGER NOT NULL PRIMARY KEY,
+            template_id INTEGER NOT NULL,
+            version INTEGER NOT NULL,
+            content TEXT NOT NULL,
+            extended_content TEXT,
+            created_by_user_id INTEGER,
+            created_at DATETIME NOT NULL,
+            builtin_version INTEGER,
+            CONSTRAINT uq_template_versions_template_version
+                UNIQUE (template_id, version),
+            CONSTRAINT ck_template_versions_version CHECK (version >= 1),
+            CONSTRAINT ck_template_versions_builtin_version
+                CHECK (builtin_version IS NULL OR builtin_version >= 1),
+            CONSTRAINT ck_template_versions_content_not_empty
+                CHECK (content <> ''),
+            CONSTRAINT ck_template_versions_extended_not_empty
+                CHECK (extended_content IS NULL OR extended_content <> ''),
+            CONSTRAINT fk_template_versions_template_id
+                FOREIGN KEY (template_id) REFERENCES templates (id)
+                ON DELETE CASCADE,
+            CONSTRAINT fk_template_versions_created_by_user_id
+                FOREIGN KEY (created_by_user_id) REFERENCES users (id)
+                ON DELETE SET NULL
+        )
+        """,
+        """
+        CREATE TABLE template_version_bricks (
+            template_version_id INTEGER NOT NULL,
+            brick_id INTEGER NOT NULL,
+            code TEXT NOT NULL DEFAULT '',
+            PRIMARY KEY (template_version_id, brick_id),
+            CONSTRAINT fk_template_version_bricks_version
+                FOREIGN KEY (template_version_id)
+                REFERENCES template_versions (id) ON DELETE CASCADE,
+            CONSTRAINT fk_template_version_bricks_brick
+                FOREIGN KEY (brick_id) REFERENCES bricks (id)
+                ON DELETE RESTRICT
+        )
+        """,
+        # Снимок копирует оба текста: расширение тоже должно пережить
+        # изменение исходного шаблона.
+        """
+        CREATE TABLE template_snapshots (
+            id INTEGER NOT NULL PRIMARY KEY,
+            owner_user_id INTEGER NOT NULL,
+            source_template_id INTEGER NOT NULL,
+            source_template_version INTEGER NOT NULL,
+            source_kind TEXT NOT NULL,
+            source_name TEXT,
+            source_place_id INTEGER,
+            source_owner_user_id INTEGER,
+            content TEXT NOT NULL,
+            extended_content TEXT,
+            builtin_version INTEGER,
+            idempotency_key TEXT,
+            created_at DATETIME NOT NULL,
+            CONSTRAINT fk_template_snapshots_owner_user_id
+                FOREIGN KEY (owner_user_id) REFERENCES users (id)
+                ON DELETE RESTRICT,
+            CONSTRAINT fk_template_snapshots_source_version
+                FOREIGN KEY (source_template_id, source_template_version)
+                REFERENCES template_versions (template_id, version)
+                ON DELETE RESTRICT,
+            CONSTRAINT fk_template_snapshots_source_place_id
+                FOREIGN KEY (source_place_id) REFERENCES places (id)
+                ON DELETE RESTRICT,
+            CONSTRAINT fk_template_snapshots_source_owner_user_id
+                FOREIGN KEY (source_owner_user_id) REFERENCES users (id)
+                ON DELETE SET NULL,
+            CONSTRAINT ck_template_snapshots_source_kind
+                CHECK (source_kind IN ('standard', 'personal')),
+            CONSTRAINT ck_template_snapshots_source_version
+                CHECK (source_template_version >= 1),
+            CONSTRAINT ck_template_snapshots_builtin_version
+                CHECK (builtin_version IS NULL OR builtin_version >= 1),
+            CONSTRAINT ck_template_snapshots_content_not_empty
+                CHECK (content <> ''),
+            CONSTRAINT ck_template_snapshots_extended_not_empty
+                CHECK (extended_content IS NULL OR extended_content <> ''),
+            CONSTRAINT ck_template_snapshots_idempotency_key
+                CHECK (
+                    idempotency_key IS NULL
+                    OR length(trim(idempotency_key)) > 0
+                )
+        )
+        """,
+        """
+        CREATE TABLE template_snapshot_bricks (
+            template_snapshot_id INTEGER NOT NULL,
+            brick_id INTEGER NOT NULL,
+            code TEXT NOT NULL DEFAULT '',
+            PRIMARY KEY (template_snapshot_id, brick_id),
+            CONSTRAINT fk_template_snapshot_bricks_snapshot
+                FOREIGN KEY (template_snapshot_id)
+                REFERENCES template_snapshots (id) ON DELETE CASCADE,
+            CONSTRAINT fk_template_snapshot_bricks_brick
+                FOREIGN KEY (brick_id) REFERENCES bricks (id)
+                ON DELETE RESTRICT
+        )
+        """,
+        # Дополнительный кирпичик больше не выбирает секцию и позицию:
+        # он добавляет строку в конец выбранного текста анонса.
+        """
+        CREATE TABLE announcement_extras (
+            id INTEGER NOT NULL PRIMARY KEY,
+            draft_id INTEGER NOT NULL,
+            brick_id INTEGER NOT NULL,
+            occurrence INTEGER NOT NULL DEFAULT 1,
+            created_at DATETIME NOT NULL,
+            updated_at DATETIME NOT NULL,
+            CONSTRAINT ck_announcement_extras_occurrence
+                CHECK (occurrence >= 1),
+            CONSTRAINT fk_announcement_extras_draft
+                FOREIGN KEY (draft_id) REFERENCES announcement_drafts (id)
+                ON DELETE CASCADE,
+            CONSTRAINT fk_announcement_extras_brick
+                FOREIGN KEY (brick_id) REFERENCES bricks (id)
+                ON DELETE RESTRICT,
+            CONSTRAINT uq_announcement_extras_draft_brick_occurrence
+                UNIQUE (draft_id, brick_id, occurrence)
+        )
+        """,
+        # Индексы восстанавливаются до вставки: уникальность проверяется
+        # переносимыми строками.
+        """
+        CREATE INDEX ix_template_version_bricks_brick_id
+            ON template_version_bricks (brick_id)
+        """,
+        """
+        CREATE UNIQUE INDEX ux_template_version_bricks_version_code
+            ON template_version_bricks (template_version_id, code)
+        """,
+        """
+        CREATE UNIQUE INDEX ux_template_snapshots_idempotency
+            ON template_snapshots (owner_user_id, idempotency_key)
+            WHERE idempotency_key IS NOT NULL
+        """,
+        """
+        CREATE INDEX ix_template_snapshots_owner_created
+            ON template_snapshots (owner_user_id, created_at)
+        """,
+        """
+        CREATE INDEX ix_template_snapshots_source
+            ON template_snapshots (source_template_id, source_template_version)
+        """,
+        """
+        CREATE INDEX ix_template_snapshot_bricks_brick_id
+            ON template_snapshot_bricks (brick_id)
+        """,
+        """
+        CREATE UNIQUE INDEX ux_template_snapshot_bricks_snapshot_code
+            ON template_snapshot_bricks (template_snapshot_id, code)
+        """,
+        """
+        CREATE INDEX ix_announcement_extras_draft
+            ON announcement_extras (draft_id)
+        """,
+        """
+        CREATE INDEX ix_announcement_extras_brick
+            ON announcement_extras (brick_id)
+        """,
+        # Триггеры неизменяемости пересоздаются дословно: смысл прежний,
+        # меняется только состав колонок extras.
+        """
+        CREATE TRIGGER trg_template_versions_no_update
+        BEFORE UPDATE ON template_versions
+        FOR EACH ROW
+        BEGIN
+            SELECT RAISE(ABORT, 'template versions are immutable');
+        END
+        """,
+        """
+        CREATE TRIGGER trg_template_versions_no_delete
+        BEFORE DELETE ON template_versions
+        FOR EACH ROW
+        WHEN EXISTS (
+            SELECT 1 FROM templates WHERE id = OLD.template_id
+        )
+        BEGIN
+            SELECT RAISE(ABORT, 'template versions cannot be deleted');
+        END
+        """,
+        """
+        CREATE TRIGGER trg_template_version_bricks_no_update
+        BEFORE UPDATE ON template_version_bricks
+        FOR EACH ROW
+        BEGIN
+            SELECT RAISE(ABORT, 'template bindings are immutable');
+        END
+        """,
+        """
+        CREATE TRIGGER trg_template_version_bricks_no_delete
+        BEFORE DELETE ON template_version_bricks
+        FOR EACH ROW
+        WHEN EXISTS (
+            SELECT 1 FROM template_versions
+            WHERE id = OLD.template_version_id
+        )
+        BEGIN
+            SELECT RAISE(ABORT, 'template bindings cannot be deleted');
+        END
+        """,
+        """
+        CREATE TRIGGER trg_template_snapshots_no_update
+        BEFORE UPDATE ON template_snapshots
+        FOR EACH ROW
+        BEGIN
+            SELECT RAISE(ABORT, 'template snapshots are immutable');
+        END
+        """,
+        """
+        CREATE TRIGGER trg_template_snapshots_no_delete
+        BEFORE DELETE ON template_snapshots
+        FOR EACH ROW
+        BEGIN
+            SELECT RAISE(ABORT, 'template snapshots cannot be deleted');
+        END
+        """,
+        """
+        CREATE TRIGGER trg_template_snapshot_bricks_no_update
+        BEFORE UPDATE ON template_snapshot_bricks
+        FOR EACH ROW
+        BEGIN
+            SELECT RAISE(ABORT, 'snapshot bindings are immutable');
+        END
+        """,
+        """
+        CREATE TRIGGER trg_template_snapshot_bricks_no_delete
+        BEFORE DELETE ON template_snapshot_bricks
+        FOR EACH ROW
+        BEGIN
+            SELECT RAISE(ABORT, 'snapshot bindings cannot be deleted');
+        END
+        """,
+        """
+        CREATE TRIGGER trg_announcement_extras_identity_immutable
+        BEFORE UPDATE OF draft_id, brick_id, occurrence, created_at
+        ON announcement_extras
+        FOR EACH ROW
+        WHEN NEW.draft_id IS NOT OLD.draft_id
+            OR NEW.brick_id IS NOT OLD.brick_id
+            OR NEW.occurrence IS NOT OLD.occurrence
+            OR NEW.created_at IS NOT OLD.created_at
+        BEGIN
+            SELECT RAISE(ABORT, 'announcement extra identity is immutable');
+        END
+        """,
+        # Перенос строк: обе таблицы текстов используют одну формулу.
+        f"""
+        INSERT INTO template_versions (
+            id, template_id, version, content, extended_content,
+            created_by_user_id, created_at, builtin_version
+        )
+        SELECT
+            id, template_id, version,
+            {_M24_CONTENT_BACKFILL},
+            NULL, created_by_user_id, created_at, builtin_version
+        FROM template_versions_backup
+        """,
+        f"""
+        INSERT INTO template_snapshots (
+            id, owner_user_id, source_template_id, source_template_version,
+            source_kind, source_name, source_place_id, source_owner_user_id,
+            content, extended_content, builtin_version, idempotency_key,
+            created_at
+        )
+        SELECT
+            id, owner_user_id, source_template_id, source_template_version,
+            source_kind, source_name, source_place_id, source_owner_user_id,
+            {_M24_CONTENT_BACKFILL},
+            NULL, builtin_version, idempotency_key, created_at
+        FROM template_snapshots_backup
+        """,
+        "INSERT INTO template_version_bricks SELECT * FROM template_version_bricks_backup",
+        "INSERT INTO template_snapshot_bricks SELECT * FROM template_snapshot_bricks_backup",
+        """
+        INSERT INTO announcement_extras (
+            id, draft_id, brick_id, occurrence, created_at, updated_at
+        )
+        SELECT id, draft_id, brick_id, occurrence, created_at, updated_at
+        FROM announcement_extras_backup
+        """,
+        "DROP TABLE template_versions_backup",
+        "DROP TABLE template_version_bricks_backup",
+        "DROP TABLE template_snapshots_backup",
+        "DROP TABLE template_snapshot_bricks_backup",
+        "DROP TABLE announcement_extras_backup",
+    ),
+)
+
+
 DEFAULT_MIGRATIONS: tuple[Migration, ...] = (
     MIGRATION_1_USERS_PLACES,
     MIGRATION_2_PLACE_CONTACTS_UI,
@@ -3234,6 +3608,7 @@ DEFAULT_MIGRATIONS: tuple[Migration, ...] = (
     MIGRATION_21_PLACE_CITY,
     MIGRATION_22_BUILTIN_TEMPLATES_V4,
     MIGRATION_23_PLACE_INVITE_LINKS,
+    MIGRATION_24_TEMPLATE_CONTENT,
 )
 
 LATEST_VERSION = DEFAULT_MIGRATIONS[-1].version if DEFAULT_MIGRATIONS else 0

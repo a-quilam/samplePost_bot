@@ -23,19 +23,15 @@ from announcement_store import (
     confirm_announcement_place,
     get_announcement_draft,
     list_announcement_drafts,
-    move_announcement_extra,
     remove_announcement_extra,
     save_announcement_value,
     set_announcement_stage,
     start_announcement_wizard,
 )
 from announcement_wizard import (
-    EXTRA_POSITION_END,
-    EXTRA_POSITION_START,
     AnnouncementActorError,
     AnnouncementBrickError,
     AnnouncementConflictError,
-    AnnouncementError,
     AnnouncementNotFoundError,
     AnnouncementStageError,
     AnnouncementValueError,
@@ -48,9 +44,9 @@ from template_parser import BrickNode, FormatNode, LinkNode
 from template_store import (
     create_personal_template,
     get_accessible_template,
-    update_template_body,
-    update_template_header,
+    update_template_content,
 )
+from template_types import TEMPLATE_CONTENT, TEMPLATE_EXTENDED_CONTENT
 from tests.stage23_helpers import OWNER_TG
 from tests.stage27_helpers import (
     OTHER_TG,
@@ -191,7 +187,7 @@ class PlaceSelectionTests(AnnouncementDatabaseTestCase):
 class TemplateSelectionTests(AnnouncementDatabaseTestCase):
     """Снимок копирует версию и привязки, но не живые правки шаблона."""
 
-    def test_standard_snapshot_copies_exact_sections_and_bindings(self) -> None:
+    def test_standard_snapshot_copies_exact_text_and_bindings(self) -> None:
         draft = self.start_at_questions()
         snapshot = draft.template_snapshot
         self.assertIsNotNone(snapshot)
@@ -204,11 +200,7 @@ class TemplateSelectionTests(AnnouncementDatabaseTestCase):
         self.assertEqual(snapshot.source_kind, "standard")
         self.assertEqual(snapshot.source_place_id, self.place.id)
         self.assertEqual(
-            snapshot.sections["header"], self.standard.current_version.header
-        )
-        self.assertEqual(snapshot.sections["body"], self.standard.current_version.body)
-        self.assertEqual(
-            snapshot.sections["footer"], self.standard.current_version.footer
+            snapshot.texts[TEMPLATE_CONTENT], self.standard.current_version.content
         )
         self.assertEqual(
             set(snapshot.brick_ids),
@@ -220,11 +212,10 @@ class TemplateSelectionTests(AnnouncementDatabaseTestCase):
     def test_source_template_edits_do_not_change_started_announcement(self) -> None:
         draft = self.start_at_questions()
         assert draft.template_snapshot is not None
-        old_header = draft.template_snapshot.sections["header"]
-        old_body = draft.template_snapshot.sections["body"]
+        old_content = draft.template_snapshot.texts[TEMPLATE_CONTENT]
         old_ids = draft.template_snapshot.brick_ids
 
-        update_template_header(
+        update_template_content(
             self.session,
             actor_telegram_user_id=OWNER_TG,
             template_id=self.standard.template_id,
@@ -235,7 +226,7 @@ class TemplateSelectionTests(AnnouncementDatabaseTestCase):
             self.session, OWNER_TG, self.standard.template_id
         )
         assert refreshed is not None
-        update_template_body(
+        update_template_content(
             self.session,
             actor_telegram_user_id=OWNER_TG,
             template_id=self.standard.template_id,
@@ -249,8 +240,7 @@ class TemplateSelectionTests(AnnouncementDatabaseTestCase):
             draft_id=draft.draft_id,
         )
         assert stored.template_snapshot is not None
-        self.assertEqual(stored.template_snapshot.sections["header"], old_header)
-        self.assertEqual(stored.template_snapshot.sections["body"], old_body)
+        self.assertEqual(stored.template_snapshot.texts[TEMPLATE_CONTENT], old_content)
         self.assertEqual(stored.template_snapshot.brick_ids, old_ids)
         self.assertEqual(stored.template_version, 1)
         self.assertEqual(stored.revision, draft.revision)
@@ -372,9 +362,7 @@ class TemplateSelectionTests(AnnouncementDatabaseTestCase):
             self.session,
             actor_telegram_user_id=OWNER_TG,
             name="Шаблон с кодом",
-            header="",
-            body="[старый]",
-            footer="",
+            content="\n".join(p for p in ("", "[старый]", "") if p),
         )
         draft = self.start_at_questions(template_id=template.template_id)
         result = update_personal_brick(
@@ -543,9 +531,7 @@ class ValueTests(AnnouncementDatabaseTestCase):
             self.session,
             actor_telegram_user_id=OWNER_TG,
             name="Архивный шаблон",
-            header="",
-            body="[архивный]",
-            footer="",
+            content="\n".join(p for p in ("", "[архивный]", "") if p),
         )
         archived_draft = self.start_at_questions(template_id=template.template_id)
         self.session.execute(
@@ -588,9 +574,11 @@ class ValueTests(AnnouncementDatabaseTestCase):
             self.session,
             actor_telegram_user_id=OWNER_TG,
             name="Все типы",
-            header="",
-            body=" ".join(f"[{code}]" for code, _, _, _ in specs),
-            footer="",
+            content="\n".join(
+                p
+                for p in ("", " ".join(f"[{code}]" for code, _, _, _ in specs), "")
+                if p
+            ),
         )
         draft = self.start_at_questions(template_id=template.template_id)
         revision = draft.revision
@@ -634,9 +622,7 @@ class ValueTests(AnnouncementDatabaseTestCase):
             self.session,
             actor_telegram_user_id=OWNER_TG,
             name="Пустое",
-            header="",
-            body="[необязательный]",
-            footer="",
+            content="\n".join(p for p in ("", "[необязательный]", "") if p),
         )
         draft = self.start_at_questions(template_id=template.template_id)
         self.assertEqual(
@@ -680,41 +666,35 @@ class ExtraTests(AnnouncementDatabaseTestCase):
         self.personal_extra = self.make_personal_brick(self.owner, "доп_личный")
         self.other_personal = self.make_personal_brick(self.other, "чужой_доп")
 
-    def test_add_in_three_sections_and_render_only_this_draft(self) -> None:
+    def test_add_extras_render_only_this_draft(self) -> None:
         draft = self.start_at_questions()
         snapshot_before = draft.template_snapshot
         assert snapshot_before is not None
 
-        header = add_announcement_extra(
+        first = add_announcement_extra(
             self.session,
             actor_telegram_user_id=OWNER_TG,
             draft_id=draft.draft_id,
             brick_id=self.place_extra,
-            section="header",
-            position=EXTRA_POSITION_START,
-            value="Шапка",
+            value="Первый",
             expected_revision=draft.revision,
         )
-        body = add_announcement_extra(
+        second_extra = add_announcement_extra(
             self.session,
             actor_telegram_user_id=OWNER_TG,
             draft_id=draft.draft_id,
             brick_id=self.personal_extra,
-            section="body",
-            position=EXTRA_POSITION_END,
-            value="Тело",
-            expected_revision=header.revision,
+            value="Второй",
+            expected_revision=first.revision,
         )
-        # Третий кирпичик — тот же личный, но во втором анонсе он независим.
+        # Те же кирпичики во втором анонсе независимы от первого.
         second = self.start_at_questions()
-        second_extra = add_announcement_extra(
+        other_draft_extra = add_announcement_extra(
             self.session,
             actor_telegram_user_id=OWNER_TG,
             draft_id=second.draft_id,
             brick_id=self.place_extra,
-            section="footer",
-            position=EXTRA_POSITION_END,
-            value="Подвал",
+            value="Чужой анонс",
             expected_revision=second.revision,
         )
 
@@ -726,40 +706,51 @@ class ExtraTests(AnnouncementDatabaseTestCase):
         self.assertEqual(len(stored.extras), 2)
         self.assertEqual(stored.stage, WizardStage.EXTRAS)
         assert stored.template_snapshot is not None
-        self.assertEqual(stored.template_snapshot.sections, snapshot_before.sections)
+        self.assertEqual(stored.template_snapshot.texts, snapshot_before.texts)
         self.assertEqual(stored.template_snapshot.bindings, snapshot_before.bindings)
 
         payload = build_announcement_render_payload(
             self.session,
             actor_telegram_user_id=OWNER_TG,
-            draft_id=body.draft_id,
-        )
-        header_nodes = brick_nodes(payload.tokens_by_section["header"])
-        body_nodes = brick_nodes(payload.tokens_by_section["body"])
-        # Дополнительный кирпичик вставлен в начало шапки перед базовыми.
-        self.assertEqual(header_nodes[0].code, "доп_места")
-        self.assertEqual(body_nodes[-1].code, "доп_личный")
-        self.assertEqual(payload.values_by_id[self.place_extra], "Шапка")
-        self.assertEqual(payload.values_by_id[self.personal_extra], "Тело")
-
-        second_payload = build_announcement_render_payload(
-            self.session,
-            actor_telegram_user_id=OWNER_TG,
             draft_id=second_extra.draft_id,
         )
-        footer_nodes = brick_nodes(second_payload.tokens_by_section["footer"])
-        self.assertEqual(footer_nodes[-1].code, "доп_места")
-        self.assertNotIn(self.personal_extra, second_payload.values_by_id)
+        # Дополнительные кирпичики — строки в конце расширенного текста.
+        self.assertTrue(payload.use_extended)
+        extended_nodes = brick_nodes(payload.tokens_by_text[TEMPLATE_EXTENDED_CONTENT])
+        self.assertEqual(
+            [node.code for node in extended_nodes[-2:]], ["доп_места", "доп_личный"]
+        )
+        # Основа расширенного текста — тексты снимка плюс строки extras.
+        base_nodes = brick_nodes(snapshot_before.texts[TEMPLATE_CONTENT])
+        self.assertEqual(
+            extended_nodes[: len(base_nodes)],
+            base_nodes,
+        )
+        self.assertEqual(payload.values_by_id[self.place_extra], "Первый")
+        self.assertEqual(payload.values_by_id[self.personal_extra], "Второй")
+
+        other_payload = build_announcement_render_payload(
+            self.session,
+            actor_telegram_user_id=OWNER_TG,
+            draft_id=other_draft_extra.draft_id,
+        )
+        other_nodes = brick_nodes(
+            other_payload.tokens_by_text[TEMPLATE_EXTENDED_CONTENT]
+        )
+        self.assertEqual(other_nodes[-1].code, "доп_места")
+        self.assertNotIn(self.personal_extra, other_payload.values_by_id)
+        self.assertEqual(other_payload.values_by_id[self.place_extra], "Чужой анонс")
 
     def test_add_rejects_snapshot_duplicate_and_inaccessible_bricks(self) -> None:
         draft = self.start_at_questions()
+        assert draft.template_snapshot is not None
+        in_snapshot = draft.template_snapshot.brick_ids[0]
         with self.assertRaises(AnnouncementBrickError):
             add_announcement_extra(
                 self.session,
                 actor_telegram_user_id=OWNER_TG,
                 draft_id=draft.draft_id,
                 brick_id=1,
-                section="body",
             )
         with self.assertRaises(AnnouncementBrickError):
             add_announcement_extra(
@@ -767,15 +758,14 @@ class ExtraTests(AnnouncementDatabaseTestCase):
                 actor_telegram_user_id=OWNER_TG,
                 draft_id=draft.draft_id,
                 brick_id=self.other_personal,
-                section="body",
             )
-        with self.assertRaises(AnnouncementError):
+        with self.assertRaises(AnnouncementBrickError):
+            # Кирпичик уже входит в выбранный шаблон.
             add_announcement_extra(
                 self.session,
                 actor_telegram_user_id=OWNER_TG,
                 draft_id=draft.draft_id,
-                brick_id=self.place_extra,
-                section="middle",
+                brick_id=in_snapshot,
             )
 
         added = add_announcement_extra(
@@ -783,7 +773,6 @@ class ExtraTests(AnnouncementDatabaseTestCase):
             actor_telegram_user_id=OWNER_TG,
             draft_id=draft.draft_id,
             brick_id=self.place_extra,
-            section="body",
             expected_revision=draft.revision,
         )
         with self.assertRaises(AnnouncementBrickError):
@@ -792,50 +781,41 @@ class ExtraTests(AnnouncementDatabaseTestCase):
                 actor_telegram_user_id=OWNER_TG,
                 draft_id=draft.draft_id,
                 brick_id=self.place_extra,
-                section="body",
                 expected_revision=added.revision,
             )
 
-    def test_move_and_remove_extra_keep_value_semantics(self) -> None:
+    def test_remove_extra_keeps_value_semantics(self) -> None:
         draft = self.start_at_questions()
         added = add_announcement_extra(
             self.session,
             actor_telegram_user_id=OWNER_TG,
             draft_id=draft.draft_id,
             brick_id=self.place_extra,
-            section="header",
-            position=EXTRA_POSITION_START,
             value="Значение",
             expected_revision=draft.revision,
         )
         extra = added.extras[0]
-        moved = move_announcement_extra(
-            self.session,
-            actor_telegram_user_id=OWNER_TG,
-            draft_id=draft.draft_id,
-            extra_id=extra.extra_id,
-            section="footer",
-            position=EXTRA_POSITION_END,
-            expected_revision=added.revision,
-        )
-        self.assertEqual(moved.extras[0].section, "footer")
-        self.assertEqual(moved.extras[0].position, EXTRA_POSITION_END)
+        self.assertEqual(extra.code, "доп_места")
+        added_value = added.value_for(self.place_extra)
+        self.assertIsNotNone(added_value)
+        assert added_value is not None
+        self.assertEqual(added_value.payload, {"text": "Значение"})
         payload = build_announcement_render_payload(
             self.session,
             actor_telegram_user_id=OWNER_TG,
             draft_id=draft.draft_id,
         )
-        header_nodes = brick_nodes(payload.tokens_by_section["header"])
-        self.assertNotIn("доп_места", [node.code for node in header_nodes])
-        footer_nodes = brick_nodes(payload.tokens_by_section["footer"])
-        self.assertEqual(footer_nodes[-1].code, "доп_места")
+        self.assertTrue(payload.use_extended)
+        extended_nodes = brick_nodes(payload.tokens_by_text[TEMPLATE_EXTENDED_CONTENT])
+        self.assertEqual(extended_nodes[-1].code, "доп_места")
+        self.assertEqual(payload.values_by_id[self.place_extra], "Значение")
 
         removed = remove_announcement_extra(
             self.session,
             actor_telegram_user_id=OWNER_TG,
             draft_id=draft.draft_id,
             extra_id=extra.extra_id,
-            expected_revision=moved.revision,
+            expected_revision=added.revision,
         )
         self.assertEqual(removed.extras, ())
         self.assertIsNone(removed.value_for(self.place_extra))
@@ -844,6 +824,8 @@ class ExtraTests(AnnouncementDatabaseTestCase):
             actor_telegram_user_id=OWNER_TG,
             draft_id=draft.draft_id,
         )
+        self.assertFalse(payload.use_extended)
+        self.assertNotIn(TEMPLATE_EXTENDED_CONTENT, payload.tokens_by_text)
         self.assertNotIn(self.place_extra, payload.values_by_id)
 
     def test_archived_extra_is_rejected(self) -> None:
@@ -859,7 +841,6 @@ class ExtraTests(AnnouncementDatabaseTestCase):
                 actor_telegram_user_id=OWNER_TG,
                 draft_id=draft.draft_id,
                 brick_id=self.place_extra,
-                section="body",
             )
         self.assertEqual(
             get_announcement_draft(
@@ -890,7 +871,6 @@ class RestartAndAccessTests(AnnouncementDatabaseTestCase):
             actor_telegram_user_id=OWNER_TG,
             draft_id=draft.draft_id,
             brick_id=self.make_place_brick("после_старта"),
-            section="body",
             value="доп",
             expected_revision=saved.revision,
         )
@@ -960,7 +940,6 @@ class RestartAndAccessTests(AnnouncementDatabaseTestCase):
                 actor_telegram_user_id=OWNER_TG,
                 draft_id=draft.draft_id,
                 brick_id=self.make_place_brick("конфликт"),
-                section="body",
                 expected_revision=draft.revision,
             )
         self.assertEqual(
@@ -979,7 +958,6 @@ class RestartAndAccessTests(AnnouncementDatabaseTestCase):
             actor_telegram_user_id=OWNER_TG,
             draft_id=draft.draft_id,
             brick_id=self.make_place_brick("чужой_доступ"),
-            section="body",
             expected_revision=draft.revision,
         )
         extra_id = added.extras[0].extra_id
@@ -1007,14 +985,6 @@ class RestartAndAccessTests(AnnouncementDatabaseTestCase):
                 actor_telegram_user_id=OTHER_TG,
                 draft_id=draft.draft_id,
                 brick_id=self.make_place_brick("чужой_доп"),
-                section="body",
-            ),
-            lambda: move_announcement_extra(
-                self.session,
-                actor_telegram_user_id=OTHER_TG,
-                draft_id=draft.draft_id,
-                extra_id=extra_id,
-                section="footer",
             ),
             lambda: remove_announcement_extra(
                 self.session,

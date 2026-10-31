@@ -214,7 +214,13 @@ class SkippedBricksTests(unittest.TestCase):
             self.assertIn("<b>12.07.2027 // </b>", rendered)
 
     @scenario_test
-    async def test_only_title_is_not_empty_and_keeps_separator(self, h):
+    async def test_only_title_hides_line_with_empty_date_and_time(self, h):
+        """
+        H2: строка с `[дата] // [время_начала]` скрывается целиком.
+
+        Оба кирпичика пусты, поэтому висячего литерала `//` и пустой
+        разметки в рендере нет — остаётся только непустая строка заголовка.
+        """
         await h.text("/start")
         with h.session_factory() as session:
             template = list_personal_templates(session, DEFAULT_USER_ID)[0]
@@ -222,8 +228,9 @@ class SkippedBricksTests(unittest.TestCase):
             rendered = _render_personal(
                 h, session, template.template_id, {title_id: "Только заголовок"}
             )
-        self.assertTrue(rendered.startswith("<b>Только заголовок</b>"))
-        self.assertIn("//", rendered)
+        self.assertEqual(rendered, "<b>Только заголовок</b>")
+        self.assertNotIn("//", rendered)
+        self.assertNotIn("<b></b>", rendered)
         self.assertNotEqual(rendered, ".")
 
     @scenario_test
@@ -256,9 +263,7 @@ class EmptyAnnouncementTests(unittest.TestCase):
                 session,
                 actor_telegram_user_id=DEFAULT_USER_ID,
                 name="Пустой",
-                header="",
-                body="[описание]",
-                footer="",
+                content="\n".join(p for p in ("", "[описание]", "") if p),
             )
             session.commit()
             draft = start_announcement_wizard(
@@ -289,9 +294,7 @@ class EmptyAnnouncementTests(unittest.TestCase):
                 session,
                 actor_telegram_user_id=DEFAULT_USER_ID,
                 name="Очищаемый",
-                header="",
-                body="[описание]",
-                footer="",
+                content="\n".join(p for p in ("", "[описание]", "") if p),
             )
             session.commit()
             draft = start_announcement_wizard(

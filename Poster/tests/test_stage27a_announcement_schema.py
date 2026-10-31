@@ -34,8 +34,8 @@ from tests.stage27_helpers import AnnouncementDatabaseTestCase
 class AnnouncementWizardMigrationTests(AnnouncementDatabaseTestCase):
     """Миграция 12 и ограничения новых таблиц."""
 
-    def test_latest_migration_is_seventeen_and_follows_brick_proposals(self) -> None:
-        self.assertEqual(LATEST_VERSION, 23)
+    def test_latest_migration_is_twenty_four(self) -> None:
+        self.assertEqual(LATEST_VERSION, 24)
         self.assertEqual(
             [(migration.version, migration.name) for migration in DEFAULT_MIGRATIONS],
             [
@@ -62,6 +62,7 @@ class AnnouncementWizardMigrationTests(AnnouncementDatabaseTestCase):
                 (21, "place_city"),
                 (22, "builtin_templates_v4"),
                 (23, "place_invite_links"),
+                (24, "template_content_and_extras_without_sections"),
             ],
         )
         self.assertEqual(run_migrations(self.engine), LATEST_VERSION)
@@ -148,8 +149,6 @@ class AnnouncementWizardMigrationTests(AnnouncementDatabaseTestCase):
                     "id",
                     "draft_id",
                     "brick_id",
-                    "section",
-                    "position",
                     "occurrence",
                     "created_at",
                     "updated_at",
@@ -281,9 +280,9 @@ class AnnouncementWizardMigrationTests(AnnouncementDatabaseTestCase):
                 connection.execute(
                     text(
                         "INSERT INTO announcement_extras "
-                        "(draft_id, brick_id, section, position, occurrence, "
+                        "(draft_id, brick_id, occurrence, "
                         "created_at, updated_at) VALUES "
-                        "(:draft_id, 2, 'middle', 'end', 1, "
+                        "(:draft_id, 2, 0, "
                         "'2026-01-01 00:00:00', '2026-01-01 00:00:00')"
                     ),
                     {"draft_id": draft.draft_id},

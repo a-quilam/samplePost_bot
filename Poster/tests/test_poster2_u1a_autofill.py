@@ -135,14 +135,17 @@ class PlaceAutofillTests(AutofillTestCase):
         self.assertIn(
             '<b><a href="https://example.com/place">Дом культуры</a></b>', html
         )
-        # Адрес отдельной нежирной строкой сразу под площадкой.
-        self.assertIn("\nул. Ленина, 1\n", html)
+        # Адрес — отдельная нежирная строка сразу под площадкой и
+        # последняя видимая: после неё идёт пустая строка и контакт.
+        lines = html.split("\n")
+        self.assertEqual(lines[1], "ул. Ленина, 1")
         # Город в текст не попадает: `[город]` не входит в стандарт v4.
         self.assertNotIn("Москва", html)
 
-        # Дата/время пусты: мастер не подставляет выдуманные значения.
-        lines = html.split("\n")
-        self.assertEqual(lines[2], "<b> // </b>")
+        # Дата/время пусты: мастер не подставляет выдуманные значения, а
+        # строка `[дата] // [время_начала]` скрывается целиком (H2).
+        self.assertNotIn(" // ", html)
+        self.assertNotIn("<b> // </b>", html)
 
         states = self.fields(chosen.draft_id)
         for code in ("название", "дата", "время_начала"):
@@ -208,7 +211,9 @@ class PlaceAutofillTests(AutofillTestCase):
         self.assertEqual(chosen.place_address, "ул. Новая, 9")
         self.assertEqual(chosen.place_city, "Тверь")
         html = self.preview(chosen.draft_id).html
-        self.assertIn("\nул. Новая, 9\n", html)
+        # Живой рендер перечитывает карточку: адрес — последняя видимая
+        # строка (пустые строки с датой/временем скрыты).
+        self.assertEqual(html.split("\n")[-1], "ул. Новая, 9")
         self.assertNotIn("ул. Ленина, 1", html)
 
     def test_address_removed_from_directory_disappears_from_live_text(self) -> None:
@@ -244,7 +249,8 @@ class PlaceWithoutUrlAutofillTests(AutofillTestCase):
         self.assertIn("<b>Дом культуры</b>", html)
         self.assertNotIn("<a ", html)
         self.assertNotIn("</a>", html)
-        self.assertIn("\nул. Ленина, 1\n", html)
+        # Адрес виден отдельной строкой; дата/время пусты — их строка скрыта.
+        self.assertEqual(html.split("\n")[-1], "ул. Ленина, 1")
 
     def test_link_brick_is_asked_but_place_and_address_are_known(self) -> None:
         draft = self.start_place_draft()

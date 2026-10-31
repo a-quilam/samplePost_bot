@@ -77,9 +77,7 @@ def _seed(h, *, body: str = "[title]", brick: str = "title") -> int:
             session,
             actor_telegram_user_id=DEFAULT_TG,
             name="Тестовый шаблон",
-            header="",
-            body=body,
-            footer="",
+            content="\n".join(p for p in ("", body, "") if p),
         )
         session.commit()
         return template.template_id

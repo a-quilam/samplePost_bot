@@ -81,10 +81,10 @@ def _keyboard_rows(h) -> list[list[tuple[str, str | None]]]:
     ]
 
 
-async def _to_photo_step(h, *, body: str | None = None, value: str = "Значение"):
+async def _to_photo_step(h, *, content: str | None = None, value: str = "Значение"):
     """Личный шаблон → ответ на единственный кирпичик → шаг фото."""
     place_id, _alias_id = _seed_place(h)
-    template_id, _revision, bricks = _seed_personal_template(h, body=body)
+    template_id, _revision, bricks = _seed_personal_template(h, content=content)
     await _start_to_template(h, place_id)
     await _choose_personal(h, template_id)
     await h.text(value)
@@ -411,7 +411,7 @@ class TextLimitTests(unittest.TestCase):
     @scenario_test
     async def test_long_text_without_photos_is_delivered(self, h) -> None:
         await h.text("/start")
-        await _to_photo_step(h, body="[main]", value=self.LONG_VALUE)
+        await _to_photo_step(h, content="[main]", value=self.LONG_VALUE)
         draft = _latest_draft(h)
 
         await _finish_without_photos(h)
@@ -424,7 +424,7 @@ class TextLimitTests(unittest.TestCase):
     @scenario_test
     async def test_same_text_with_photo_hits_caption_limit(self, h) -> None:
         await h.text("/start")
-        await _to_photo_step(h, body="[main]", value=self.LONG_VALUE)
+        await _to_photo_step(h, content="[main]", value=self.LONG_VALUE)
         draft = _latest_draft(h)
 
         photo_update = await h.photo("limit-photo")
@@ -440,7 +440,7 @@ class TextLimitTests(unittest.TestCase):
     @scenario_test
     async def test_short_text_with_photo_is_delivered_as_caption(self, h) -> None:
         await h.text("/start")
-        await _to_photo_step(h, body="[main]", value="Коротко")
+        await _to_photo_step(h, content="[main]", value="Коротко")
         draft = _latest_draft(h)
 
         await h.photo("short-photo")
@@ -552,7 +552,7 @@ class LiveBlockPhotoCompositionTests(unittest.TestCase):
         self, h
     ) -> None:
         await h.text("/start")
-        await _to_photo_step(h, body="[main]", value=self.LONG_VALUE)
+        await _to_photo_step(h, content="[main]", value=self.LONG_VALUE)
         draft = _latest_draft(h)
         await h.photo("F-1")
         self.assertIn("не помещается", h.screen_text(), "ожидался проблемный экран")
@@ -597,7 +597,7 @@ class LiveBlockPhotoCompositionTests(unittest.TestCase):
         from handlers import wizard_live
 
         await h.text("/start")
-        await _to_photo_step(h, body="[main]", value=self.LONG_VALUE)
+        await _to_photo_step(h, content="[main]", value=self.LONG_VALUE)
         draft = _latest_draft(h)
         await h.photo("F-1")
         self.assertIn("не помещается", h.screen_text(), "ожидался проблемный экран")

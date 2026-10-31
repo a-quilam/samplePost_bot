@@ -21,9 +21,8 @@ from place_store import add_alternative_name
 from template_store import (
     TemplateDetails,
     get_standard_template,
-    update_template_section,
+    update_template_content,
 )
-from template_types import TEMPLATE_SECTION_BODY
 from tests.stage23_helpers import (
     OTHER_TG,
     OWNER_TG,
@@ -91,12 +90,12 @@ class AnnouncementDatabaseTestCase(TemplateDatabaseTestCase):
         return definition.id
 
     def update_template_body(self, template: TemplateDetails, body: str) -> None:
-        update_template_section(
+        """Меняет весь текст шаблона (H2: секций больше нет)."""
+        update_template_content(
             self.session,
             actor_telegram_user_id=OWNER_TG,
             template_id=template.template_id,
             expected_revision=template.revision,
-            section=TEMPLATE_SECTION_BODY,
             content=body,
         )
         self.session.expire_all()

@@ -39,9 +39,8 @@ from brick_types import (
     BrickValueStatus,
 )
 from template_types import (
-    TEMPLATE_SECTION_BODY,
-    TEMPLATE_SECTION_FOOTER,
-    TEMPLATE_SECTION_HEADER,
+    TEMPLATE_CONTENT,
+    TEMPLATE_EXTENDED_CONTENT,
 )
 
 created = datetime(2026, 1, 1)
@@ -79,23 +78,22 @@ def definition(
 
 def snapshot(
     *,
-    header: str = "",
-    body: str = "",
-    footer: str = "",
+    content: str = "",
+    extended_content: str | None = None,
     bindings: dict[str, int],
     snapshot_id: int = 1,
 ) -> AnnouncementTemplateSnapshot:
+    """Снимок с одним текстом (H2); второй текст — только если задан."""
+    texts = {TEMPLATE_CONTENT: content}
+    if extended_content is not None:
+        texts[TEMPLATE_EXTENDED_CONTENT] = extended_content
     return AnnouncementTemplateSnapshot(
         snapshot_id=snapshot_id,
         source_template_id=10,
         source_template_version=3,
         source_kind="personal",
         source_place_id=None,
-        sections={
-            TEMPLATE_SECTION_HEADER: header,
-            TEMPLATE_SECTION_BODY: body,
-            TEMPLATE_SECTION_FOOTER: footer,
-        },
+        texts=texts,
         bindings=tuple(
             SnapshotBinding(code=code, brick_id=brick_id)
             for code, brick_id in bindings.items()
@@ -106,11 +104,9 @@ def snapshot(
 class QuestionOrderTests(unittest.TestCase):
     """Детерминированный порядок и один вопрос на brick_id."""
 
-    def test_header_then_body_then_footer_and_repeats_once(self) -> None:
+    def test_questions_follow_text_order_and_repeats_once(self) -> None:
         view = snapshot(
-            header="Ш [head]",
-            body="[body] [head]",
-            footer="[foot] [body]",
+            content="Ш [head]\n[body] [head]\n[foot] [body]",
             bindings={"head": 10, "body": 11, "foot": 12},
         )
         definitions = {
@@ -122,19 +118,13 @@ class QuestionOrderTests(unittest.TestCase):
         questions = build_questions(view, definitions)
 
         self.assertEqual([item.brick_id for item in questions], [10, 11, 12])
-        self.assertEqual(
-            [item.section for item in questions],
-            [
-                TEMPLATE_SECTION_HEADER,
-                TEMPLATE_SECTION_BODY,
-                TEMPLATE_SECTION_FOOTER,
-            ],
-        )
+        # H2: секций нет — порядок задаёт единственный текст.
+        self.assertEqual([item.code for item in questions], ["head", "body", "foot"])
         self.assertTrue(all(not item.required for item in questions))
         self.assertTrue(all(item.allow_empty for item in questions))
 
     def test_bricks_outside_snapshot_are_ignored(self) -> None:
-        view = snapshot(body="[inside]", bindings={"inside": 20})
+        view = snapshot(content="[inside]", bindings={"inside": 20})
         definitions = {
             20: definition(20, "inside"),
             21: definition(21, "outside"),
@@ -149,7 +139,7 @@ class QuestionOrderTests(unittest.TestCase):
 
     def test_known_valid_place_values_are_not_asked(self) -> None:
         view = snapshot(
-            header="[место] [адрес_места] [ссылка_места]",
+            content="[место] [адрес_места] [ссылка_места]",
             bindings={"место": 5, "адрес_места": 6, "ссылка_места": 7},
         )
         definitions = {
@@ -179,7 +169,7 @@ class QuestionOrderTests(unittest.TestCase):
         )
 
     def test_invalid_known_value_is_explained_in_question(self) -> None:
-        view = snapshot(body="[ссылка_места]", bindings={"ссылка_места": 7})
+        view = snapshot(content="[ссылка_места]", bindings={"ссылка_места": 7})
         definitions = {7: definition(7, "ссылка_места", BRICK_TYPE_URL)}
         questions = build_questions(
             view,
@@ -191,7 +181,7 @@ class QuestionOrderTests(unittest.TestCase):
         self.assertIn("http", questions[0].context_error or "")
 
     def test_missing_and_valid_empty_answers_are_distinct(self) -> None:
-        view = snapshot(body="[note]", bindings={"note": 30})
+        view = snapshot(content="[note]", bindings={"note": 30})
         definitions = {30: definition(30, "note")}
 
         self.assertEqual(len(build_questions(view, definitions)), 1)
@@ -243,7 +233,7 @@ class QuestionOrderTests(unittest.TestCase):
         ]
         codes = [f"тип{index}" for index in range(1, 8)]
         view = snapshot(
-            body=" ".join(f"[{code}]" for code in codes),
+            content=" ".join(f"[{code}]" for code in codes),
             bindings={code: index for index, code in enumerate(codes, start=101)},
         )
         definitions = {
@@ -272,7 +262,7 @@ class SnapshotBindingTests(unittest.TestCase):
     """Привязки снимка не разрешаются заново по тексту."""
 
     def test_binding_wins_over_another_definition_with_same_code(self) -> None:
-        view = snapshot(body="[событие]", bindings={"событие": 40})
+        view = snapshot(content="[событие]", bindings={"событие": 40})
         first = definition(40, "событие")
         second = definition(41, "событие")
         questions = build_questions(view, {40: first, 41: second})
@@ -287,7 +277,7 @@ class SnapshotBindingTests(unittest.TestCase):
             source_template_version=1,
             source_kind="personal",
             source_place_id=None,
-            sections={TEMPLATE_SECTION_BODY: "[код]"},
+            texts={TEMPLATE_CONTENT: "[код]"},
             bindings=(
                 SnapshotBinding(code="код", brick_id=40),
                 SnapshotBinding(code="код", brick_id=41),
@@ -300,16 +290,16 @@ class SnapshotBindingTests(unittest.TestCase):
             )
 
     def test_unbound_or_unparsable_snapshot_is_diagnostic(self) -> None:
-        view = snapshot(body="[код] [другой]", bindings={"код": 40})
+        view = snapshot(content="[код] [другой]", bindings={"код": 40})
         with self.assertRaises(AnnouncementSnapshotError):
             build_questions(view, {40: definition(40, "код")})
 
-        broken = snapshot(body="[незакрытый", bindings={"код": 40})
+        broken = snapshot(content="[незакрытый", bindings={"код": 40})
         with self.assertRaises(AnnouncementSnapshotError):
             build_questions(broken, {40: definition(40, "код")})
 
     def test_missing_archived_and_invalid_scope_are_diagnostic(self) -> None:
-        view = snapshot(body="[код]", bindings={"код": 40})
+        view = snapshot(content="[код]", bindings={"код": 40})
         with self.assertRaises(AnnouncementBrickError):
             build_questions(view, {})
         with self.assertRaises(AnnouncementBrickError):

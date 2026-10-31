@@ -83,8 +83,6 @@ from announcement_store import (
     start_announcement_wizard,
 )
 from announcement_wizard import (
-    EXTRA_POSITION_END,
-    EXTRA_POSITION_START,
     WizardStage,
     answer_payload_to_raw,
 )
@@ -118,11 +116,7 @@ from template_store import (
     get_standard_template,
     list_personal_templates,
 )
-from template_types import (
-    TEMPLATE_SECTION_BODY,
-    TEMPLATE_SECTION_FOOTER,
-    TEMPLATE_SECTION_HEADER,
-)
+from template_types import TEMPLATE_CONTENT, TEMPLATE_EXTENDED_CONTENT
 from utils import calendar_view, keyboard_layouts, screen, ui_humor
 from utils import tg_context as ctx
 from utils.parsers import app_today
@@ -180,17 +174,6 @@ STAGE_LABELS = {
     WizardStage.EXTRAS.value: "доп. поля",
     WizardStage.PREVIEW.value: "обзор",
     WizardStage.COMPLETED.value: "опубликован",
-}
-
-SECTION_LABELS = {
-    TEMPLATE_SECTION_HEADER: "шапка",
-    TEMPLATE_SECTION_BODY: "тело",
-    TEMPLATE_SECTION_FOOTER: "подвал",
-}
-
-POSITION_LABELS = {
-    EXTRA_POSITION_START: "в начало",
-    EXTRA_POSITION_END: "в конец",
 }
 
 SCOPE_LABELS = {
@@ -257,7 +240,6 @@ def _fresh_ui() -> dict[str, Any]:
             "return_page": 0,
             "idempotency_key": None,
         },
-        "extra_flow": None,
     }
 
 
@@ -1566,17 +1548,8 @@ async def _confirm_place(
 def _template_description(details) -> str:
     version = details.current_version
     count = len(version.bindings)
-    sections = [
-        SECTION_LABELS.get(name, name)
-        for name, text in (
-            (TEMPLATE_SECTION_HEADER, version.header),
-            (TEMPLATE_SECTION_BODY, version.body),
-            (TEMPLATE_SECTION_FOOTER, version.footer),
-        )
-        if text.strip()
-    ]
-    part = ", ".join(sections) if sections else "без секций"
-    return f"{part}; кирпичиков: {count}"
+    kind = "расширенный" if version.extended_content is not None else "обычный"
+    return f"{kind} текст; кирпичиков: {count}"
 
 
 def _selected_template_text(details) -> str:
@@ -1588,19 +1561,19 @@ def _selected_template_text(details) -> str:
         if snapshot.source_kind == "standard"
         else "Личный шаблон"
     )
-    sections = []
-    for section in (
-        TEMPLATE_SECTION_HEADER,
-        TEMPLATE_SECTION_BODY,
-        TEMPLATE_SECTION_FOOTER,
-    ):
-        if snapshot.sections.get(section, "").strip():
-            sections.append(SECTION_LABELS[section])
-    part = ", ".join(sections) if sections else "без секций"
+    texts = [
+        label
+        for label, key in (
+            ("обычный", TEMPLATE_CONTENT),
+            ("расширенный", TEMPLATE_EXTENDED_CONTENT),
+        )
+        if snapshot.texts.get(key, "").strip()
+    ]
+    part = ", ".join(texts) if texts else "без текста"
     return (
         f"🧩 Выбранный шаблон: {_h(name)}\n"
         f"Тип: {kind}; версия снимка: {snapshot.source_template_version}.\n"
-        f"Секции: {part}; уникальных кирпичиков: "
+        f"Тексты: {part}; уникальных кирпичиков: "
         f"{len(snapshot.brick_ids)}.\n\n"
         "Снимок уже сохранён. Изменения исходного шаблона не влияют на этот "
         "анонс; повторный выбор шаблона недоступен."
@@ -2276,7 +2249,6 @@ def _extra_field_state(details, extra, definition) -> AnnouncementFieldState:
         code=extra.code,
         title=extra.title,
         value_type=extra.value_type,
-        section=extra.section,
         status=status,
         raw_value=raw,
         rules=dict(definition.rules),
@@ -2799,9 +2771,7 @@ async def _render_extras(
             else:
                 value_text = value or "пусто"
             lines.append(
-                f"{number}. {_h(extra.title)} — "
-                f"{SECTION_LABELS.get(extra.section, extra.section)}, "
-                f"{POSITION_LABELS.get(extra.position, extra.position)}; "
+                f"{number}. {_h(extra.title)}; "
                 f"значение: {_h(_short(value_text, 120))}"
             )
     else:
@@ -2982,130 +2952,12 @@ async def _render_available_bricks(
     return AW_EXTRAS
 
 
-async def _render_extra_sections(
-    update: Update,
-    context: ContextTypes.DEFAULT_TYPE,
-    details,
-    brick_id: int,
-    *,
-    notice: str | None = None,
-) -> int:
-    ui = _ui(context)
-    _set_details(ui, details)
-    _clear_active(ui)
-    ui["extra_flow"] = {
-        "phase": "section",
-        "brick_id": brick_id,
-        "section": None,
-        "position": None,
-    }
-    brick = next(
-        (
-            item
-            for item in _available_extra_bricks(details, _user_id(update))
-            if item.id == brick_id
-        ),
-        None,
-    )
-    if brick is None:
-        return await _render_available_bricks(
-            update, context, details, page=ui.get("extras_page", 0)
-        )
-    # Заголовок кирпичика задаёт человеком и уходит в parse_mode=HTML
-    # экран — экранируем (аудит: неэкранированный HTML ломал экран).
-    text = f"➕ {_h(brick.title)}\n\n" "Выберите секцию анонса: шапка, тело или подвал."
-    body = f"{notice}\n\n{text}" if notice else text
-    rows = [
-        [
-            InlineKeyboardButton(
-                label,
-                callback_data=(
-                    f"aw_exsec:{details.draft_id}:{details.revision}:"
-                    f"{brick_id}:{section}"
-                ),
-            )
-        ]
-        for section, label in (
-            (TEMPLATE_SECTION_HEADER, "Шапка"),
-            (TEMPLATE_SECTION_BODY, "Тело"),
-            (TEMPLATE_SECTION_FOOTER, "Подвал"),
-        )
-    ]
-    rows.append(
-        [
-            InlineKeyboardButton(
-                tr("buttons.nav.back"),
-                callback_data=f"aw_exback:{details.draft_id}:{details.revision}",
-            )
-        ]
-    )
-    await _render(update, context, body, InlineKeyboardMarkup(rows))
-    return AW_EXTRAS
-
-
-async def _render_extra_position(
-    update: Update,
-    context: ContextTypes.DEFAULT_TYPE,
-    details,
-    brick_id: int,
-    section: str,
-    *,
-    notice: str | None = None,
-) -> int:
-    ui = _ui(context)
-    _set_details(ui, details)
-    _clear_active(ui)
-    flow = ui.get("extra_flow") or {}
-    flow.update(
-        {
-            "phase": "position",
-            "brick_id": brick_id,
-            "section": section,
-            "position": None,
-        }
-    )
-    ui["extra_flow"] = flow
-    text = (
-        "➕ Дополнительный кирпичик\n\n"
-        f"Секция: {SECTION_LABELS.get(section, section)}.\n"
-        "Выберите положение внутри секции."
-    )
-    body = f"{notice}\n\n{text}" if notice else text
-    rows = [
-        [
-            InlineKeyboardButton(
-                "В начало",
-                callback_data=(
-                    f"aw_expos:{details.draft_id}:{details.revision}:"
-                    f"{brick_id}:{section}:{EXTRA_POSITION_START}"
-                ),
-            ),
-            InlineKeyboardButton(
-                "В конец",
-                callback_data=(
-                    f"aw_expos:{details.draft_id}:{details.revision}:"
-                    f"{brick_id}:{section}:{EXTRA_POSITION_END}"
-                ),
-            ),
-        ],
-        [
-            InlineKeyboardButton(
-                tr("buttons.nav.back"),
-                callback_data=f"aw_exback:{details.draft_id}:{details.revision}",
-            )
-        ],
-    ]
-    await _render(update, context, body, InlineKeyboardMarkup(rows))
-    return AW_EXTRAS
-
-
 def _extra_value_text(extra, field: AnnouncementFieldState) -> str:
     lines = [
         # Заголовок кирпичика задаёт человеком и уходит в parse_mode=HTML
         # экран — экранируем (аудит: неэкранированный HTML ломал экран).
         f"➕ {_h(field.title)}",
-        f"Секция: {SECTION_LABELS.get(extra.section, extra.section)}; "
-        f"положение: {POSITION_LABELS.get(extra.position, extra.position)}.",
+        "Кирпичик добавляет строку в конец текста этого анонса.",
     ]
     description = wizard_questions.description_html(field.description)
     if description:
@@ -3284,11 +3136,7 @@ async def _add_extra(
     context: ContextTypes.DEFAULT_TYPE,
     details,
     brick_id: int,
-    section: str,
-    position: str,
 ) -> int:
-    if section not in SECTION_LABELS or position not in POSITION_LABELS:
-        return await _stale(update, context)
     try:
         with SessionLocal() as session:
             updated = add_announcement_extra(
@@ -3296,8 +3144,6 @@ async def _add_extra(
                 actor_telegram_user_id=_user_id(update),
                 draft_id=details.draft_id,
                 brick_id=brick_id,
-                section=section,
-                position=position,
                 expected_revision=details.revision,
             )
     except AnnouncementError as exc:
@@ -3310,7 +3156,6 @@ async def _add_extra(
         )
     ui = _ui(context)
     _set_details(ui, updated)
-    ui["extra_flow"] = None
     return await _render_extra_value_prompt(
         update,
         context,
@@ -3392,8 +3237,6 @@ def _preview_summary_lines(
         lines.extend(["", "Дополнительные кирпичики:"])
         for extra, definition in extras[:MAX_PREVIEW_EXTRAS]:
             field = _extra_field_state(details, extra, definition)
-            section = SECTION_LABELS.get(extra.section, extra.section)
-            position = POSITION_LABELS.get(extra.position, extra.position)
             if field.status == FIELD_STATUS_VALID:
                 value = _short(_field_value_text(field), FIELD_DISPLAY_LIMIT)
                 value_text = f"значение: {_h(value)}"
@@ -3401,7 +3244,7 @@ def _preview_summary_lines(
                 value_text = "значение пропущено"
             else:
                 value_text = "значение не задано"
-            lines.append(f"• {_h(extra.title)} — {section}, {position}; {value_text}")
+            lines.append(f"• {_h(extra.title)} — {value_text}")
         if len(extras) > MAX_PREVIEW_EXTRAS:
             lines.append(f"…и ещё {len(extras) - MAX_PREVIEW_EXTRAS}.")
     return lines
@@ -5965,48 +5808,9 @@ async def handle_extras_callback(
                 "Этот кирпичик недоступен. Выберите из списка.",
             )
         await _answer(update)
-        return await _render_extra_sections(update, context, details, brick_id)
-    if action == "aw_exsec" and len(parts) == 5:
-        try:
-            draft_id = int(parts[1])
-            revision = int(parts[2])
-            brick_id = int(parts[3])
-        except ValueError:
-            return await _stale(update, context)
-        section = parts[4]
-        if section not in SECTION_LABELS:
-            return await _stale(update, context)
-        guarded = _guard_details(update, context, draft_id, revision)
-        if guarded is None:
-            return await _stale(update, context)
-        _ui_data, details = guarded
-        flow = ui.get("extra_flow") or {}
-        if flow.get("brick_id") != brick_id or flow.get("phase") != "section":
-            return await _stale(update, context)
-        await _answer(update)
-        return await _render_extra_position(update, context, details, brick_id, section)
-    if action == "aw_expos" and len(parts) == 6:
-        try:
-            draft_id = int(parts[1])
-            revision = int(parts[2])
-            brick_id = int(parts[3])
-        except ValueError:
-            return await _stale(update, context)
-        section = parts[4]
-        position = parts[5]
-        guarded = _guard_details(update, context, draft_id, revision)
-        if guarded is None:
-            return await _stale(update, context)
-        _ui_data, details = guarded
-        flow = ui.get("extra_flow") or {}
-        if (
-            flow.get("brick_id") != brick_id
-            or flow.get("phase") != "position"
-            or flow.get("section") != section
-        ):
-            return await _stale(update, context)
-        await _answer(update)
-        return await _add_extra(update, context, details, brick_id, section, position)
+        # Poster 2.3 H2: выбор секции/позиции из интерфейса удалён —
+        # кирпичик сразу добавляется в конец текста анонса.
+        return await _add_extra(update, context, details, brick_id)
     if action == "aw_exback" and len(parts) == 3:
         if not all(item.isdigit() for item in parts[1:]):
             return await _stale(update, context)
@@ -6014,16 +5818,7 @@ async def handle_extras_callback(
         if guarded is None:
             return await _stale(update, context)
         _ui_data, details = guarded
-        flow = ui.get("extra_flow") or {}
         await _answer(update)
-        if flow.get("phase") == "position":
-            brick_id = int(flow.get("brick_id") or 0)
-            return await _render_extra_sections(update, context, details, brick_id)
-        if flow.get("phase") == "section":
-            return await _render_available_bricks(
-                update, context, details, page=ui.get("extras_page", 0)
-            )
-        ui["extra_flow"] = None
         return await _render_extras(update, context, details)
     if action == "aw_exdel" and len(parts) == 4:
         if not all(item.isdigit() for item in parts[1:]):

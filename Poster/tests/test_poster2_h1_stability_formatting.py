@@ -791,7 +791,7 @@ class BlockquoteRegressionTests(unittest.TestCase):
             h,
             name="Цитата без фото",
             specs=[("main", "Основное", "short_text", {})],
-            body="Анонс: [main]",
+            content="Анонс: [main]",
         )
         await _start_to_template(h, place_id)
         await _choose_personal(h, template_id)
@@ -817,7 +817,7 @@ class BlockquoteRegressionTests(unittest.TestCase):
             h,
             name="Цитата с фото",
             specs=[("main", "Основное", "short_text", {})],
-            body="Анонс: [main]",
+            content="Анонс: [main]",
         )
         await _start_to_template(h, place_id)
         await _choose_personal(h, template_id)

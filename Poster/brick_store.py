@@ -1901,9 +1901,8 @@ def _rebind_place_template_to_system(
     version = TemplateVersion(
         template_id=template.id,
         version=template.revision + 1,
-        header=current.header,
-        body=current.body,
-        footer=current.footer,
+        content=current.content,
+        extended_content=current.extended_content,
         created_by_user_id=actor.id,
         created_at=now,
         builtin_version=None,

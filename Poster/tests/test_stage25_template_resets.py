@@ -23,7 +23,7 @@ from template_store import (
     list_template_versions,
     reset_personal_template,
     reset_standard_template,
-    update_template_header,
+    update_template_content,
 )
 from template_types import BUILTIN_TEMPLATE_VERSION
 from tests.stage23_helpers import (
@@ -46,9 +46,9 @@ class PersonalResetTests(TemplateDatabaseTestCase):
             self.session,
             actor_telegram_user_id=OWNER_TG,
             name="Свой",
-            header="Своя шапка",
-            body="Своё тело",
-            footer="Свой подвал",
+            content="\n".join(
+                p for p in ("Своя шапка", "Своё тело", "Свой подвал") if p
+            ),
         )
         self.snapshot = create_template_snapshot(
             self.session,
@@ -101,9 +101,10 @@ class PersonalResetTests(TemplateDatabaseTestCase):
         template = result.template
         self.assertEqual(template.revision, 2)
         builtin = get_builtin_template()
-        self.assertEqual(template.current_version.header, builtin.header)
-        self.assertEqual(template.current_version.body, builtin.body)
-        self.assertEqual(template.current_version.footer, builtin.footer)
+        self.assertEqual(template.current_version.content, builtin.content)
+        self.assertEqual(
+            template.current_version.extended_content, builtin.extended_content
+        )
         self.assertEqual(
             template.current_version.builtin_version, BUILTIN_TEMPLATE_VERSION
         )
@@ -117,17 +118,15 @@ class PersonalResetTests(TemplateDatabaseTestCase):
             self.session, OWNER_TG, self.created.template_id, 1
         )
         assert first is not None
-        self.assertEqual(first.header, "Своя шапка")
-        self.assertEqual(first.body, "Своё тело")
-        self.assertEqual(first.footer, "Свой подвал")
+        self.assertEqual(first.content, "Своя шапка\nСвоё тело\nСвой подвал")
+        self.assertIsNone(first.extended_content)
 
         # Снимок остался снимком версии 1 и не изменился.
         snapshot_row = self.session.get(TemplateSnapshot, self.snapshot.snapshot_id)
         assert snapshot_row is not None
         self.assertEqual(snapshot_row.source_template_version, 1)
-        self.assertEqual(snapshot_row.header, "Своя шапка")
-        self.assertEqual(snapshot_row.body, "Своё тело")
-        self.assertEqual(snapshot_row.footer, "Свой подвал")
+        self.assertEqual(snapshot_row.content, "Своя шапка\nСвоё тело\nСвой подвал")
+        self.assertIsNone(snapshot_row.extended_content)
 
         # Второй сброс ничего не меняет и не плодит версии.
         unchanged = reset_personal_template(
@@ -146,7 +145,7 @@ class PersonalResetTests(TemplateDatabaseTestCase):
         self.assertEqual([item.version for item in versions_after], [1, 2])
 
     def test_stale_revision_is_not_overwritten(self) -> None:
-        updated = update_template_header(
+        updated = update_template_content(
             self.session,
             actor_telegram_user_id=OWNER_TG,
             template_id=self.created.template_id,
@@ -165,7 +164,7 @@ class PersonalResetTests(TemplateDatabaseTestCase):
         assert stale.template is not None
         self.assertEqual(stale.template.revision, 2)
         self.assertEqual(
-            stale.template.current_version.header, "Правка из другого окна"
+            stale.template.current_version.content, "Правка из другого окна"
         )
 
     def test_not_found_and_wrong_kind(self) -> None:
@@ -214,7 +213,7 @@ class StandardResetTests(TemplateDatabaseTestCase):
         )
         assert template is not None
         self.template_id = template.id
-        updated = update_template_header(
+        updated = update_template_content(
             self.session,
             actor_telegram_user_id=OTHER_TG,
             template_id=self.template_id,
@@ -241,8 +240,11 @@ class StandardResetTests(TemplateDatabaseTestCase):
         assert result.template is not None
         self.assertEqual(result.template.revision, 3)
         builtin = get_builtin_template()
-        self.assertEqual(result.template.current_version.header, builtin.header)
-        self.assertEqual(result.template.current_version.body, builtin.body)
+        self.assertEqual(result.template.current_version.content, builtin.content)
+        self.assertEqual(
+            result.template.current_version.extended_content,
+            builtin.extended_content,
+        )
         self.assertEqual(
             result.template.current_version.builtin_version, BUILTIN_TEMPLATE_VERSION
         )
@@ -251,12 +253,12 @@ class StandardResetTests(TemplateDatabaseTestCase):
         second = get_template_version(self.session, OTHER_TG, self.template_id, 2)
         assert first is not None and second is not None
         self.assertEqual(first.builtin_version, BUILTIN_TEMPLATE_VERSION)
-        self.assertEqual(second.header, "Правка администратора")
+        self.assertEqual(second.content, "Правка администратора")
 
         snapshot_row = self.session.get(TemplateSnapshot, self.snapshot.snapshot_id)
         assert snapshot_row is not None
         self.assertEqual(snapshot_row.source_template_version, 2)
-        self.assertEqual(snapshot_row.header, "Правка администратора")
+        self.assertEqual(snapshot_row.content, "Правка администратора")
 
     def test_superadmin_can_reset_but_regular_user_cannot(self) -> None:
         forbidden = reset_standard_template(
