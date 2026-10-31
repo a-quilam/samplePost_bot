@@ -725,6 +725,15 @@ def _card_content(
                 callback_data=f"tp_edit_ext:{template.template_id}",
             )
         )
+    else:
+        # Poster 2.3.1 E2: путь создания расширенной версии. Кнопка стоит
+        # рядом с правкой текста: основа берётся из него же.
+        edit_row.append(
+            InlineKeyboardButton(
+                tr("buttons.templates.sozdat_rasshirennuyu"),
+                callback_data=f"tp_mkext:{template.template_id}",
+            )
+        )
     keyboard = InlineKeyboardMarkup(
         [
             edit_row,
@@ -2097,10 +2106,13 @@ async def handle_edit_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         await query.answer(STALE_TEXT, show_alert=True)
         return
     data = query.data or ""
-    # tp_edit:<id> | tp_edit_ext:<id>
+    # tp_edit:<id> | tp_edit_ext:<id> | tp_mkext:<id>
     prefix, _, raw_id = data.partition(":")
+    make_extended = prefix == "tp_mkext"
     text_name = (
-        TEMPLATE_EXTENDED_CONTENT if prefix == "tp_edit_ext" else TEMPLATE_CONTENT
+        TEMPLATE_EXTENDED_CONTENT
+        if prefix in {"tp_edit_ext", "tp_mkext"}
+        else TEMPLATE_CONTENT
     )
     try:
         template_id = int(raw_id)
@@ -2122,13 +2134,21 @@ async def handle_edit_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -
             return
         await query.answer()
         current = template.current_version
-        if text_name == TEMPLATE_EXTENDED_CONTENT and (
-            current.extended_content is None
+        # E2: «создать расширенную» — это редактор с копией основного текста.
+        # Если расширенная уже есть, кнопка ведёт себя как обычная правка.
+        creating_extended = make_extended and current.extended_content is None
+        if (
+            text_name == TEMPLATE_EXTENDED_CONTENT
+            and current.extended_content is None
+            and not creating_extended
         ):
             await query.answer(
                 tr("alerts.templates.u_shablona_net_rasshirennogo"), show_alert=True
             )
             return
+        draft_text = getattr(current, text_name) or ""
+        if creating_extended:
+            draft_text = current.content or ""
         state.update(
             {
                 "phase": PHASE_SECTION_EDIT,
@@ -2137,7 +2157,7 @@ async def handle_edit_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -
                 "origin": _template_origin(template),
                 "place_id": template.place_id,
                 "text_name": text_name,
-                "draft_text": getattr(current, text_name) or "",
+                "draft_text": draft_text,
                 "chosen_brick_ids": {},
             }
         )
@@ -2147,7 +2167,18 @@ async def handle_edit_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         text, keyboard = _text_edit_content(state)
     finally:
         session.close()
-    await _show(update, context, state, text, keyboard)
+    await _show(
+        update,
+        context,
+        state,
+        text,
+        keyboard,
+        notice=(
+            tr("templates.build.rasshirennaya_versiya_osnova")
+            if creating_extended
+            else None
+        ),
+    )
 
 
 async def handle_preview(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -3329,6 +3360,7 @@ def templates_handlers() -> list[BaseHandler]:
         CallbackQueryHandler(handle_hub, pattern=r"^tp_hub$"),
         CallbackQueryHandler(handle_open, pattern=r"^tp_open:\d+$"),
         CallbackQueryHandler(handle_edit_text, pattern=r"^tp_edit(_ext)?:\d+$"),
+        CallbackQueryHandler(handle_edit_text, pattern=r"^tp_mkext:\d+$"),
         CallbackQueryHandler(handle_preview, pattern=r"^tp_preview:\d+$"),
         CallbackQueryHandler(handle_reset, pattern=r"^tp_reset:\d+$"),
         CallbackQueryHandler(handle_reset_yes, pattern=r"^tp_reset_yes:\d+$"),
