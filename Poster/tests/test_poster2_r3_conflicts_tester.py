@@ -830,16 +830,16 @@ class R3UiTests(unittest.TestCase):
         self.assertIn("Мои места", h.screen_text())
         await h.callback(f"adm_place:{place_id}", user_id=AUTHOR_TG)
         card = h.screen_text()
-        self.assertIn("Активные задачи конфликтов", card)
+        self.assertIn("Нерешённых конфликтов кодов", card)
         buttons = " ".join(label for label, _ in h.screen_buttons())
         self.assertIn("Конфликты кодов (1)", buttons)
 
         await h.callback(f"adm_bconflicts:{place_id}", user_id=AUTHOR_TG)
         self.assertIn("Конфликты кодов", h.screen_text())
         await h.callback(f"adm_bconflict:{conflict_id}", user_id=AUTHOR_TG)
-        self.assertIn("Задача разрешения конфликта", h.screen_text())
+        self.assertIn("Код занят двумя кирпичиками", h.screen_text())
         labels = " ".join(label for label, _ in h.screen_buttons())
-        self.assertIn("Переименовать местный", labels)
+        self.assertIn("Изменить код местного", labels)
         self.assertIn("Переключиться на глобальный", labels)
 
         await h.callback(f"adm_bconflict_switch:{conflict_id}", user_id=AUTHOR_TG)
@@ -855,12 +855,12 @@ class R3UiTests(unittest.TestCase):
         await h.text("/admin", user_id=AUTHOR_TG)
         await h.callback(f"adm_place:{place_id}", user_id=AUTHOR_TG)
         card_after = h.screen_text()
-        self.assertNotIn("Активные задачи конфликтов", card_after)
+        self.assertNotIn("Нерешённых конфликтов кодов", card_after)
         buttons_after = " ".join(label for label, _ in h.screen_buttons())
         self.assertIn("Конфликты кодов (0)", buttons_after)
         # В списке задач тоже нет активных.
         await h.callback(f"adm_bconflicts:{place_id}", user_id=AUTHOR_TG)
-        self.assertIn("Активных задач нет", h.screen_text())
+        self.assertIn("Нерешённых задач нет", h.screen_text())
         list_labels = " ".join(label for label, _ in h.screen_buttons())
         self.assertNotIn("adm_bconflict:", list_labels)
 
@@ -875,7 +875,7 @@ class R3UiTests(unittest.TestCase):
 
         await h.text("/admin", user_id=AUTHOR_TG)
         await h.callback(f"adm_place:{place_id}", user_id=AUTHOR_TG)
-        self.assertIn("Активные задачи конфликтов", h.screen_text())
+        self.assertIn("Нерешённых конфликтов кодов", h.screen_text())
         await h.callback(f"adm_bconflicts:{place_id}", user_id=AUTHOR_TG)
         await h.callback(f"adm_bconflict:{conflict_id}", user_id=AUTHOR_TG)
         await h.callback(f"adm_bconflict_rename:{conflict_id}", user_id=AUTHOR_TG)

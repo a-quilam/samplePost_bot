@@ -914,7 +914,7 @@ class NegativeTests(unittest.TestCase):
         # Страница списка без открытого раздела: «устарело», диалог не начат.
         await h.callback("pl_pickp:8")
         alert = _last_alert(h) or ""
-        self.assertIn("устарела", alert.lower())
+        self.assertIn("больше не работает", alert.lower())
         self.assertIsNone(h.dialog_state(name=CONVERSATION_NAME))
 
     @scenario_test
@@ -922,7 +922,7 @@ class NegativeTests(unittest.TestCase):
         await h.text("/start")
         await h.callback("tp_pickpage:5")
         alert = _last_alert(h) or ""
-        self.assertIn("устарела", alert.lower())
+        self.assertIn("больше не работает", alert.lower())
         self.assertIsNone(h.dialog_state(name=CONVERSATION_NAME))
 
     @scenario_test

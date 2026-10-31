@@ -54,9 +54,9 @@ PLACE_ADMIN_TG = 7_810_150
 TARGET_TG = 7_810_200
 UNKNOWN_TG = 7_810_300
 
-DENIED_ALERT = "Доступ к административному разделу закрыт."
-STALE_ALERT = "Кнопка устарела: откройте административный кабинет заново."
-ERROR_NOTICE_FRAGMENT = "Произошла внутренняя ошибка"
+DENIED_ALERT = "У вас нет доступа к разделу администрирования."
+STALE_ALERT = "Эта кнопка больше не работает. Откройте раздел администрирования заново."
+ERROR_NOTICE_FRAGMENT = "Что-то пошло не"
 
 
 # --- окружение -------------------------------------------------------------
@@ -82,7 +82,7 @@ def ensure_user(
                 session,
                 telegram_user_id,
                 username=username,
-                full_name=full_name or f"Пользователь {telegram_user_id}",
+                full_name=full_name or f"ПPosterП{telegram_user_id}",
             ).id
         )
 
@@ -282,16 +282,16 @@ class AliasesBackNavigationTests(unittest.TestCase):
             await self._open_place_card(h, place_id)
 
             await h.callback(f"adm_edit_place:{place_id}")
-            self.assertIn("Редактирование места", h.screen_text())
+            self.assertIn("Изменить место", h.screen_text())
             await h.callback(f"adm_aliases:{place_id}")
             self.assertIn("Альтернативные названия", h.screen_text())
             self.assertIn("Локал", h.screen_text())
 
             # Добавление названия: ввод → подтверждение → отмена.
             await h.callback(one_callback(h, "adm_alias_add:"))
-            self.assertIn("Добавление альтернативного названия", h.screen_text())
+            self.assertIn("Добавить альтернативное название", h.screen_text())
             await h.text("Локал Сити")
-            self.assertIn("Подтвердите добавление", h.screen_text())
+            self.assertIn("Добавить альтернативное название", h.screen_text())
 
             await h.callback("adm_cancel")
             # Отмена добавления возвращает именно список названий.
@@ -325,7 +325,7 @@ class AliasesBackNavigationTests(unittest.TestCase):
             await self._open_place_card(h, place_id)
             await h.callback(f"adm_edit_place:{place_id}")
             await h.callback(f"adm_aliases:{place_id}")
-            self.assertIn("Пока нет альтернативных названий", h.screen_text())
+            self.assertIn("Других названий пока нет.", h.screen_text())
 
             await h.callback("adm_cancel")
 
@@ -344,9 +344,9 @@ class AliasesBackNavigationTests(unittest.TestCase):
             await h.callback(f"adm_edit_place:{place_id}")
             await h.callback(f"adm_aliases:{place_id}")
             await h.callback(one_callback(h, "adm_alias_rename:"))
-            self.assertIn("Переименование", h.screen_text())
+            self.assertIn("Изменить", h.screen_text())
             await h.text("Локал Новый")
-            self.assertIn("Подтвердите переименование", h.screen_text())
+            self.assertIn("Изменить альтернативное", h.screen_text())
 
             await h.callback("adm_cancel")
             self.assertIn("Альтернативные названия", h.screen_text())
@@ -397,7 +397,7 @@ class LegacyReplyKeyboardTests(unittest.TestCase):
 
         self.assertEqual(len(reset_ids), 1, "на /start нужно ровно одно снятие")
         self.assertIn(reset_ids[0], h.deleted_ids(), "служебное сообщение осталось")
-        self.assertIn("Выберите действие", h.screen_text())
+        self.assertIn("Что хотите сделать?", h.screen_text())
         self.assertFalse(any_reply_keyboard_markup(h))
 
     @scenario_test
@@ -408,7 +408,7 @@ class LegacyReplyKeyboardTests(unittest.TestCase):
 
         self.assertEqual(len(reset_ids), 1, "callback меню не снял клавиатуру")
         self.assertIn(reset_ids[0], h.deleted_ids())
-        self.assertIn("Выберите действие", h.screen_text())
+        self.assertIn("Что хотите сделать?", h.screen_text())
 
     @scenario_test
     async def test_navigation_between_screens_does_not_repeat_removal(self, h):
@@ -463,7 +463,7 @@ class LegacyReplyKeyboardTests(unittest.TestCase):
             await h.text("/start")
 
         self.assertFalse(reset_calls(h), "сбойный вызов не должен считаться доставкой")
-        self.assertIn("Выберите действие", h.screen_text())
+        self.assertIn("Что хотите сделать?", h.screen_text())
         self.assertTrue(buttons(h), "главное меню должно остаться рабочим")
         self.assertNotIn(ERROR_NOTICE_FRAGMENT, all_visible_texts(h))
 
@@ -476,7 +476,7 @@ class LegacyReplyKeyboardTests(unittest.TestCase):
         await h.text("/start")
 
         self.assertEqual(len(reset_calls(h)), 1)
-        self.assertIn("Выберите действие", h.screen_text())
+        self.assertIn("Что хотите сделать?", h.screen_text())
         self.assertNotIn(ERROR_NOTICE_FRAGMENT, all_visible_texts(h))
 
     @scenario_test
@@ -556,7 +556,7 @@ class AssignAdminSearchTests(unittest.TestCase):
                 with self.subTest(garbage=garbage):
                     await h.text(garbage)
                     text = h.screen_text()
-                    self.assertIn("Неверный формат", text, f"ввод {garbage!r}")
+                    self.assertIn("Введите @username", text, f"ввод {garbage!r}")
                     # Фаза сохранена: следующий ввод снова ищет.
                     self.assertIn("Поиск получателя", text)
                     state = load_admin_session(SUPERADMIN_TG)
@@ -570,7 +570,7 @@ class AssignAdminSearchTests(unittest.TestCase):
             await self._open_search(h)
             await h.text("@nobody_here")
         text = h.screen_text()
-        self.assertIn("не найден", text.lower())
+        self.assertIn("не знает", text.lower())
         self.assertIn("@nobody_here", text)
         self.assertIn("/start", text)
         self.assertFalse(callbacks(h, "adm_pick:"))
@@ -582,7 +582,7 @@ class AssignAdminSearchTests(unittest.TestCase):
             await self._open_search(h)
             await h.text(str(UNKNOWN_TG))
         text = h.screen_text()
-        self.assertIn("не найден", text.lower())
+        self.assertIn("не знает", text.lower())
         self.assertIn(str(UNKNOWN_TG), text)
         self.assertIn("/start", text)
         self.assertFalse(callbacks(h, "adm_pick:"))
@@ -657,7 +657,7 @@ class AssignAdminSearchTests(unittest.TestCase):
             await h.callback(f"adm_pick:{TARGET_TG}")
 
         alert = (last_alert(h) or "").lower()
-        self.assertIn("не существует", alert)
+        self.assertIn("места нет.", alert)
 
     @scenario_test
     async def test_confirm_when_rights_lost_is_explicit(self, h):

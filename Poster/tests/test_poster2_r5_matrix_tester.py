@@ -73,8 +73,8 @@ OWNER_TG = 8_800_003
 OTHER_ADMIN_TG = 8_800_004
 ORDINARY_TG = 8_800_005
 
-STALE_ALERT = "Кнопка устарела: откройте административный кабинет заново."
-DENIED_ALERT = "Доступ к административному разделу закрыт."
+STALE_ALERT = "Эта кнопка больше не работает. Откройте раздел администрирования заново."
+DENIED_ALERT = "У вас нет доступа к разделу администрирования."
 
 
 def last_alert(h: Harness) -> str | None:
@@ -347,11 +347,11 @@ class ConflictPlaqueHonestyTests(unittest.TestCase):
         notice = plaque(h)
         self.assertIn("Предложение одобрено", notice)
         self.assertIn(
-            "Уведомления администраторам мест не доставлены: 1",
+            "Не доставлено уведомлений администраторам мест: 1",
             notice,
             "плашка обязана назвать число НЕдоставленных уведомлений о конфликте",
         )
-        self.assertIn("задача видна в карточке места", notice)
+        self.assertIn("Задача доступна в карточке места", notice)
         self.assertNotIn("уведомлено", notice.lower(), "нельзя писать «уведомлено»")
         self.assertNotIn("поставлены в очередь", notice)
         # Решение сохранено, задача и её адресат не потеряны.
@@ -381,7 +381,7 @@ class ConflictPlaqueHonestyTests(unittest.TestCase):
         notice = plaque(h)
         self.assertIn("Предложение одобрено", notice)
         self.assertIn(
-            "Администраторов мест уведомлено: 1, не доставлено: 1",
+            "Уведомлено администраторов мест: 1. Не доставлено уведомлений: 1",
             notice,
             "при смешанной доставке плашка обязана назвать оба числа",
         )
@@ -405,7 +405,7 @@ class ConflictPlaqueHonestyTests(unittest.TestCase):
         await self._open_approve_confirm(h, proposal_id)
         await h.callback(f"adm_bprop_approve_yes:{proposal_id}", user_id=SUPER_TG)
         notice = plaque(h)
-        self.assertIn("Администраторов мест уведомлено: 1", notice)
+        self.assertIn("Уведомлено администраторов мест: 1", notice)
         self.assertNotIn("не доставлено", notice)
         self.assertNotIn("не доставлены", notice)
         with h.session_factory() as session:
@@ -448,7 +448,7 @@ class ConflictPlaqueHonestyTests(unittest.TestCase):
         await self._open_approve_confirm(h, proposal_id)
         await h.callback(f"adm_bprop_approve_yes:{proposal_id}", user_id=SUPER_TG)
         notice = plaque(h)
-        self.assertIn("поставлены в очередь", notice)
+        self.assertIn("ожидают отправки. Если", notice)
         self.assertNotIn("Администраторов мест уведомлено", notice)
         self.assertNotIn("не доставлены", notice)
         with h.session_factory() as session:
@@ -561,7 +561,7 @@ class R5ScenarioIdorTests(unittest.TestCase):
         )
         await h.callback(f"adm_bconflicts:{own_place}", user_id=OTHER_ADMIN_TG)
         self.assertIn("Конфликты кодов", h.screen_text())
-        self.assertIn("Активных задач нет", h.screen_text())
+        self.assertIn("Нерешённых задач нет.", h.screen_text())
         answers_before = len([c for c in h.calls if c["type"] == "callback_answer"])
         await h.callback(f"adm_bconflict:{conflict_id}", user_id=OTHER_ADMIN_TG)
         self.assertGreater(
@@ -570,7 +570,7 @@ class R5ScenarioIdorTests(unittest.TestCase):
             "подделка получает явный ответ",
         )
         self.assertEqual(last_alert(h), "Задача недоступна.")
-        self.assertNotIn("Задача разрешения конфликта", h.screen_text())
+        self.assertNotIn("Код занят двумя кирпичиками", h.screen_text())
         # Поддельные решения без нужной фазы — устаревшие кнопки.
         await h.callback(
             f"adm_bconflict_switch_yes:{conflict_id}", user_id=OTHER_ADMIN_TG
@@ -630,10 +630,10 @@ class R5ScenarioIdorTests(unittest.TestCase):
         # Настоящий админ места по-прежнему видит и решает задачу.
         await h.text("/admin", user_id=AUTHOR_TG)
         await h.callback(f"adm_place:{place_id}", user_id=AUTHOR_TG)
-        self.assertIn("Активные задачи конфликтов кодов: 1", h.screen_text())
+        self.assertIn("Нерешённых конфликтов кодов: 1", h.screen_text())
         await h.callback(f"adm_bconflicts:{place_id}", user_id=AUTHOR_TG)
         await h.callback(f"adm_bconflict:{conflict_id}", user_id=AUTHOR_TG)
-        self.assertIn("Задача разрешения конфликта", h.screen_text())
+        self.assertIn("Код занят двумя кирпичиками", h.screen_text())
         await h.callback(f"adm_bconflict_switch:{conflict_id}", user_id=AUTHOR_TG)
         await h.callback(f"adm_bconflict_switch_yes:{conflict_id}", user_id=AUTHOR_TG)
         self.assertIn("задача закрыта", h.screen_text().lower())

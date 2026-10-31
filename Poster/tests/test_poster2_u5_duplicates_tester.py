@@ -367,7 +367,7 @@ class PhotoAndRestartSingleCopyTests(unittest.TestCase):
 
         # «Изменить» после рестарта открывает компактный экран правки.
         await _open_edit(h)
-        self.assertIn("✏️ Редактирование анонса", h.screen_text())
+        self.assertIn("✏️ Изменить анонс", h.screen_text())
 
     def _only_post_id(self, h, stored) -> int:
         ids = list(stored.delivered_message_ids)

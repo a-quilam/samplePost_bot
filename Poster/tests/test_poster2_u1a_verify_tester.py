@@ -843,11 +843,11 @@ class PlaceCityUiTests(unittest.TestCase):
 
             # `city_set` через UI: выбор действия → ввод → подтверждение.
             await h.callback(f"adm_edit_city:{place_id}")
-            self.assertIn("Изменение города", h.screen_text())
+            self.assertIn("Изменить город", h.screen_text())
             self.assertIn("Москва", h.screen_text(), "экран ввода не показывает город")
             await h.text("Тверь")
             confirm = h.screen_text()
-            self.assertIn("Подтвердите изменение города", confirm)
+            self.assertIn("Сохранить новый город", confirm)
             self.assertIn("Тверь", confirm)
             await h.callback("adm_edit_confirm")
             self.assertIn("✅ Город места обновлён.", h.screen_text())

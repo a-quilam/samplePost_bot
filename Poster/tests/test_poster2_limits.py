@@ -181,7 +181,7 @@ class PhotoLimitScenarioTests(unittest.TestCase):
         self.assertEqual(
             stored.photos, tuple(f"limit-photo-{index}" for index in range(10))
         )
-        self.assertIn("максимум", h.screen_text())
+        self.assertIn("больше добавить нельзя", h.screen_text())
         # Сообщение с отклонённым снимком не удалено: автор видит причину.
         self.assertNotIn(rejected.message.message_id, h.deleted_ids())
 

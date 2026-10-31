@@ -152,7 +152,7 @@ class MainInterfaceSmokeTests(unittest.TestCase):
     async def test_menu_and_dialog_smoke(self, h):
         # Меню на постоянном экране
         await h.text("/start")
-        self.assertIn("Выберите действие", h.screen_text())
+        self.assertIn("Что хотите сделать?", h.screen_text())
 
         # Переход в конструктор анонса: команда /new_wizard — тот же вход,
         # что и «📍 Создать для площадки», но без площадки

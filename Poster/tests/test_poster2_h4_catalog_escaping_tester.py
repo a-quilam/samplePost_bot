@@ -192,7 +192,7 @@ class EscapingScreenTests(unittest.TestCase):
                 session,
                 h.user_id,
                 username=f"user{h.user_id}",
-                full_name=f"Пользователь {h.user_id}",
+                full_name=f"ПPosterП{h.user_id}",
             )
             brick = create_personal_brick(
                 session,

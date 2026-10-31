@@ -149,7 +149,7 @@ class TemplatesUiTests(unittest.TestCase):
         """Открытие «Мои шаблоны» при отсутствии шаблонов."""
         self.make_user(h, OWNER_TG)
         await h.text("/templates", user_id=OWNER_TG)
-        self.assertIn("У вас пока нет личных шаблонов", h.screen_text())
+        self.assertIn("Личных шаблонов пока нет", h.screen_text())
         self.assertIn(("➕ Создать шаблон", "tp_create"), h.screen_buttons())
         self.assertIn(("◀️ Назад", "main_menu"), h.screen_buttons())
 
@@ -178,9 +178,9 @@ class TemplatesUiTests(unittest.TestCase):
         await h.callback("tp_create", user_id=OWNER_TG)
         self.assertIn("Введите название", h.screen_text())
         await h.text("Моя афиша", user_id=OWNER_TG)
-        self.assertIn("Выберите начальное содержимое", h.screen_text())
+        self.assertIn("С чего начать?", h.screen_text())
         await h.callback("tp_cstd", user_id=OWNER_TG)
-        self.assertIn("Подтвердите создание", h.screen_text())
+        self.assertIn("Создать шаблон?", h.screen_text())
         await h.callback("tp_csave", user_id=OWNER_TG)
         self.assertIn("Моя афиша", h.screen_text())
         rows = self.personal_templates(h)
@@ -195,7 +195,7 @@ class TemplatesUiTests(unittest.TestCase):
         await h.callback("tp_create", user_id=OWNER_TG)
         await h.text("Пустой", user_id=OWNER_TG)
         await h.callback("tp_cempty", user_id=OWNER_TG)
-        self.assertIn("Подтвердите создание", h.screen_text())
+        self.assertIn("Создать шаблон?", h.screen_text())
         await h.callback("tp_csave", user_id=OWNER_TG)
         self.assertIn("Пустой", h.screen_text())
         rows = self.personal_templates(h)
@@ -220,7 +220,7 @@ class TemplatesUiTests(unittest.TestCase):
         await h.callback(f"tp_open:{tid}", user_id=OWNER_TG)
         self.assertIn("Редактируемый", h.screen_text())
         await h.callback(f"tp_edit:{tid}", user_id=OWNER_TG)
-        self.assertIn("Редактирование текста", h.screen_text())
+        self.assertIn("Правка текста", h.screen_text())
         await h.text("Новое тело [дата]", user_id=OWNER_TG)
         self.assertIn("Новое тело", h.screen_text())
         await h.callback("tp_save", user_id=OWNER_TG)
@@ -272,7 +272,7 @@ class TemplatesUiTests(unittest.TestCase):
         other_tg = OWNER_TG + 100
         self.make_user(h, other_tg)
         await h.text("/templates", user_id=other_tg)
-        self.assertIn("У вас пока нет личных шаблонов", h.screen_text())
+        self.assertIn("Личных шаблонов пока нет", h.screen_text())
         # Прямой callback тоже не открывает.
         await h.callback(f"tp_open:{created.template_id}", user_id=other_tg)
         self.assertIn(
@@ -311,7 +311,7 @@ class TemplatesUiTests(unittest.TestCase):
         await h.text("/templates", user_id=OWNER_TG)
         await h.callback("tp_create", user_id=OWNER_TG)
         await h.callback("tp_cancel", user_id=OWNER_TG)
-        self.assertIn("У вас пока нет личных шаблонов", h.screen_text())
+        self.assertIn("Личных шаблонов пока нет", h.screen_text())
         self.assertIsNone(load_template_session(h.user_id))
 
     @scenario_test
@@ -353,7 +353,7 @@ class TemplatesUiTests(unittest.TestCase):
         self.assertIn(f"tp_back_place:{place_id}", buttons)
 
         await h.callback(f"tp_edit:{template_id}", user_id=admin_tg)
-        self.assertIn("Редактирование текста", h.screen_text())
+        self.assertIn("Правка текста", h.screen_text())
         await h.text("Своё тело [название]", user_id=admin_tg)
         self.assertIn("Своё тело", h.screen_text())
         await h.callback("tp_save", user_id=admin_tg)
@@ -518,7 +518,9 @@ class TemplatesUiTests(unittest.TestCase):
         self.assertIn("Версия обновлена до 2", h.screen_text())
         self.assertIn("Мой новый текст", h.screen_text())
         self.assertEqual(
-            h.screen_text().count("Ваш текст сохранён — проверьте его и подтвердите."),
+            h.screen_text().count(
+                "Ваш текст сохранён. Проверьте его и подтвердите сохранение."
+            ),
             1,
         )
         await h.callback("tp_save", user_id=owner_tg)
@@ -532,7 +534,7 @@ class TemplatesUiTests(unittest.TestCase):
 
         # Повторное/устаревшее «Сохранить» после успеха не создаёт версию.
         await h.callback("tp_save", user_id=owner_tg)
-        self.assertIn("устарела", h.answers()[-1].get("text", ""))
+        self.assertIn("больше не работает", h.answers()[-1].get("text", ""))
         row = self.template_row(h, template_id)
         assert row is not None
         self.assertEqual(row.revision, 3)
@@ -565,7 +567,7 @@ class TemplatesUiTests(unittest.TestCase):
 
         await h.restart()
         await h.text("/templates", user_id=owner_tg)
-        self.assertIn("Сохранение не было подтверждено", h.screen_text())
+        self.assertIn("Сохранение не подтверждено", h.screen_text())
         self.assertIn("Текст после рестарта", h.screen_text())
         await h.callback("tp_save", user_id=owner_tg)
         row = self.template_row(h, template_id)
@@ -600,7 +602,7 @@ class TemplatesUiTests(unittest.TestCase):
         await h.callback(f"tp_std:{place_id}", user_id=admin_tg)
         await h.callback(f"tp_edit:{template_id}", user_id=admin_tg)
         await h.text("[тестовый]", user_id=admin_tg)
-        self.assertIn("Неоднозначный кирпичик", h.screen_text())
+        self.assertIn("Какой кирпичик использовать?", h.screen_text())
         state = load_template_session(admin_tg)
         assert state is not None
         groups = state["pending_ambiguities"]
@@ -647,14 +649,14 @@ class TemplatesUiTests(unittest.TestCase):
         await h.callback(f"tp_std:{place_id}", user_id=admin_tg)
         await h.callback(f"tp_edit:{template_id}", user_id=admin_tg)
         await h.text("[тестовый]", user_id=admin_tg)
-        self.assertIn("Неоднозначный кирпичик", h.screen_text())
+        self.assertIn("Какой кирпичик использовать?", h.screen_text())
         self.assertIn(f"tp_bricks:{template_id}", self.screen_callbacks(h))
 
         await h.callback(f"tp_bricks:{template_id}", user_id=admin_tg)
         self.assertIn("Доступные кирпичики", h.screen_text())
         self.assertNotIn("устарела", h.answers()[-1].get("text") or "")
         await h.callback("tp_back", user_id=admin_tg)
-        self.assertIn("Неоднозначный кирпичик", h.screen_text())
+        self.assertIn("Какой кирпичик использовать?", h.screen_text())
         self.assertNotIn("устарела", h.answers()[-1].get("text") or "")
         state = load_template_session(admin_tg)
         assert state is not None

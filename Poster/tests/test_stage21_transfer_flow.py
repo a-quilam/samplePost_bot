@@ -49,7 +49,7 @@ TARGET_TG = 730300
 OTHER_TG = 730400
 THIRD_TG = 730500
 
-DENIED_ALERT = "Доступ к административному разделу закрыт."
+DENIED_ALERT = "У вас нет доступа к разделу администрирования."
 
 
 def insert_place(
@@ -323,7 +323,7 @@ async def open_transfer_input(h, place_id: int) -> None:
     await h.text("/admin")
     await h.callback(screen_callback(h, "adm_place:"))
     labels = [label for label, _ in h.screen_buttons()]
-    if "🔁 Передать админку" not in labels:
+    if "🔁 Передать права" not in labels:
         raise AssertionError(f"нет кнопки передачи: {labels!r}\n{h.screen_text()}")
     await h.callback(f"adm_transfer:{place_id}")
     if "Введите @username" not in h.screen_text():
@@ -333,7 +333,7 @@ async def open_transfer_input(h, place_id: int) -> None:
 async def create_known_offer(h, place_id: int, username: str = "newadmin") -> int:
     await open_transfer_input(h, place_id)
     await h.text(f"@{username}")
-    if "Подтвердите создание предложения" not in h.screen_text():
+    if "Создать предложение передачи" not in h.screen_text():
         raise AssertionError(f"нет подтверждения получателя:\n{h.screen_text()}")
     await h.callback("adm_transfer_confirm")
     row = pending_transfer(h, place_id)
@@ -358,11 +358,11 @@ class TransferScreenTests(unittest.TestCase):
         await h.text("/admin")
         await h.callback(screen_callback(h, "adm_place:"))
         labels = [label for label, _ in h.screen_buttons()]
-        self.assertIn("🔁 Передать админку", labels)
+        self.assertIn("🔁 Передать права", labels)
 
         await h.callback(f"adm_transfer:{place_id}")
         text = h.screen_text()
-        self.assertIn("Передача администрации места", text)
+        self.assertIn("Передать права администратора", text)
         self.assertIn("Введите @username", text)
         self.assertIn("До этого вы остаётесь администратором", text)
 
@@ -377,7 +377,7 @@ class TransferScreenTests(unittest.TestCase):
             await h.text("/admin")
             await h.callback(screen_callback(h, "adm_place:"))
             labels = [label for label, _ in h.screen_buttons()]
-            self.assertNotIn("🔁 Передать админку", labels)
+            self.assertNotIn("🔁 Передать права", labels)
             self.assertIn("🔁 Заменить администратора", labels)
 
 
@@ -396,7 +396,7 @@ class KnownRecipientFlowTests(unittest.TestCase):
         h.user_id = INITIATOR_TG
 
         transfer_id = await create_known_offer(h, place_id)
-        self.assertIn("Получатель получил уведомление", h.screen_text())
+        self.assertIn("уведомление доставлено получателю.", h.screen_text())
         row = transfer_row(h, transfer_id)
         self.assertEqual(row.status, "pending")
 
@@ -408,7 +408,7 @@ class KnownRecipientFlowTests(unittest.TestCase):
         # Обе стороны получили итог; уведомление инициатору — отдельное событие.
         texts = message_texts_to(h, INITIATOR_TG)
         self.assertTrue(
-            any("Передача администрации завершена" in text for text in texts),
+            any("Права администратора переданы" in text for text in texts),
             texts,
         )
         self.assertEqual(
@@ -429,7 +429,7 @@ class KnownRecipientFlowTests(unittest.TestCase):
         await h.callback(
             f"adm_edit_place:{place_id}", user_id=TARGET_TG, chat_id=TARGET_TG
         )
-        self.assertIn("Редактирование места", h.screen_text())
+        self.assertIn("Изменить место", h.screen_text())
 
         # Старый админ немедленно теряет права: кнопка на его открытом экране
         # передачи упирается в свежую проверку роли, а /admin закрыт.
@@ -540,7 +540,7 @@ class KnownRecipientFlowTests(unittest.TestCase):
         self.assertIn("Права остались у вас", h.screen_text())
         self.assertTrue(
             any(
-                "Передача администрации отменена" in text
+                "Передача прав отменена" in text
                 for text in message_texts_to(h, TARGET_TG)
             )
         )
@@ -552,7 +552,7 @@ class KnownRecipientFlowTests(unittest.TestCase):
         # Получатель видит объяснение в своём уведомлении, а не молчание.
         self.assertTrue(
             any(
-                "Передача отменена инициатором" in text
+                "Отправитель отменил передачу" in text
                 for text in notification_texts_to(h, TARGET_TG)
             ),
             notification_texts_to(h, TARGET_TG),
@@ -572,9 +572,9 @@ class KnownRecipientFlowTests(unittest.TestCase):
         await h.restart()
         await h.text("/admin", user_id=INITIATOR_TG, chat_id=INITIATOR_TG)
         text = h.screen_text()
-        self.assertIn("Передача администрации", text)
+        self.assertIn("Передача прав", text)
         self.assertIn("Новый Админ (@newadmin)", text)
-        self.assertIn("Получатель известен", text)
+        self.assertIn("Получатель определён,", text)
 
         await h.callback(accept, user_id=TARGET_TG, chat_id=TARGET_TG)
         self.assertEqual(transfer_row(h, transfer_id).status, "confirmed")
@@ -596,7 +596,7 @@ class InviteFlowTests(unittest.TestCase):
 
         await open_transfer_input(h, place_id)
         await h.text("@stranger")
-        self.assertIn("Получатель пока не известен боту", h.screen_text())
+        self.assertIn("Poster пока не знает получателя", h.screen_text())
         await h.callback("adm_transfer_confirm")
         text = h.screen_text()
         self.assertIn("Одноразовая ссылка-приглашение", text)
@@ -627,7 +627,7 @@ class InviteFlowTests(unittest.TestCase):
         # После обновления ссылка из БД не восстанавливается и не показывается.
         await h.callback(screen_callback(h, "adm_transfer_refresh:"))
         self.assertNotIn(payload, h.screen_text())
-        self.assertIn("показана один раз", h.screen_text())
+        self.assertIn("только один раз", h.screen_text())
 
     @scenario_test
     async def test_full_unknown_recipient_flow_requires_two_sided_consent(self, h):
@@ -650,7 +650,7 @@ class InviteFlowTests(unittest.TestCase):
         # Первый открывший — только кандидат; прав и кнопки подтверждения нет.
         await h.text(f"/start {payload}", user_id=TARGET_TG, chat_id=TARGET_TG)
         self.assertIn("Приглашение открыто", h.screen_text())
-        self.assertIn("Это ещё не передача прав", h.screen_text())
+        self.assertIn("Права пока не переданы.", h.screen_text())
         self.assertEqual(active_admin_tg(h, place_id), INITIATOR_TG)
         row = transfer_row(h, transfer_id)
         self.assertIsNotNone(row.opened_by_user_id)
@@ -658,7 +658,10 @@ class InviteFlowTests(unittest.TestCase):
 
         # Другая учётная запись не может перепривязать уже открытую ссылку.
         await h.text(f"/start {payload}", user_id=OTHER_TG, chat_id=OTHER_TG)
-        self.assertIn("уже открыта другим аккаунтом", h.screen_text())
+        self.assertIn(
+            "уже открыли с другого аккаунта\n\nЭто приглашение уже связано с другим человеком.",
+            h.screen_text(),
+        )
         self.assertEqual(
             transfer_row(h, transfer_id).opened_by_user_id, row.opened_by_user_id
         )
@@ -708,13 +711,13 @@ class InviteFlowTests(unittest.TestCase):
             user_id=TARGET_TG,
             chat_id=TARGET_TG,
         )
-        self.assertIn("Ссылка-приглашение недействительна", h.screen_text())
+        self.assertIn("Ссылка-приглашение не", h.screen_text())
         row = transfer_row(h, int(transfer_id))
         self.assertIsNone(row.opened_by_user_id)
 
         # Собственная ссылка не делает инициатора кандидатом.
         await h.text(f"/start {payload}", user_id=INITIATOR_TG, chat_id=INITIATOR_TG)
-        self.assertIn("Это ваша собственная ссылка", h.screen_text())
+        self.assertIn("Это ваша ссылка-приглашение", h.screen_text())
         self.assertIsNone(transfer_row(h, int(transfer_id)).opened_by_user_id)
 
     @scenario_test
@@ -767,7 +770,7 @@ class InviteFlowTests(unittest.TestCase):
         self.assertEqual(active_admin_tg(h, place_id), THIRD_TG)
         self.assertTrue(
             any(
-                "Предложение недействительно" in text
+                "Предложение больше не действует" in text
                 for text in notification_texts_to(h, TARGET_TG)
             ),
             notification_texts_to(h, TARGET_TG),
@@ -888,14 +891,14 @@ class SafetyAndAuditFlowTests(unittest.TestCase):
         text = h.screen_text()
         # H3 (требование D): общий компонент «Текущее значение» — предел
         # только физический (лимит Telegram), и о нём сказано явно.
-        self.assertIn("Показано начало значения", text)
-        self.assertIn("полное значение сохранено", text)
+        self.assertIn("Здесь видно только", text)
+        self.assertIn("Значение сохранено полностью.", text)
         self.assertIn("4096", text)
         self.assertNotIn("<code>", text)
 
         await h.callback(screen_callback(h, "adm_edit_place:"))
         text = h.screen_text()
-        self.assertIn("Показано начало значения", text)
+        self.assertIn("Здесь видно только", text)
 
         session = h.session_factory()
         try:

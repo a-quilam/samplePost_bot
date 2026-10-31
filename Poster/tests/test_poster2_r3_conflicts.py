@@ -1328,7 +1328,7 @@ class ConflictUiTests(unittest.TestCase):
         await h.text("/admin", user_id=AUTHOR_TG)
         self.assertIn("Мои места", h.screen_text())
         await h.callback(f"adm_place:{place_id}", user_id=AUTHOR_TG)
-        self.assertIn("Активные задачи конфликтов", h.screen_text())
+        self.assertIn("Нерешённых конфликтов кодов", h.screen_text())
         await h.callback(f"adm_bconflicts:{place_id}", user_id=AUTHOR_TG)
         self.assertIn("Конфликты кодов", h.screen_text())
 
@@ -1339,7 +1339,7 @@ class ConflictUiTests(unittest.TestCase):
                 )
             )
         await h.callback(f"adm_bconflict:{conflict_id}", user_id=AUTHOR_TG)
-        self.assertIn("Задача разрешения конфликта", h.screen_text())
+        self.assertIn("Код занят двумя кирпичиками", h.screen_text())
         await h.callback(f"adm_bconflict_rename:{conflict_id}", user_id=AUTHOR_TG)
         await h.text("ui_переименован", user_id=AUTHOR_TG)
         self.assertIn("переименован", h.screen_text().lower())
@@ -1368,7 +1368,7 @@ class ConflictUiTests(unittest.TestCase):
                 for call in h.calls
                 if call["type"] == "message"
                 and int(call.get("chat_id") or 0) == AUTHOR_TG
-                and "Конфликт кодов" in str(call.get("text") or "")
+                and "Код занят двумя кирпичиками" in str(call.get("text") or "")
             ]
 
         self.assertEqual(len(conflict_notices()), 1)

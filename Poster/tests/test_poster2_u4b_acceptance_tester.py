@@ -291,7 +291,7 @@ class OwnerScenarioAcceptanceTests(unittest.TestCase):
 
         # Числовой payload, равный place_id, конструктор не открывает.
         await h.text(f"/start {place_id}", user_id=INVITED_TG)
-        self.assertIn("Ссылка недействительна", h.screen_text())
+        self.assertIn("Ссылка не работает", h.screen_text())
         self.assertIsNone(h.dialog_state(user_id=INVITED_TG, name=CONVERSATION_NAME))
         self.assertEqual(_drafts(h, INVITED_TG), [])
 
@@ -305,7 +305,7 @@ class OwnerScenarioAcceptanceTests(unittest.TestCase):
         self.assertNotEqual(old_token, new_token)
 
         await h.text(f"/start {old_token}", user_id=INVITED_TG)
-        self.assertIn("Ссылка недействительна", h.screen_text())
+        self.assertIn("Ссылка не работает", h.screen_text())
         self.assertIsNone(h.dialog_state(user_id=INVITED_TG, name=CONVERSATION_NAME))
         self.assertEqual(_drafts(h, INVITED_TG), [])
 
@@ -330,7 +330,7 @@ class OwnerScenarioAcceptanceTests(unittest.TestCase):
             connection.close()
 
         await h.text(f"/start {token}", user_id=INVITED_TG)
-        self.assertIn("Ссылка недействительна", h.screen_text())
+        self.assertIn("Ссылка не работает", h.screen_text())
         self.assertIsNone(h.dialog_state(user_id=INVITED_TG, name=CONVERSATION_NAME))
         self.assertEqual(_drafts(h, INVITED_TG), [])
 
@@ -342,7 +342,7 @@ class OwnerScenarioAcceptanceTests(unittest.TestCase):
         for payload in ("Z" * 22, "0123456789abcdef", "%00", "../etc/passwd", "x"):
             await h.text(f"/start {payload}", user_id=INVITED_TG)
             text = h.screen_text()
-            self.assertIn("Ссылка недействительна", text, payload)
+            self.assertIn("Ссылка не работает", text, payload)
             self.assertNotIn("внутренняя ошибка", text.lower(), payload)
             self.assertEqual(
                 _callbacks(h), MAIN_MENU_BUTTONS, f"payload {payload!r} → меню"
@@ -466,7 +466,7 @@ class StartRegressionTests(unittest.TestCase):
     async def test_start_without_payload_opens_main_menu(self, h):
         await h.text("/start")
 
-        self.assertIn("Выберите действие", h.screen_text())
+        self.assertIn("Что хотите сделать?", h.screen_text())
         self.assertEqual(_callbacks(h), MAIN_MENU_BUTTONS)
         self.assertIsNone(h.dialog_state(name=CONVERSATION_NAME))
 
@@ -482,7 +482,7 @@ class StartRegressionTests(unittest.TestCase):
         await h.text("/start tf_999_deadbeefdeadbeefdeadbeef", user_id=INVITED_TG)
         text = h.screen_text()
         self.assertNotIn("Вопрос 1", text)
-        self.assertNotIn("Ссылка недействительна", text)
+        self.assertNotIn("Ссылка не работает", text)
         self.assertIsNone(h.dialog_state(user_id=INVITED_TG, name=CONVERSATION_NAME))
 
 

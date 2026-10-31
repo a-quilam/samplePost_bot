@@ -42,9 +42,9 @@ TARGET_TG = 700200
 TARGET2_TG = 700300
 ORDINARY_TG = 700400
 
-DENIED_ALERT = "Доступ к административному разделу закрыт."
+DENIED_ALERT = "У вас нет доступа к разделу администрирования."
 SUPER_ONLY_ALERT = "Действие доступно только суперадминистратору."
-STALE_ALERT = "Кнопка устарела: откройте административный кабинет заново."
+STALE_ALERT = "Эта кнопка больше не работает. Откройте раздел администрирования заново."
 
 
 def insert_place(
@@ -186,7 +186,7 @@ class AdminMenuAccessTests(unittest.TestCase):
         # команда /admin без прав: экран отказа только с главным меню
         await h.text("/admin")
         self.assertIn("Раздел доступен только администраторам Poster.", h.screen_text())
-        self.assertEqual(h.screen_buttons(), [("🏠 Главное меню", "main_menu")])
+        self.assertEqual(h.screen_buttons(), [("🏠 В меню", "main_menu")])
 
     @scenario_test
     async def test_admin_panel_callback_denied_does_not_change_screen(self, h):
@@ -323,7 +323,7 @@ class SuperadminAssignFlowTests(unittest.TestCase):
 
             await h.callback(f"adm_assign:{place_id}")
             self.assertIn("Поиск получателя", h.screen_text())
-            self.assertIn("уже взаимодействовал с Poster", h.screen_text())
+            self.assertIn("уже пользовался Poster.", h.screen_text())
 
             await h.text("@target")
             self.assertIn("Найдено: 1", h.screen_text())
@@ -367,7 +367,7 @@ class SuperadminAssignFlowTests(unittest.TestCase):
             await h.callback(screen_callback(h, "adm_place:"))
             await h.callback(f"adm_assign:{place_id}")
             await h.text("@ghost")
-            self.assertIn("Пользователь не найден", h.screen_text())
+            self.assertIn("Poster пока не знает", h.screen_text())
             labels = [label for label, _ in h.screen_buttons()]
             self.assertNotIn("✅ Подтвердить", labels)
             self.assertEqual(place_admin_count(h, place_id), 0)
@@ -393,7 +393,7 @@ class SuperadminAssignFlowTests(unittest.TestCase):
             await h.callback(screen_callback(h, "adm_place:"))
             await h.callback(f"adm_assign:{place_id}")
             await h.text(str(TARGET2_TG))
-            self.assertIn("Пользователь не найден", h.screen_text())
+            self.assertIn("Poster пока не знает", h.screen_text())
             self.assertEqual(place_admin_count(h, place_id), 0)
 
     @scenario_test
@@ -679,7 +679,7 @@ class ForgedCallbackTests(unittest.TestCase):
             await h.callback(f"adm_assign:{place_id}")
 
             await h.callback("main_menu")
-            self.assertIn("Выберите действие", h.screen_text())
+            self.assertIn("Что хотите сделать?", h.screen_text())
 
             # после выхода из кабинета его кнопки становятся устаревшими
             await h.callback(f"adm_place:{place_id}")
@@ -704,7 +704,7 @@ class AdminRequestScreenTests(unittest.TestCase):
         # карточка подтверждения: кнопка «Я админ места» для постороннего
         await h.callback(screen_callback(h, "pl_admin_request:"))
 
-        self.assertIn("🛡 Я админ места", h.screen_text())
+        self.assertIn("🛡 Я администратор места", h.screen_text())
         self.assertIn("не отправляет заявку", h.screen_text())
         self.assertIn("Контакт администратора пока не указан", h.screen_text())
         # права не выданы и заявки нет
@@ -748,7 +748,7 @@ class AdminRequestScreenTests(unittest.TestCase):
         await h.callback(screen_callback(h, "pl_all"))
         await h.callback(screen_callback(h, "pl_open:"))
         labels = [label for label, _ in h.screen_buttons()]
-        self.assertNotIn("🛡 Я админ места", labels)
+        self.assertNotIn("🛡 Я администратор места", labels)
 
 
 @unittest.skipIf(

@@ -363,7 +363,7 @@ class TrRenderingTests(_TempCatalog):
         )
         self.assertEqual(
             ui_texts.tr("wizard.photos.counter", count=3, limit=10),
-            "Добавлено фотографий: 3 из 10.",
+            "Добавлено фото: 3 из 10.",
         )
 
     def test_html_injection_is_escaped(self) -> None:

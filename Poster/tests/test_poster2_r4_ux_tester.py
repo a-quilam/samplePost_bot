@@ -76,7 +76,7 @@ PROPOSAL_FIELDS = (
     "Тип:",
     "Описание:",
     "Автор:",
-    "Цель:",
+    "Для кого:",
     "Статус:",
 )
 
@@ -516,7 +516,7 @@ class ProposalCardTests(R4TesterCase):
         )
         self.assertNotEqual(author_line.strip(), "Автор:", "автор не показан")
         self.assertIn("@u2150001", author_line)
-        self.assertIn("Цель: место «Зал карточки»", text)
+        self.assertIn("Для кого: место «Зал карточки»", text)
         self.assertIn("Статус: ⏳ Ожидает решения", text)
 
     @scenario_test
@@ -633,7 +633,7 @@ class ChatApplicationTests(R4TesterCase):
         update = await h.text("Кирпич ввода", user_id=OWNER)
         assert update.message is not None
         self.assertIn(update.message.message_id, h.deleted_ids())
-        self.assertIn("Техническое обозначение", h.screen_text())
+        self.assertIn("Код кирпичика", h.screen_text())
         with h.session_factory() as session:
             row = session.get(BrickSession, OWNER)
             self.assertIsNotNone(row, "ввод не сохранён")
@@ -676,7 +676,7 @@ class ChatApplicationTests(R4TesterCase):
         await self.open_hub(h)
         await h.callback("bk_create", user_id=OWNER)
         await h.text("Черновик при отказе", user_id=OWNER)
-        self.assertIn("Техническое обозначение", h.screen_text())
+        self.assertIn("Код кирпичика", h.screen_text())
         with h.session_factory() as session:
             row = session.get(BrickSession, OWNER)
             assert row is not None
@@ -897,7 +897,7 @@ class HumorTests(R4TesterCase):
         with patch("utils.ui_humor.pick_variant", return_value=ui_humor.HUMOR_JOKES[0]):
             await self.walk(h, source.id, place_id)
         text = h.screen_text()
-        self.assertIn("Отправить сейчас нельзя", text)
+        self.assertIn("Сейчас отправить нельзя", text)
         self.assertFalse(has(h, "bp_send"), "отправка при занятом коде недоступна")
         for variant in ui_humor.HUMOR_JOKES:
             self.assertNotIn(variant, text, "шутка в предупреждении")
@@ -948,7 +948,7 @@ class ForgeryAndIdorTests(R4TesterCase):
             await h.callback(data, user_id=OWNER)
         self.assertEqual(h.screen_text(), before, "битая кнопка изменила экран")
         self.assertTrue(
-            any("устарела" in text.lower() for text in alert_texts(h)),
+            any("больше не работает" in text.lower() for text in alert_texts(h)),
             f"нет ответа на битую кнопку: {alert_texts(h)!r}",
         )
 
@@ -986,7 +986,7 @@ class ForgeryAndIdorTests(R4TesterCase):
         self.ensure_user(h, STRANGER)
         await self.open_hub(h, user_id=STRANGER)
         await h.callback("bp_mine", user_id=STRANGER)
-        self.assertIn("Вы ещё не отправляли предложений", h.screen_text())
+        self.assertIn("Вы пока не отправляли предложения", h.screen_text())
 
         # Прямой id чужого предложения на экране списка.
         await h.callback(f"bp_open:{proposal_id}", user_id=STRANGER)

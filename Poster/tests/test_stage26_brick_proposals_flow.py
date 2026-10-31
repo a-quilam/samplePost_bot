@@ -560,7 +560,7 @@ class BrickProposalFlowTests(unittest.TestCase):
         self, h: Harness
     ) -> None:
         await self.open_my(h)
-        self.assertIn("ещё не отправляли", h.screen_text())
+        self.assertIn("пока не отправляли", h.screen_text())
         place_id = self.make_place(h, "Зал статусов")
         source = self.make_personal(h, OWNER_TG, code="статус_26")
         pending_id = self.direct_proposal(h, OWNER_TG, source.id, place_id=place_id)
@@ -660,7 +660,7 @@ class BrickProposalFlowTests(unittest.TestCase):
         source = self.make_personal(h, OWNER_TG, code="приват_ui_26")
         proposal_id = self.direct_proposal(h, OWNER_TG, source.id, place_id=place_id)
         await self.open_my(h, OTHER_TG)
-        self.assertIn("ещё не отправляли", h.screen_text())
+        self.assertIn("пока не отправляли", h.screen_text())
         await h.callback(f"bp_open:{proposal_id}", user_id=OTHER_TG)
         self.assertIn("не найдено", h.screen_text().lower())
         self.assertEqual(self.proposal_status(h, proposal_id), "pending")
@@ -1130,7 +1130,7 @@ class BrickProposalFlowTests(unittest.TestCase):
         await h.callback(f"adm_bprop_approve:{proposal_id}", user_id=ADMIN_TG)
         await h.callback(f"adm_bprop_approve_yes:{proposal_id}", user_id=ADMIN_TG)
         self.assertEqual(self.proposal_status(h, proposal_id), "approved")
-        self.assertIn("не доставлено", h.screen_text())
+        self.assertIn("Не удалось доставить", h.screen_text())
         self.assertEqual(self.author_messages(h), [])
 
     @scenario_test

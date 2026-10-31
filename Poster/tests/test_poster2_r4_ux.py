@@ -480,7 +480,7 @@ class DescriptionFormattingTests(R4HarnessCase):
             "Описание: <code>Инструкция &lt;автору&gt; &amp; всем</code>", text
         )
         self.assertIn("Автор:", text)
-        self.assertIn("Цель: место «Зал семи»", text)
+        self.assertIn("Для кого: место «Зал семи»", text)
         self.assertIn("Статус: ⏳ Ожидает решения", text)
         self.assertNotIn("<автору>", text, "описание не экранировано")
 
@@ -506,7 +506,7 @@ class DescriptionFormattingTests(R4HarnessCase):
         self.assertIn("Тип: Короткий текст", text)
         self.assertIn("Описание: <code>Кто &amp; как</code>", text)
         self.assertIn("Автор:", text)
-        self.assertIn("Цель: место «Зал админа»", text)
+        self.assertIn("Для кого: место «Зал админа»", text)
         self.assertIn("Статус:", text)
 
     @scenario_test
@@ -707,7 +707,7 @@ class ChatAsApplicationTests(R4HarnessCase):
         assert update.message is not None
         user_message_id = update.message.message_id
         self.assertIn(user_message_id, h.deleted_ids())
-        self.assertIn("Техническое обозначение", h.screen_text())
+        self.assertIn("Код кирпичика", h.screen_text())
 
     @scenario_test
     async def test_stray_text_on_screen_phase_keeps_the_screen(
@@ -808,7 +808,7 @@ class ChatAsApplicationTests(R4HarnessCase):
         await self.open_hub(h)
         await h.callback("bk_create", user_id=OWNER_TG)
         await h.text("Упорный кирпич", user_id=OWNER_TG)
-        self.assertIn("Техническое обозначение", h.screen_text())
+        self.assertIn("Код кирпичика", h.screen_text())
         with h.session_factory() as session:
             row = session.get(BrickSession, OWNER_TG)
             self.assertIsNotNone(row, "черновик не сохранён при отказе удаления")
@@ -954,7 +954,7 @@ class HumorRegressionTests(R4HarnessCase):
         with patch("utils.ui_humor.pick_variant", return_value=ui_humor.HUMOR_JOKES[0]):
             await self.walk_to_preview(h, source.id, place_id)
         text = h.screen_text()
-        self.assertIn("Отправить сейчас нельзя", text)
+        self.assertIn("Сейчас отправить нельзя", text)
         for joke in ui_humor.HUMOR_JOKES:
             self.assertNotIn(joke, text, "шутка не должна попадать в предупреждение")
 

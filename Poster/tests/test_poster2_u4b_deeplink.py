@@ -189,7 +189,7 @@ class PlaceInviteLinkTests(unittest.TestCase):
         new_token = _token_from_screen(h)
 
         self.assertNotEqual(old_token, new_token)
-        self.assertIn("Прежняя ссылка отозвана", h.screen_text())
+        self.assertIn("Прежняя ссылка больше не работает", h.screen_text())
         rows = _invites(h)
         self.assertEqual(len(rows), 2, "отозванная ссылка остаётся аудитом")
         self.assertEqual(len(_active_invites(h)), 1)
@@ -198,7 +198,7 @@ class PlaceInviteLinkTests(unittest.TestCase):
 
         # Старый токен больше не открывает конструктор.
         await h.text(f"/start {old_token}", user_id=INVITED_TG)
-        self.assertIn("Ссылка недействительна", h.screen_text())
+        self.assertIn("Ссылка не работает", h.screen_text())
         self.assertIsNone(h.dialog_state(user_id=INVITED_TG, name=CONVERSATION_NAME))
 
     @scenario_test
@@ -386,7 +386,7 @@ class PlaceInviteDeepLinkTests(unittest.TestCase):
         ):
             await h.text(f"/start {payload}", user_id=INVITED_TG)
             self.assertIn(
-                "Ссылка недействительна",
+                "Ссылка не работает",
                 h.screen_text(),
                 f"payload {payload!r} должен дать безопасный отказ",
             )
@@ -422,14 +422,14 @@ class PlaceInviteDeepLinkTests(unittest.TestCase):
             connection.close()
 
         await h.text(f"/start {token}", user_id=INVITED_TG)
-        self.assertIn("Ссылка недействительна", h.screen_text())
+        self.assertIn("Ссылка не работает", h.screen_text())
         self.assertIsNone(h.dialog_state(user_id=INVITED_TG, name=CONVERSATION_NAME))
 
     @scenario_test
     async def test_start_without_payload_still_opens_main_menu(self, h):
         await h.text("/start")
 
-        self.assertIn("Выберите действие", h.screen_text())
+        self.assertIn("Что хотите сделать?", h.screen_text())
         self.assertEqual(
             [data for _label, data in h.screen_buttons()],
             ["pick_place", "pick_template", "my_announcements", "manage", "help"],

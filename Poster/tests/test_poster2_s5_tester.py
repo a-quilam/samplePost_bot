@@ -276,7 +276,7 @@ class BrickDescriptionTests(unittest.TestCase):
         await h.callback("bk_create")
         await h.text("Кирпичик без описания")
         await h.callback("bk_accept_code")
-        self.assertIn("Описание для автора анонса", h.screen_text())
+        self.assertIn("Подсказка для автора анонса", h.screen_text())
         self.assertIn("⏭ Без описания", [label for label, _ in h.screen_buttons()])
         await h.callback("bk_skip_description")
         await h.callback("bk_type:short_text")

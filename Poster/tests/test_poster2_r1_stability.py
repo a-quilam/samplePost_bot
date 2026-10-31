@@ -43,8 +43,8 @@ SUPERADMIN_TG = 8_810_100
 TARGET_TG = 8_810_200
 UNKNOWN_TG = 8_810_300
 
-DENIED_ALERT = "Доступ к административному разделу закрыт."
-STALE_ALERT = "Кнопка устарела: откройте административный кабинет заново."
+DENIED_ALERT = "У вас нет доступа к разделу администрирования."
+STALE_ALERT = "Эта кнопка больше не работает. Откройте раздел администрирования заново."
 
 
 def patched_superadmin():
@@ -155,7 +155,7 @@ class AliasesBackTests(unittest.TestCase):
             await h.text("/admin")
             await h.callback(f"adm_place:{place_id}")
             await h.callback(f"adm_edit_place:{place_id}")
-            self.assertIn("Редактирование места", h.screen_text())
+            self.assertIn("Изменить место", h.screen_text())
             await h.callback(f"adm_aliases:{place_id}")
             self.assertIn("Альтернативные названия", h.screen_text())
             self.assertTrue(callbacks(h, "adm_alias_rename:"))
@@ -224,7 +224,7 @@ CANCEL_TARGETS: tuple[tuple[str, str], ...] = (
 # Ожидаемый маркер текста целевой фазы (кнопка «Назад» рендерит её сразу).
 TARGET_MARKERS = {
     "place": "🛡 Место",
-    "edit_menu": "Редактирование места",
+    "edit_menu": "Изменить место",
     "edit_aliases": "Альтернативные названия",
 }
 
@@ -297,7 +297,7 @@ class ReplyKeyboardRemoveTests(unittest.TestCase):
         self.assertTrue(removals, "на /start не отправлен ReplyKeyboardRemove")
         self.assertFalse(removals[0]["reply_markup"].selective)
         # Дальше UI живёт на inline-кнопках: главное меню на месте.
-        self.assertIn("Выберите действие", h.screen_text())
+        self.assertIn("Что хотите сделать?", h.screen_text())
         labels = [label for label, _data in h.screen_buttons()]
         self.assertIn("📍 Создать для площадки", labels)
         # Служебное сообщение не остаётся в чате.
@@ -392,7 +392,7 @@ class AssignSearchOutcomeTests(unittest.TestCase):
             await self._open_search(h)
             await h.text("@a_quilam")
         text = h.screen_text()
-        self.assertIn("Пользователь не найден", text)
+        self.assertIn("Poster пока не знает", text)
         self.assertIn("@a_quilam", text)
         self.assertIn("/start", text)
         self.assertFalse(callbacks(h, "adm_pick:"))
@@ -414,7 +414,7 @@ class AssignSearchOutcomeTests(unittest.TestCase):
             await self._open_search(h)
             await h.text(str(UNKNOWN_TG))
         text = h.screen_text()
-        self.assertIn("Пользователь не найден", text)
+        self.assertIn("Poster пока не знает", text)
         self.assertIn(str(UNKNOWN_TG), text)
         self.assertIn("/start", text)
         self.assertFalse(callbacks(h, "adm_pick:"))
@@ -429,7 +429,7 @@ class AssignSearchOutcomeTests(unittest.TestCase):
             for garbage in ("!!!", "   ", "@"):
                 with self.subTest(garbage=garbage):
                     await h.text(garbage)
-                    self.assertIn("Неверный формат", h.screen_text())
+                    self.assertIn("Введите @username", h.screen_text())
                     # Фаза не потеряна: следующий корректный ввод ищет.
                     self.assertIn("Поиск получателя", h.screen_text())
                     state = load_admin_session(SUPERADMIN_TG)
@@ -490,4 +490,4 @@ class AssignSearchOutcomeTests(unittest.TestCase):
         with patched_superadmin():
             h.user_id = SUPERADMIN_TG
             await h.callback(f"adm_pick:{TARGET_TG}")
-        self.assertIn("не существует", (last_alert(h) or "").lower())
+        self.assertIn("места нет.", (last_alert(h) or "").lower())

@@ -52,8 +52,8 @@ except Exception as exc:  # noqa: BLE001 — причина попадает в 
 
 PHOTO_STEP_TITLE = "📷 Фотографии анонса"
 PHOTO_STEP_HINT = (
-    "Пришлите фотографию или альбом. Можно добавить до "
-    f"{MAX_ANNOUNCEMENT_PHOTOS} фотографий."
+    "Пришлите фото или альбом. Всего можно добавить до "
+    f"{MAX_ANNOUNCEMENT_PHOTOS} фото."
 )
 # Слова, которых на коротком шаге быть не должно: это прежние технические
 # объяснения, которые владелец просил убрать.
@@ -111,13 +111,13 @@ class PhotoStepViewTests(unittest.TestCase):
         for word in TECHNICAL_WORDS:
             self.assertNotIn(word, text)
         # Счётчика нет, пока фотографий нет.
-        self.assertNotIn("Добавлено фотографий", text)
+        self.assertNotIn("Добавлено фото", text)
 
     def test_counter_appears_only_when_photos_exist(self) -> None:
         text = wizard_photos.photo_step_text(
             self._details(photos=("a", "b")),
         )
-        self.assertIn("Добавлено фотографий: 2 из 10.", text)
+        self.assertIn("Добавлено фото: 2 из 10.", text)
         self.assertIn(PHOTO_STEP_HINT, text)
 
     def test_empty_announcement_keeps_its_joke(self) -> None:
@@ -183,14 +183,14 @@ class PhotoStepWiringTests(unittest.TestCase):
         for word in TECHNICAL_WORDS:
             self.assertNotIn(word, text)
         self.assertIn(PHOTO_STEP_HINT, text)
-        self.assertNotIn("Добавлено фотографий", text)
+        self.assertNotIn("Добавлено фото", text)
 
         # После отклонённого 11-го снимка шаг остаётся с фотографиями и
         # показывает счётчик (снимки приняты, анонс ещё не готов).
         for index in range(MAX_ANNOUNCEMENT_PHOTOS + 1):
             await h.photo(f"cnt-{index}", media_group_id="mg-counter")
         await asyncio.sleep(0.4)
-        self.assertIn("Добавлено фотографий: 10 из 10.", h.screen_text())
+        self.assertIn("Добавлено фото: 10 из 10.", h.screen_text())
         self.assertIn(PHOTO_STEP_HINT, h.screen_text())
 
     @scenario_test
@@ -228,7 +228,7 @@ class PhotoStepWiringTests(unittest.TestCase):
 
         posts_before = h.posts()
         await h.callback(stale_back)
-        self.assertIn("Экран устарел", h.answer_texts()[-1])
+        self.assertIn("Данные изменились.", h.answer_texts()[-1])
         self.assertEqual(h.posts(), posts_before)
         self.assertIn("✅ Анонс готов.", h.screen_text())
 
@@ -383,8 +383,8 @@ class PhotoLimitOnStepTests(unittest.TestCase):
             tuple(f"ok-{index}" for index in range(MAX_ANNOUNCEMENT_PHOTOS)),
         )
         self.assertIsNone(stored.publication_status, "партия с отказом не финал")
-        self.assertIn("максимум", h.screen_text())
-        self.assertIn("Добавлено фотографий: 10 из 10.", h.screen_text())
+        self.assertIn("больше добавить нельзя", h.screen_text())
+        self.assertIn("Добавлено фото: 10 из 10.", h.screen_text())
         # Сообщение с отклонённым снимком остаётся: автор видит причину.
         self.assertNotIn(rejected.message.message_id, h.deleted_ids())
         # Шаг по-прежнему даёт ровно две кнопки.
@@ -430,7 +430,7 @@ class TextLimitTests(unittest.TestCase):
         photo_update = await h.photo("limit-photo")
         screen = h.screen_text()
         self.assertIn("не помещается", screen)
-        self.assertIn("из 1024", screen)
+        self.assertIn("при лимите 1024", screen)
 
         stored = _details(h, draft.id)
         self.assertIsNone(stored.publication_status, "превышение не отправляется")

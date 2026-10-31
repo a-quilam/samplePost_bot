@@ -91,7 +91,7 @@ SUPER_TG = 8_500_001
 AUTHOR_TG = 8_500_002
 OWNER_TG = 8_500_003
 
-STALE_ALERT = "Кнопка устарела: откройте административный кабинет заново."
+STALE_ALERT = "Эта кнопка больше не работает. Откройте раздел администрирования заново."
 
 
 def patched_superadmin() -> Any:
@@ -252,7 +252,8 @@ class SuperadminSelfAssignTests(unittest.TestCase):
                 "повторное назначение обязано ответить пользователю",
             )
             self.assertEqual(
-                last_alert(h), "У места уже есть администратор. Используйте замену."
+                last_alert(h),
+                "У места уже есть администратор. Выберите «Заменить администратора».",
             )
 
             # (в) поиск по СВОЕМУ числовому ID через флоу замены: находится
@@ -565,11 +566,11 @@ class ConflictNotificationFailureTests(unittest.TestCase):
         notice, _card = h.screen_text().split("\n\n", 1)
         self.assertIn("Предложение одобрено", notice)
         self.assertIn(
-            "Уведомления администраторам мест не доставлены: 1",
+            "Не доставлено уведомлений администраторам мест: 1",
             notice,
             "плашка обязана назвать число НЕдоставленных уведомлений о конфликте",
         )
-        self.assertIn("задача видна в карточке места", notice)
+        self.assertIn("Задача доступна в карточке места", notice)
         self.assertNotIn("уведомлено", notice.lower())
 
         # (в) Повторный прогон не создаёт дублей и не переотправляет.
@@ -597,11 +598,11 @@ class ConflictNotificationFailureTests(unittest.TestCase):
         h.bot.fail_types.discard("message")
         await h.text("/admin", user_id=AUTHOR_TG)
         await h.callback(f"adm_place:{place_id}", user_id=AUTHOR_TG)
-        self.assertIn("Активные задачи конфликтов кодов: 1", h.screen_text())
+        self.assertIn("Нерешённых конфликтов кодов: 1", h.screen_text())
         await h.callback(f"adm_bconflicts:{place_id}", user_id=AUTHOR_TG)
         self.assertIn(str(data["code"]), h.screen_text())
         await h.callback(f"adm_bconflict:{conflict_id}", user_id=AUTHOR_TG)
-        self.assertIn("Задача разрешения конфликта", h.screen_text())
+        self.assertIn("Код занят двумя кирпичиками", h.screen_text())
         self.assertIn("Местный носитель", h.screen_text())
 
 
@@ -799,18 +800,18 @@ class ConflictLocalHolderArchiveTests(unittest.TestCase):
         # см. docstring класса.
         await h.text("/admin", user_id=AUTHOR_TG)
         await h.callback(f"adm_place:{place_id}", user_id=AUTHOR_TG)
-        self.assertIn("Активные задачи конфликтов кодов: 1", h.screen_text())
+        self.assertIn("Нерешённых конфликтов кодов: 1", h.screen_text())
         await h.callback(f"adm_bconflicts:{place_id}", user_id=AUTHOR_TG)
         self.assertIn(str(data["code"]), h.screen_text())
         await h.callback(f"adm_bconflict:{conflict_id}", user_id=AUTHOR_TG)
-        self.assertIn("Задача разрешения конфликта", h.screen_text())
+        self.assertIn("Код занят двумя кирпичиками", h.screen_text())
         await h.callback(f"adm_bconflict_switch:{conflict_id}", user_id=AUTHOR_TG)
         self.assertIn(
             "✅ Да, переключить",
             [label for label, _ in h.screen_buttons()],
         )
         await h.callback(f"adm_bconflict_switch_yes:{conflict_id}", user_id=AUTHOR_TG)
-        self.assertIn("уже не держит этот код", h.screen_text())
+        self.assertIn("уже другой код", h.screen_text())
 
         with h.session_factory() as session:
             row = session.get(BrickConflict, conflict_id)

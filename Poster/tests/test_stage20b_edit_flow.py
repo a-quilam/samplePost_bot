@@ -40,8 +40,8 @@ PLACE_ADMIN_TG = 710200
 OTHER_ADMIN_TG = 710210
 ORDINARY_TG = 710300
 
-DENIED_ALERT = "Доступ к административному разделу закрыт."
-STALE_ALERT = "Кнопка устарела: откройте административный кабинет заново."
+DENIED_ALERT = "У вас нет доступа к разделу администрирования."
+STALE_ALERT = "Эта кнопка больше не работает. Откройте раздел администрирования заново."
 
 
 def insert_place(
@@ -203,7 +203,7 @@ async def open_edit_menu(h, place_id: int) -> None:
     await h.text("/admin")
     await h.callback(screen_callback(h, "adm_place:"))
     await h.callback(screen_callback(h, "adm_edit_place:"))
-    assert "✏️ Редактирование места" in h.screen_text()
+    assert "✏️ Изменить место" in h.screen_text()
 
 
 @unittest.skipIf(
@@ -220,7 +220,7 @@ class EditMenuAccessTests(unittest.TestCase):
             place_id = insert_place(h, "Кофейня «Локал»")
             await open_edit_menu(h, place_id)
             text = h.screen_text()
-            self.assertIn("✏️ Редактирование места", text)
+            self.assertIn("✏️ Изменить место", text)
             self.assertIn("Кофейня «Локал»", text)
             self.assertIn("Не указан", text)
             labels = [label for label, _ in h.screen_buttons()]
@@ -241,7 +241,7 @@ class EditMenuAccessTests(unittest.TestCase):
         await h.text("/admin")
         await h.callback(screen_callback(h, "adm_place:"))
         await h.callback(screen_callback(h, "adm_edit_place:"))
-        self.assertIn("✏️ Редактирование места", h.screen_text())
+        self.assertIn("✏️ Изменить место", h.screen_text())
         labels = [label for label, _ in h.screen_buttons()]
         self.assertIn("🏷 Изменить название", labels)
 
@@ -272,9 +272,9 @@ class CanonicalRenameTests(unittest.TestCase):
             await open_edit_menu(h, place_id)
 
             await h.callback(screen_callback(h, "adm_edit_name:"))
-            self.assertIn("Введите новое каноническое название", h.screen_text())
+            self.assertIn("Введите новое основное название.", h.screen_text())
             await h.text("Кафе Локал")
-            self.assertIn("Подтвердите изменение названия", h.screen_text())
+            self.assertIn("Изменить название?", h.screen_text())
             self.assertIn("Кафе Локал", h.screen_text())
             self.assertIn("Кофейня «Локал»", h.screen_text())
 
@@ -302,7 +302,7 @@ class CanonicalRenameTests(unittest.TestCase):
 
             await h.callback(screen_callback(h, "adm_edit_name:"))
             await h.text("Новое название")
-            self.assertIn("Подтвердите изменение названия", h.screen_text())
+            self.assertIn("Изменить название?", h.screen_text())
 
             await h.callback("adm_cancel")
             self.assertEqual(canonical_name(h, place_id), "Кофейня «Локал»")
@@ -317,7 +317,7 @@ class CanonicalRenameTests(unittest.TestCase):
 
             await h.callback(screen_callback(h, "adm_edit_name:"))
             await h.text("Кафе Локал")
-            self.assertIn("Подтвердите изменение названия", h.screen_text())
+            self.assertIn("Изменить название?", h.screen_text())
 
             # второй администратор успел изменить название первым
             session = h.session_factory()
@@ -335,7 +335,7 @@ class CanonicalRenameTests(unittest.TestCase):
                 session.close()
 
             await h.callback("adm_edit_confirm")
-            self.assertIn("Значение изменилось во время подтверждения", h.screen_text())
+            self.assertIn("Пока вы подтверждали изменение,", h.screen_text())
             self.assertEqual(canonical_name(h, place_id), "Кофейня «Локал» 2")
 
 
@@ -354,9 +354,9 @@ class AddressUrlEditTests(unittest.TestCase):
             await open_edit_menu(h, place_id)
 
             await h.callback(screen_callback(h, "adm_edit_address:"))
-            self.assertIn("Введите адрес места", h.screen_text())
+            self.assertIn("Напишите адрес места.", h.screen_text())
             await h.text("  ул. Ленина,   5  ")
-            self.assertIn("Подтвердите изменение адреса", h.screen_text())
+            self.assertIn("Сохранить новый адрес?", h.screen_text())
             self.assertIn("ул. Ленина, 5", h.screen_text())
 
             await h.callback("adm_edit_confirm")
@@ -374,9 +374,9 @@ class AddressUrlEditTests(unittest.TestCase):
             await open_edit_menu(h, place_id)
 
             await h.callback(screen_callback(h, "adm_edit_url:"))
-            self.assertIn("Введите ссылку", h.screen_text())
+            self.assertIn("Отправьте ссылку", h.screen_text())
             await h.text(" t.me/poster ")
-            self.assertIn("Подтвердите изменение ссылки", h.screen_text())
+            self.assertIn("Сохранить новую ссылку?", h.screen_text())
             self.assertIn("https://t.me/poster", h.screen_text())
 
             await h.callback("adm_edit_confirm")
@@ -393,7 +393,7 @@ class AddressUrlEditTests(unittest.TestCase):
             self.assertIn("🗑", labels)
 
             await h.callback(screen_callback(h, "adm_edit_address_delete:"))
-            self.assertIn("Подтвердите удаление адреса", h.screen_text())
+            self.assertIn("Удалить адрес?", h.screen_text())
             await h.callback("adm_edit_confirm")
             self.assertIn("✅ Адрес места удалён.", h.screen_text())
             self.assertIsNone(place_address(h, place_id))
@@ -413,7 +413,7 @@ class AddressUrlEditTests(unittest.TestCase):
             self.assertIn("🗑", labels)
 
             await h.callback(screen_callback(h, "adm_edit_url_delete:"))
-            self.assertIn("Подтвердите удаление ссылки", h.screen_text())
+            self.assertIn("Удалить ссылку?", h.screen_text())
             await h.callback("adm_edit_confirm")
             self.assertIn("✅ Ссылка места удалена.", h.screen_text())
             self.assertIsNone(place_url(h, place_id))
@@ -437,12 +437,12 @@ class AliasFlowTests(unittest.TestCase):
             await open_edit_menu(h, place_id)
 
             await h.callback(screen_callback(h, "adm_aliases:"))
-            self.assertIn("Пока нет альтернативных названий", h.screen_text())
+            self.assertIn("Других названий пока нет.", h.screen_text())
 
             await h.callback(screen_callback(h, "adm_alias_add:"))
-            self.assertIn("Введите альтернативное название", h.screen_text())
+            self.assertIn("Напишите, как ещё называют", h.screen_text())
             await h.text("Локал")
-            self.assertIn("Подтвердите добавление", h.screen_text())
+            self.assertIn("Добавить альтернативное название", h.screen_text())
 
             await h.callback("adm_edit_confirm")
             self.assertIn("✅ Альтернативное название добавлено.", h.screen_text())
@@ -476,16 +476,14 @@ class AliasFlowTests(unittest.TestCase):
             await h.callback(screen_callback(h, "adm_alias_rename:"))
             self.assertIn("Введите новое название", h.screen_text())
             await h.text("Локал Кофе")
-            self.assertIn("Подтвердите переименование", h.screen_text())
+            self.assertIn("Изменить альтернативное", h.screen_text())
             await h.callback("adm_edit_confirm")
             self.assertIn("✅ Альтернативное название переименовано.", h.screen_text())
             self.assertEqual(alias_names(h, place_id), ["Локал Кофе"])
 
             # удаление
             await h.callback(screen_callback(h, "adm_alias_delete:"))
-            self.assertIn(
-                "Подтвердите удаление альтернативного названия", h.screen_text()
-            )
+            self.assertIn("Удалить альтернативное название?", h.screen_text())
             await h.callback("adm_edit_confirm")
             self.assertIn("✅ Альтернативное название удалено.", h.screen_text())
             self.assertEqual(alias_names(h, place_id), [])
@@ -531,7 +529,7 @@ class EditSecurityTests(unittest.TestCase):
         # а не из данных callback — редактирование откроется для СВОЕГО места,
         # чужое место не затрагивается.
         await h.callback(f"adm_edit_name:{foreign_place}")
-        self.assertIn("Изменение названия", h.screen_text())
+        self.assertIn("Изменить название", h.screen_text())
         self.assertIn("Кофейня «Локал»", h.screen_text())
         self.assertNotIn("Театр «Этаж»", h.screen_text())
         self.assertEqual(canonical_name(h, foreign_place), "Театр «Этаж»")

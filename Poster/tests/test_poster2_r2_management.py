@@ -335,7 +335,7 @@ class TemplateManagementTests(unittest.TestCase):
         self.assertIn("Удалить шаблон?", h.screen_text())
         await h.callback(f"tp_delete_yes:{template_id}")
 
-        self.assertIn("нельзя удалить", h.screen_text())
+        self.assertIn("этому шаблону", h.screen_text())
         self.assertIsNotNone(_personal_row(h, template_id), "шаблон сохранён")
         self.assertEqual(_snapshot_count(h, template_id), 1)
         # Пользователь остался в карточке и может продолжить работу.
@@ -424,15 +424,15 @@ class PlaceManagementTests(unittest.TestCase):
 
         text = h.screen_text()
         self.assertIn("Чужое место", text)
-        self.assertIn("просмотр справочника", text)
+        self.assertIn("можно посмотреть", text)
         self.assertEqual(_callbacks(h, "plm_edit:"), [])
         self.assertIn(
             f"plm_admin_request:{place_id}", _callbacks(h, "plm_admin_request:")
         )
         # Кнопка заявки только объясняет: роль не меняется.
         await h.callback(f"plm_admin_request:{place_id}")
-        self.assertIn("Я админ места", h.screen_text())
-        self.assertIn("не выдаёт полномочия", h.screen_text())
+        self.assertIn("Я администратор места", h.screen_text())
+        self.assertIn("не выдаёт права.", h.screen_text())
 
     @scenario_test
     async def test_superadmin_sees_admins_button(self, h):
@@ -484,9 +484,9 @@ class PlaceManagementTests(unittest.TestCase):
         # Без открытого справочника (сохранённого состояния нет) кнопки
         # устарели: данные не меняются и спиннер не висит.
         await h.callback(f"plm_open:{place_id}")
-        self.assertIn("устарела", _last_alert(h).lower())
+        self.assertIn("больше не работает", _last_alert(h).lower())
         await h.callback(f"plm_edit:{place_id}")
-        self.assertIn("устарела", _last_alert(h).lower())
+        self.assertIn("больше не работает", _last_alert(h).lower())
         self.assertIsNone(load_admin_session(DEFAULT_USER_ID))
 
         # Кнопка списка в фазе карточки тоже устарела: повторный `plm_open`
@@ -494,7 +494,7 @@ class PlaceManagementTests(unittest.TestCase):
         await h.callback("manage_places")
         await h.callback(f"plm_open:{place_id}")
         await h.callback(f"plm_open:{place_id}")
-        self.assertIn("устарела", _last_alert(h).lower())
+        self.assertIn("больше не работает", _last_alert(h).lower())
         state = load_place_session(DEFAULT_USER_ID)
         self.assertIsNotNone(state)
         assert state is not None
@@ -523,7 +523,7 @@ class PlaceManagementTests(unittest.TestCase):
         await h.text("/start")
         await h.callback("manage_places")
         await h.callback("plm_add")
-        self.assertIn("Анонс не запускается", h.screen_text())
+        self.assertIn("анонса сейчас не начнётся.", h.screen_text())
 
         await h.text("Новая площадка R2b")
         await h.callback("pl_create_confirm")
@@ -531,7 +531,7 @@ class PlaceManagementTests(unittest.TestCase):
 
         text = h.screen_text()
         self.assertIn("Новая площадка R2b", text)
-        self.assertIn("✅ Место добавлено", text)
+        self.assertIn("✅ Место и его стандартный шаблон добавлены", text)
         with h.session_factory() as session:
             new_place = session.scalar(select(Place).order_by(Place.id.desc()))
             self.assertIsNotNone(new_place)
@@ -567,7 +567,7 @@ class PlaceManagementTests(unittest.TestCase):
         self.assertEqual(state["phase"], "manage_admin_request")
 
         await h.callback("plm_back")
-        self.assertNotIn("устарела", _last_alert(h).lower())
+        self.assertNotIn("больше не работает", _last_alert(h).lower())
         state = load_place_session(DEFAULT_USER_ID)
         self.assertIsNotNone(state)
         assert state is not None
@@ -589,7 +589,7 @@ class PlaceManagementTests(unittest.TestCase):
         self.assertTrue(state.get("manage_mode"))
 
         await h.callback("plm_back")
-        self.assertNotIn("устарела", _last_alert(h).lower())
+        self.assertNotIn("больше не работает", _last_alert(h).lower())
         state = load_place_session(DEFAULT_USER_ID)
         self.assertIsNotNone(state)
         assert state is not None

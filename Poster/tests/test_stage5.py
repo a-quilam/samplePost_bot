@@ -299,7 +299,7 @@ class MainMenuKeyboardTests(unittest.TestCase):
         self.assertIn("Создать по личному шаблону", text)
         self.assertIn("Мои анонсы", text)
         self.assertIn("Управление", text)
-        self.assertIn("готовый пост в этот чат", text)
+        self.assertIn("готовый анонс придёт в этот чат", text)
 
 
 if __name__ == "__main__":

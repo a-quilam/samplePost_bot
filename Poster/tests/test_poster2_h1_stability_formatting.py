@@ -71,8 +71,8 @@ except Exception as exc:  # noqa: BLE001 — причина попадает в 
     INTEGRATION_IMPORT_ERROR = str(exc)
 
 
-OUTSIDE_TEXT = "Воспользуйтесь кнопками меню"
-OUTSIDE_PHOTO = "Фото добавляются в анонсе"
+OUTSIDE_TEXT = "Выберите действие в меню"
+OUTSIDE_PHOTO = "Фото можно добавить при создании анонса"
 
 # Теги, которые Telegram допускает в parse_mode=HTML (allow-list Poster).
 ALLOWED_TAGS = frozenset(

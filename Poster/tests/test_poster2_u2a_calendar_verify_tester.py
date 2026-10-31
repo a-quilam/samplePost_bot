@@ -620,7 +620,7 @@ class NegativeScenarioTests(unittest.TestCase):
                 "2031-06-15",
             ):
                 await h.callback(f"aw_calday:{prefix}:{value}")
-                self.assertIn("вне допустимого диапазона", _answers(h)[-1])
+                self.assertIn("вне разрешённого периода", _answers(h)[-1])
                 self.assertEqual(_saved(h, today=SUNDAY), before)
             # Месяц вне сетки — устаревшая кнопка, значение не пишется.
             await h.callback(f"aw_calmonth:{prefix}:2031:6")

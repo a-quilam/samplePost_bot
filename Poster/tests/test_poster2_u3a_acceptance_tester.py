@@ -301,7 +301,7 @@ class U3aAcceptanceCase(unittest.TestCase):
         screen = h.screen_text()
         self.assertNotIn("bp_start", datas(h), "кнопка предложения без кирпичиков")
         self.assertNotIn("«📨»", screen, "текст обещает кнопку, которой нет")
-        self.assertIn("Создайте первый", screen)
+        self.assertIn("Можно создать, например", screen)
 
         # Создание из пустого хаба работает.
         await h.callback("bk_create", user_id=OWNER)

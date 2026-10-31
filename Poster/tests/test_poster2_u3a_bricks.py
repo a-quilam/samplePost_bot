@@ -333,7 +333,7 @@ class BrickRowEntryTests(unittest.TestCase):
         self.assertIn(HUB_TITLE, text)
         self.assertNotIn("bp_start", datas)
         self.assertNotIn(EMPTY_HUB_HINT, text, "подсказка про несуществующую кнопку")
-        self.assertIn("Создайте первый", text)
+        self.assertIn("Можно создать, например", text)
         self.assertIn("bk_create", datas)
 
         # Legacy-кнопка при пустом списке: подсказка, хаб, никакого мастера.
@@ -373,7 +373,7 @@ class BrickRowEntryTests(unittest.TestCase):
 
         text = h.screen_text()
         self.assertIn("Мои предложения", text)
-        self.assertIn("«📨» в строке кирпичика", text)
+        self.assertIn("«📨» рядом с нужным кирпичиком", text)
         self.assertNotIn("Предложить кирпичик", text)
         self.assertEqual(_datas(h).count("bp_start"), 0)
 

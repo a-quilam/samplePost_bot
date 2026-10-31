@@ -170,7 +170,7 @@ class ForgedDeliveredCallbackTests(unittest.TestCase):
 
         await h.callback(f"aw_edit:{draft.id + 500}:{draft.revision}")
 
-        self.assertIn("Экран устарел", h.answer_texts()[-1])
+        self.assertIn("Данные изменились", h.answer_texts()[-1])
         self.assertFalse(_callbacks(h, "aw_qmanage"), "чужая правка не открылась")
         self.assertEqual(h.posts(), posts_before)
 
@@ -181,7 +181,7 @@ class ForgedDeliveredCallbackTests(unittest.TestCase):
 
         await h.callback(f"aw_edit:{draft.id}:{draft.revision + 7}")
 
-        self.assertIn("Экран устарел", h.answer_texts()[-1])
+        self.assertIn("Данные изменились", h.answer_texts()[-1])
         self.assertFalse(_callbacks(h, "aw_qmanage"))
         self.assertTrue(_callbacks(h, "aw_edit"))
 
@@ -243,7 +243,7 @@ class ForgedDeliveredCallbackTests(unittest.TestCase):
 
         await h.callback(stale_edit)
 
-        self.assertIn("Экран устарел", h.answer_texts()[-1])
+        self.assertIn("Данные изменились", h.answer_texts()[-1])
         self.assertEqual(h.posts(), posts_before)
         stored = _details(h, draft.id)
         self.assertEqual(stored.publication_status, "sent")

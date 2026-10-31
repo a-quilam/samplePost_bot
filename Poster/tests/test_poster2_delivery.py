@@ -523,10 +523,10 @@ class AnnouncementDeliveryScenarioTests(unittest.TestCase):
 
         screen = h.screen_text()
         self.assertIn("не помещается", screen)
-        self.assertIn("из 1024", screen)
-        self.assertIn("Самые длинные кирпичики", screen)
+        self.assertIn("при лимите 1024", screen)
+        self.assertIn("Самые длинные поля", screen)
         labels = [label for label, _data in h.screen_buttons()]
-        self.assertTrue(any("Изменить другой кирпичик" in label for label in labels))
+        self.assertTrue(any("Изменить другое поле" in label for label in labels))
         self.assertTrue(any("Без фотографий" in label for label in labels))
         # Данные и фото сохранены, ввод не удалён.
         stored = _stored(h, draft.id)
@@ -551,7 +551,7 @@ class AnnouncementDeliveryScenarioTests(unittest.TestCase):
         long_value = "Длинный текст анонса " * 150
         draft = await _to_photo_step(h, content="[main]", value=long_value)
         await h.photo("dropped-photo")
-        self.assertIn("из 1024", h.screen_text())
+        self.assertIn("при лимите 1024", h.screen_text())
 
         await h.callback(_callback(h, "aw_photo_drop"))
         sent = _stored(h, draft.id)

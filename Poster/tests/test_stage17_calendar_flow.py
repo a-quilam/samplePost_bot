@@ -364,13 +364,13 @@ class CalendarInputTests(unittest.TestCase):
             await h.callback(
                 f"aw_calday:{prefix}:{(TODAY - timedelta(days=1)).isoformat()}"
             )
-            self.assertIn("вне допустимого диапазона", _answer_text(h))
+            self.assertIn("вне разрешённого периода", _answer_text(h))
             self.assertIsNone(_saved_values(h, today=TODAY)["day"])
 
             await h.callback(
                 f"aw_calday:{prefix}:{(horizon + timedelta(days=1)).isoformat()}"
             )
-            self.assertIn("вне допустимого диапазона", _answer_text(h))
+            self.assertIn("вне разрешённого периода", _answer_text(h))
             self.assertIsNone(_saved_values(h, today=TODAY)["day"])
 
             # Последний день горизонта — допустим.
@@ -435,7 +435,7 @@ class CalendarInputTests(unittest.TestCase):
 
             await h.callback(stale)
             self.assertEqual(_saved_values(h, today=TODAY), before)
-            self.assertIn("устарел", _answer_text(h).lower())
+            self.assertIn("изменились", _answer_text(h).lower())
 
 
 @unittest.skipIf(

@@ -102,8 +102,8 @@ OWNER_REFERENCE = (
     "@contact"
 )
 
-STALE_PLACES = "устарела"
-STALE_TEMPLATES = "устарела"
+STALE_PLACES = "больше не работает"
+STALE_TEMPLATES = "больше не работает"
 
 
 # --- Помощники ---------------------------------------------------------------
@@ -352,7 +352,7 @@ class TemplateSectionOnlyManagesTests(unittest.TestCase):
         await h.callback(f"tp_delete:{template_id}")
         await h.callback(f"tp_delete_yes:{template_id}")
 
-        self.assertIn("нельзя удалить", h.screen_text())
+        self.assertIn("этому шаблону", h.screen_text())
         self.assertIsNotNone(_personal_row(h, template_id), "шаблон сохранён")
         state = load_template_session(DEFAULT_USER_ID)
         self.assertIsNotNone(state)
@@ -416,7 +416,7 @@ class TemplateSectionOnlyManagesTests(unittest.TestCase):
             session.commit()
 
         await h.callback(f"tp_delete_yes:{template_id}")
-        self.assertIn("Удаление не выполнено", h.screen_text())
+        self.assertIn("Шаблон", h.screen_text())
         row = _personal_row(h, template_id)
         self.assertIsNotNone(row)
         assert row is not None
@@ -545,7 +545,7 @@ class PlaceHandbookTests(unittest.TestCase):
         await h.callback("manage_places")
         await h.callback(f"plm_open:{place_id}")
 
-        self.assertIn("просмотр справочника", h.screen_text())
+        self.assertIn("можно посмотреть", h.screen_text())
         self.assertEqual(_callbacks(h, "plm_edit:"), [])
         self.assertEqual(_callbacks(h, "plm_admins:"), [])
         self.assertIn(
@@ -553,8 +553,8 @@ class PlaceHandbookTests(unittest.TestCase):
         )
         # Заявка только объясняет: роль не меняется, админ-кабинет не открыт.
         await h.callback(f"plm_admin_request:{place_id}")
-        self.assertIn("Я админ места", h.screen_text())
-        self.assertIn("не выдаёт полномочия", h.screen_text())
+        self.assertIn("Я администратор места", h.screen_text())
+        self.assertIn("не выдаёт права.", h.screen_text())
         self.assertIsNone(load_admin_session(DEFAULT_USER_ID))
         with h.session_factory() as session:
             admins = session.scalars(
@@ -699,16 +699,16 @@ class PlaceCreationFromHandbookTests(unittest.TestCase):
         await h.text("/start")
         await h.callback("manage_places")
         await h.callback("plm_add")
-        self.assertIn("Анонс не запускается", h.screen_text())
+        self.assertIn("анонса сейчас не начнётся.", h.screen_text())
 
         await h.text("Новая площадка R2")
-        self.assertIn("Проверьте, нет ли уже этого места", h.screen_text())
+        self.assertIn("Проверьте, нет ли этого места", h.screen_text())
         await h.callback("pl_create_confirm")
         await h.text("Москва")
 
         text = h.screen_text()
         self.assertIn("Новая площадка R2", text)
-        self.assertIn("✅ Место добавлено", text)
+        self.assertIn("✅ Место и его стандартный шаблон добавлены", text)
         self.assertIsNone(h.dialog_state(name=CONVERSATION_NAME))
         self.assertEqual(_draft_count(h), 0, "создание не начинает анонс")
         self.assertIsNone(load_admin_session(DEFAULT_USER_ID))
@@ -741,7 +741,7 @@ class PlaceCreationFromHandbookTests(unittest.TestCase):
         self.assertIn(
             f"plm_admin_request:{place_id}", _callbacks(h, "plm_admin_request:")
         )
-        self.assertIn("просмотр справочника", h.screen_text())
+        self.assertIn("можно посмотреть", h.screen_text())
 
     @scenario_test
     async def test_pick_place_tap_still_starts_announcement(self, h):

@@ -146,7 +146,7 @@ class BricksUiTests(unittest.TestCase):
         self.assertIn("У вас пока нет личных кирпичиков", h.screen_text())
         self.assertIn(("➕ Создать кирпичик", "bk_create"), h.screen_buttons())
         await h.callback("main_menu")
-        self.assertEqual(h.screen_text(), "Здравствуйте! 👋\n\nВыберите действие:")
+        self.assertEqual(h.screen_text(), "Здравствуйте! 👋\n\nЧто хотите сделать?")
 
         await h.text("/bricks")
         self.assertIn("Мои кирпичики", h.screen_text())
@@ -161,7 +161,7 @@ class BricksUiTests(unittest.TestCase):
         title_message_id = title_update.message.message_id
         self.assertIn("[ведущий_мероприятия]", h.screen_text())
         await h.callback("bk_accept_code")
-        self.assertIn("Описание для автора анонса", h.screen_text())
+        self.assertIn("Подсказка для автора анонса", h.screen_text())
         await h.callback("bk_skip_description")
         type_callbacks = [
             data
@@ -300,7 +300,7 @@ class BricksUiTests(unittest.TestCase):
         await h.callback("bk_change")
         self.assertIn("Как назвать кирпичик", h.screen_text())
         await h.text("Стоимость билета")
-        self.assertIn("Техническое обозначение", h.screen_text())
+        self.assertIn("Код кирпичика", h.screen_text())
         await h.callback("bk_accept_code")
         await h.callback("bk_skip_description")
         self.assertIn("Выберите тип", h.screen_text())
@@ -355,17 +355,17 @@ class BricksUiTests(unittest.TestCase):
         brick_id = brick.id
         revision = brick.revision
         await h.callback(f"bk_open:{brick_id}")
-        self.assertIn("Это только определение поля", h.screen_text())
+        self.assertIn("Здесь вы настраиваете поле", h.screen_text())
         self.assertIn(("📦 В архив", "bk_archive"), h.screen_buttons())
         await h.callback("bk_edit")
-        self.assertIn("Тип после создания не меняется", h.screen_text())
+        self.assertIn("Тип изменить нельзя", h.screen_text())
         self.assertNotIn("bk_type:short_text", [data for _, data in h.screen_buttons()])
         await h.callback("bk_edit_title")
         await h.text("Стоимость билета")
         self.assertIn("Изменить кирпичик", h.screen_text())
         await h.callback("bk_preview")
         await h.callback("bk_cancel")
-        self.assertIn("Изменения отменены", h.screen_text())
+        self.assertIn("Редактирование отменено", h.screen_text())
         unchanged = self.personal_bricks(h)[0]
         self.assertEqual(unchanged.title, "Цена")
         self.assertEqual(unchanged.revision, revision)
@@ -460,11 +460,11 @@ class BricksUiTests(unittest.TestCase):
         self.assertEqual(archived.status, "archived")
         archived_revision = archived.revision
         await h.callback("bk_archive_confirm")
-        self.assertIn("устарела", self.answer_text(h))
+        self.assertIn("больше не работает", self.answer_text(h))
         self.assertEqual(self.personal_bricks(h)[0].revision, archived_revision)
 
         await h.callback("bk_back")
-        self.assertIn("В активном списке пока нет кирпичиков", h.screen_text())
+        self.assertIn("Активных кирпичиков пока нет", h.screen_text())
         self.assertIn(("🗄 Архив (1)", "bk_archlist"), h.screen_buttons())
         await h.callback("bk_create")
         await h.text("Новый с тем же кодом")
@@ -498,7 +498,7 @@ class BricksUiTests(unittest.TestCase):
         self.assertIn("Проверьте кирпичик", h.screen_text())
         await h.callback("bk_cancel")
         self.assertIn("Создание отменено", h.screen_text())
-        self.assertIn("В базе ничего не сохранено", h.screen_text())
+        self.assertIn("Кирпичик не сохранён", h.screen_text())
         self.assertEqual(self.brick_rows(h), [])
         self.assertIn(title_update.message.message_id, h.deleted_ids())
         self.assertIn(code_update.message.message_id, h.deleted_ids())
@@ -515,7 +515,7 @@ class BricksUiTests(unittest.TestCase):
         self.assertIn("[после_рестарта]", h.screen_text())
         await h.restart()
         await h.text("/bricks")
-        self.assertIn("Техническое обозначение", h.screen_text())
+        self.assertIn("Код кирпичика", h.screen_text())
         self.assertIn("[после_рестарта]", h.screen_text())
         await h.callback("bk_accept_code")
         await h.callback("bk_skip_description")
@@ -530,11 +530,13 @@ class BricksUiTests(unittest.TestCase):
         """S5 п.5: описание — инструкция автору, видимая на вопросе."""
         await h.text("/bricks")
         await h.callback("bk_create")
-        self.assertIn("Название видно в списках", h.screen_text())
+        self.assertIn("видно в списках", h.screen_text())
         await h.text("Ведущий")
-        self.assertIn("вставка <code>[код]</code>", h.screen_text())
+        self.assertIn(
+            "В шаблоне этот код пишется в квадратных скобках", h.screen_text()
+        )
         await h.text("ведущий")
-        self.assertIn("Описание для автора анонса", h.screen_text())
+        self.assertIn("Подсказка для автора анонса", h.screen_text())
         self.assertIn(("⏭ Без описания", "bk_skip_description"), h.screen_buttons())
         await h.text("Имя ведущего & <без должности>")
         self.assertIn("Выберите тип", h.screen_text())
@@ -581,17 +583,17 @@ class BricksUiTests(unittest.TestCase):
         await h.callback("main_menu")
         self.assertIsNone(load_brick_session(h.user_id))
         await h.text("случайный текст")
-        self.assertIn("Воспользуйтесь кнопками меню", h.screen_text())
+        self.assertIn("Выберите действие в меню", h.screen_text())
         self.assertEqual(self.brick_rows(h), [])
 
         await h.text("/bricks")
         await h.callback("bk_create")
         await h.text("Черновик отмены")
         await h.text("/cancel")
-        self.assertIn("кирпичика отменено", h.screen_text())
+        self.assertIn("Работа с кирпичиком отменена", h.screen_text())
         self.assertIsNone(load_brick_session(h.user_id))
         await h.text("ещё текст")
-        self.assertIn("Воспользуйтесь кнопками меню", h.screen_text())
+        self.assertIn("Выберите действие в меню", h.screen_text())
         self.assertEqual(self.brick_rows(h), [])
 
     @scenario_test
@@ -618,13 +620,13 @@ class BricksUiTests(unittest.TestCase):
 
         await h.callback("bk_create")
         await h.text("Кирпичик перед постом")
-        self.assertIn("Техническое обозначение", h.screen_text())
-        # S5: кнопка `create_post` устарела — легаси-мастер удалён. Внутри
+        self.assertIn("Код кирпичика", h.screen_text())
+        # S5: кнопка `create_post` больше не работает — легаси-мастер удалён. Внутри
         # сценария кирпичика она не запускает мастер и не сбрасывает
         # незавершённое создание кирпичика.
         await h.callback("create_post")
         self.assertNotIn("Шаг 1", h.screen_text())
-        self.assertIn("Техническое обозначение", h.screen_text())
+        self.assertIn("Код кирпичика", h.screen_text())
         self.assertIsNone(h.dialog_state())
         state = load_brick_session(h.user_id)
         assert state is not None
@@ -672,12 +674,12 @@ class BricksUiTests(unittest.TestCase):
         previous_text = h.screen_text()
         await h.callback("bk_save")
         self.assertEqual(h.screen_text(), previous_text)
-        self.assertIn("устарела", self.answer_text(h))
+        self.assertIn("больше не работает", self.answer_text(h))
         self.assertEqual(len(self.personal_bricks(h)), 1)
         await h.callback("bk_open:9999")
         self.assertIn("Кирпичик не найден", h.screen_text())
         await h.callback("bk_unknown")
-        self.assertIn("устарела", self.answer_text(h))
+        self.assertIn("больше не работает", self.answer_text(h))
         self.assertEqual(len(self.personal_bricks(h)), 1)
 
     @scenario_test
@@ -697,7 +699,7 @@ class BricksUiTests(unittest.TestCase):
             self.assertLogs("handlers.bricks", level="ERROR"),
         ):
             await h.callback("bk_save")
-        self.assertIn("Не удалось сохранить кирпичик", h.screen_text())
+        self.assertIn("кирпичик не сохранён", h.screen_text())
         self.assertIn("Проверьте кирпичик", h.screen_text())
         self.assertEqual(self.brick_rows(h), [])
         state = load_brick_session(h.user_id)

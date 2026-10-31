@@ -73,11 +73,11 @@ SUPERADMIN_TG = 8_810_100
 ADMIN_TG = 8_810_200
 OUTSIDER_TG = 8_810_300
 
-INTERNAL_FRAGMENT = "Произошла внутренняя ошибка"
-STALE_FRAGMENT = "Кнопка устарела"
-ALIAS_LOST_FRAGMENT = "Название для добавления не сохранилось"
-CREATE_LOST_FRAGMENT = "Создание шаблона не подтверждено"
-MENU_FRAGMENT = "Выберите действие"
+INTERNAL_FRAGMENT = "Что-то пошло не так"
+STALE_FRAGMENT = "больше не работает"
+ALIAS_LOST_FRAGMENT = "Новое название не сохранилось"
+CREATE_LOST_FRAGMENT = "Вы не подтвердили создание шаблона"
+MENU_FRAGMENT = "Что хотите сделать?"
 
 _MISSING = object()
 
@@ -327,7 +327,7 @@ class AliasWarningWithoutPendingAliasTests(BackChecks):
         screen = h.screen_text()
         self.assertIn(ALIAS_LOST_FRAGMENT, screen, label)
         self.assertIn("📍 Дом культуры", screen, label)
-        self.assertNotIn("Похожее название у другого места", screen, label)
+        self.assertNotIn("У другого места есть похожее название", screen, label)
         labels = [text for text, _data in h.screen_buttons()]
         self.assertIn("🔤 Выбрать альтернативное название", labels, label)
         self.assertIn("◀️ Вернуться к списку", labels, label)
@@ -396,7 +396,7 @@ class AliasWarningWithoutPendingAliasTests(BackChecks):
             await h.text("/places")
             self.assert_no_failure(h, before, "alias_warning с валидным названием")
             screen = h.screen_text()
-            self.assertIn("Похожее название у другого места", screen)
+            self.assertIn("У другого места есть похожее название", screen)
             self.assertIn("Дом культуры имени Ивана", screen)
             self.assertNotIn(ALIAS_LOST_FRAGMENT, screen)
             labels = [text for text, _data in h.screen_buttons()]
@@ -596,7 +596,7 @@ class AdminBackMatrixTests(BackChecks):
                 h, f"adm_bconflicts:{place_id}", target="⚔️ Конфликты кодов"
             )
             await self.click_live_back(
-                h, f"adm_bconflict:{conflict_id}", target="Задача разрешения конфликта"
+                h, f"adm_bconflict:{conflict_id}", target="Код занят двумя кирпичиками"
             )
             await self.click_live_back(
                 h, f"adm_bconflicts:{place_id}", target="⚔️ Конфликты кодов"
@@ -625,10 +625,10 @@ class AdminBackMatrixTests(BackChecks):
             await self.click_live_back(
                 h,
                 f"adm_bconflict_rename:{conflict_id}",
-                target="Переименование местного кирпичика",
+                target="Изменить код местного кирпичика",
             )
             await self.click_live_back(
-                h, f"adm_bconflict:{conflict_id}", target="Задача разрешения конфликта"
+                h, f"adm_bconflict:{conflict_id}", target="Код занят двумя кирпичиками"
             )
             await self.click_live_back(
                 h,
@@ -636,7 +636,7 @@ class AdminBackMatrixTests(BackChecks):
                 target="Переключиться на глобальный кирпичик?",
             )
             await self.click_live_back(
-                h, f"adm_bconflict:{conflict_id}", target="Задача разрешения конфликта"
+                h, f"adm_bconflict:{conflict_id}", target="Код занят двумя кирпичиками"
             )
 
     @scenario_test
@@ -657,7 +657,7 @@ class AdminBackMatrixTests(BackChecks):
             for data in ("adm_places", f"adm_bconflicts:{place_id}"):
                 with self.subTest(data=data):
                     await self.click(h, data)
-                    self.assertNotIn("Задача разрешения конфликта", h.screen_text())
+                    self.assertNotIn("Код занят двумя кирпичиками", h.screen_text())
                     self.assertNotIn("⚔️ Конфликты кодов", h.screen_text())
                     self.assertIn(
                         "Раздел доступен только администраторам", h.screen_text()
@@ -816,7 +816,7 @@ class WizardBackMatrixTests(BackChecks):
             self.assert_no_failure(h, before, "aw_qback после рестарта")
             self.assertGreaterEqual(len(h.answers()) - before[2], 1)
             alert = h.answer_texts()[-1]
-            self.assertIn("после перезапуска", alert)
+            self.assertIn("После перезапуска", alert)
 
             await self.click(h, "main_menu")
             self.assertIn(MENU_FRAGMENT, h.screen_text())
@@ -856,7 +856,7 @@ class StaleScreenMatrixTests(BackChecks):
             before = mark(h)
             await h.callback("pl_back")
             self.assert_no_failure(h, before, "pl_back после удаления места")
-            self.assertIn("Место не существует или было удалено", h.screen_text())
+            self.assertIn("Место не найдено. Возможно, его удалили.", h.screen_text())
             await self.click(h, "pl_hub")
             self.assertIn("📍 Места", h.screen_text())
 

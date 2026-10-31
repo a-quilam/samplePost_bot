@@ -14,7 +14,7 @@ U3a №8: независимые проверки тестировщика — �
    подсказка, экран остаётся хабом, предложение не создаётся.
 5. При пустом списке кирпичиков предложения нет и текст не обещает кнопку,
    которой нет.
-6. Пустой список «Мои предложения» отправляет к кнопке в строке кирпичика.
+6. Пустой список «Мои предложения» отправляет к кнопке в рядом с нужным кирпичиком.
 """
 
 from __future__ import annotations
@@ -198,7 +198,7 @@ class HubRowOnlyTesterCase(unittest.TestCase):
         screen = h.screen_text()
         self.assertNotIn("bp_start", datas(h))
         self.assertNotIn("«📨» в его строке", screen)
-        self.assertIn("Создайте первый", screen)
+        self.assertIn("Можно создать, например", screen)
 
         await h.callback("bp_start", user_id=OWNER)
         self.assertTrue(alerts(h))
@@ -213,7 +213,7 @@ class HubRowOnlyTesterCase(unittest.TestCase):
         screen = h.screen_text()
         self.assertIn("Мои предложения", screen)
         self.assertIn("«📨»", screen)
-        self.assertIn("строке кирпичика", screen)
+        self.assertIn("рядом с нужным кирпичиком", screen)
         self.assertNotIn("Предложить кирпичик", screen)
 
 

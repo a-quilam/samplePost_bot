@@ -650,7 +650,7 @@ class CatalogContractTests(unittest.TestCase):
         )
         leftovers = [
             text
-            for text in ("📷 Фотографии анонса", "Значение пока не задано.")
+            for text in ("📷 Фотографии анонса", "Поле пока не заполнено.")
             if text in sources
         ]
         if leftovers:

@@ -145,7 +145,7 @@ class DoubleCallbackTests(unittest.TestCase):
         self.assertEqual(h.posts(), posts_after_first, "второго анонса нет")
         after = _details(h, draft_id)
         self.assertEqual(after.delivered_message_ids, version_ids)
-        self.assertIn("Экран устарел", h.answer_texts()[-1])
+        self.assertIn("Данные изменились", h.answer_texts()[-1])
         self.assertIn("✅ Анонс готов.", h.screen_text())
 
     @scenario_test
@@ -161,7 +161,7 @@ class DoubleCallbackTests(unittest.TestCase):
 
         self.assertEqual(h.posts(), posts_after_first)
         await h.callback("aw_photo_none:999999:1")
-        self.assertIn("Экран устарел", h.answer_texts()[-1])
+        self.assertIn("Данные изменились", h.answer_texts()[-1])
         self.assertEqual(len(h.posts()), len(posts_after_first))
         self.assertIsNotNone(_details(h, draft_id).publication_status)
 
@@ -174,7 +174,7 @@ class DoubleCallbackTests(unittest.TestCase):
 
         await h.callback(f"aw_photo_back:{draft_id}:{stored.revision + 5}")
 
-        self.assertIn("Экран устарел", h.answer_texts()[-1])
+        self.assertIn("Данные изменились", h.answer_texts()[-1])
         self.assertEqual(h.posts(), posts_before, "подделанная кнопка не отправляет")
         after = _details(h, draft_id)
         self.assertEqual(after.revision, stored.revision)
